@@ -1,25 +1,30 @@
 # Burokku
 
-A pnpm monorepo for a Rust library and its TypeScript binding.
+A Rust workspace containing an asynchronous JavaScript runtime and the Burokku application.
 
 ## Layout
 
-- `crates/burokku` — Rust source compiled to WebAssembly with `wasm-bindgen`
-- `packages/binding` — TypeScript API built with `tsdown`
-- `example` — runnable TypeScript consumer
+- `crates/runtime` — rquickjs-based JavaScript runtime with Tokio integration
+- `crates/burokku` — application that runs JavaScript through the runtime
 
 ## Getting started
 
 ```sh
-pnpm install
-pnpm build
-pnpm dev
+cargo build --workspace
+cargo run -p burokku
 ```
 
-The example prints a greeting and the result of an addition implemented in Rust.
+The application prints a greeting and the result of a JavaScript calculation. Pass a
+JavaScript file as the first argument to run it instead:
+
+```sh
+cargo run -p burokku -- ./script.js
+```
 
 Run checks with:
 
 ```sh
-pnpm test
+cargo test --workspace
 ```
+
+The same workflows are available through `just build`, `just run`, and `just test`.

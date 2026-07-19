@@ -2,14 +2,9 @@
 name = "burokku"
 version = "0.1.0"
 edition = "2021"
-description = "Core Rust library for the burokku TypeScript binding"
+description = "Burokku JavaScript runtime application"
 license = "MIT"
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
 [dependencies]
-wasm-bindgen = "0.2"
-
-[dev-dependencies]
-
+runtime = { path = "../runtime" }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }

@@ -1,0 +1,13 @@
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2021"
+description = "An asynchronous JavaScript runtime built on rquickjs and Tokio"
+license = "MIT"
+
+[dependencies]
+rquickjs = { version = "0.9", features = ["futures", "parallel"] }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

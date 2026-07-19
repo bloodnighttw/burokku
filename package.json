@@ -3,10 +3,9 @@
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "build": "pnpm --filter @burokku/binding build",
-    "build:wasm": "pnpm --filter @burokku/binding build:wasm",
-    "dev": "pnpm --filter @burokku/example dev",
-    "test": "cargo test --workspace && pnpm --filter @burokku/binding typecheck",
-    "clean": "pnpm --filter @burokku/binding clean"
+    "build": "cargo build --workspace",
+    "dev": "cargo run -p burokku",
+    "test": "cargo test --workspace",
+    "clean": "cargo clean"
   }
 }
