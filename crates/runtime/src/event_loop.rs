@@ -1,6 +1,9 @@
 use crate::{host, task::Macrotask, Result};
 use rquickjs::{AsyncContext, Ctx, JsLifetime, Object};
-use std::sync::{atomic::AtomicU32, Arc};
+use std::{
+    collections::HashSet,
+    sync::{atomic::AtomicU32, Arc, Mutex},
+};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::{sleep, Duration};
 
@@ -15,6 +18,7 @@ pub(crate) struct TimerTask {
 pub(crate) struct EventLoopState {
     pub(crate) tasks: tokio::sync::mpsc::UnboundedSender<TimerTask>,
     pub(crate) next_timer_id: Arc<AtomicU32>,
+    pub(crate) cancelled_timers: Arc<Mutex<HashSet<u32>>>,
 }
 
 // This state contains no JavaScript values; it is safe to use for every
@@ -28,6 +32,7 @@ pub(crate) async fn install(context: &AsyncContext) -> Result<()> {
     let event_loop = EventLoopState {
         tasks: macrotask_sender,
         next_timer_id: Arc::new(AtomicU32::new(1)),
+        cancelled_timers: Arc::new(Mutex::new(HashSet::new())),
     };
 
     context
@@ -54,6 +59,16 @@ async fn run_macrotasks<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<Tim
         .expect("timer registry is installed before the event loop starts");
 
     while let Some(task) = tasks.recv().await {
+        if context.userdata::<EventLoopState>().is_some_and(|state| {
+            state
+                .cancelled_timers
+                .lock()
+                .expect("cancelled timer registry is not poisoned")
+                .contains(&task.id)
+        }) {
+            let _ = timers.remove(task.id);
+            continue;
+        }
         if let Ok(callback) = timers.get::<_, rquickjs::Function>(task.id) {
             if !task.repeats {
                 let _ = timers.remove(task.id);

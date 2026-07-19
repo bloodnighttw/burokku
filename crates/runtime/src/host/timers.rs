@@ -13,6 +13,24 @@ pub(crate) fn install<'js>(context: &Ctx<'js>) -> Result<()> {
     context
         .globals()
         .set("setInterval", Func::from(set_interval))?;
+    context
+        .globals()
+        .set("clearTimeout", Func::from(clear_timer))?;
+    context
+        .globals()
+        .set("clearInterval", Func::from(clear_timer))?;
+    Ok(())
+}
+
+fn clear_timer<'js>(context: Ctx<'js>, id: u32) -> Result<()> {
+    let state = event_loop::state(&context)?;
+    state
+        .cancelled_timers
+        .lock()
+        .expect("cancelled timer registry is not poisoned")
+        .insert(id);
+    let timers: Object = context.globals().get(event_loop::TIMER_REGISTRY)?;
+    timers.remove(id)?;
     Ok(())
 }
 
@@ -27,6 +45,14 @@ fn set_timeout<'js>(context: Ctx<'js>, callback: Function<'js>, delay: Option<u6
 
     context.spawn(Macrotask::new(async move {
         sleep(Duration::from_millis(delay)).await;
+        if state
+            .cancelled_timers
+            .lock()
+            .expect("cancelled timer registry is not poisoned")
+            .remove(&id)
+        {
+            return;
+        }
         let _ = state.tasks.send(TimerTask { id, repeats: false });
     }));
 
@@ -49,6 +75,14 @@ fn set_interval<'js>(
     context.spawn(Macrotask::new(async move {
         loop {
             sleep(Duration::from_millis(delay)).await;
+            if state
+                .cancelled_timers
+                .lock()
+                .expect("cancelled timer registry is not poisoned")
+                .remove(&id)
+            {
+                break;
+            }
             if state.tasks.send(TimerTask { id, repeats: true }).is_err() {
                 break;
             }

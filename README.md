@@ -6,7 +6,9 @@ A Rust workspace containing an asynchronous JavaScript runtime and the Burokku a
 
 - `crates/runtime` — rquickjs-based JavaScript runtime with Tokio integration
 - `crates/render` — surface-backed WebGPU drawing library for boxes and text
-- `crates/burokku` — application that runs JavaScript through the runtime
+- `crates/burokku` — Taffy-based UI layout and application host
+- `packages/ui` — host protocol and React renderer
+- `example/react` — React + Vite example compiled for the QuickJS host
 
 ## Drawing
 
@@ -81,10 +83,32 @@ JavaScript file as the first argument to run it instead:
 cargo run -p burokku -- ./script.js
 ```
 
+## React UI
+
+The React API maps `div`, `button`, `span`, and `text` to Burokku UI nodes. Set
+`jsxImportSource` to `@burokku/ui` so TypeScript checks styles against the
+Burokku API. React commits a serializable tree to the Rust host; Rust measures
+text with `TextSystem`, computes the full tree with Taffy, then converts it into
+`render::Canvas` drawing commands.
+
+Build and run the Vite example with:
+
+```sh
+pnpm install
+pnpm --filter @burokku/example-react build
+cargo run -p burokku -- example/react/dist/app.js
+```
+
+This opens an `800x600` native window and presents the React UI through WebGPU.
+
+The current bridge covers rendering and layout. Window/input event dispatch is
+not part of this React API yet.
+
 Run checks with:
 
 ```sh
-cargo test --workspace
+just test
 ```
 
-The same workflows are available through `just build`, `just run`, and `just test`.
+`just test` runs the Rust workspace tests, React renderer tests and type checks,
+builds the Vite example, and executes that bundle through QuickJS.

@@ -1,5 +1,5 @@
 use crate::{event_loop, task::Microtask, Result};
-use rquickjs::{AsyncContext, AsyncRuntime, FromJs, Promise};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, FromJs, Promise, ThrowResultExt};
 use tokio::task::JoinHandle;
 
 /// A JavaScript execution context that integrates with Tokio.
@@ -17,10 +17,19 @@ impl Runtime {
     ///
     /// This must be called from inside a running Tokio runtime.
     pub async fn new() -> Result<Self> {
+        Self::new_with_host(|_| Ok(())).await
+    }
+
+    /// Create a context and install application-specific host functions.
+    pub async fn new_with_host<F>(installer: F) -> Result<Self>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+    {
         let quickjs = AsyncRuntime::new()?;
         let context = AsyncContext::full(&quickjs).await?;
 
         event_loop::install(&context).await?;
+        context.with(move |ctx| installer(&ctx)).await?;
 
         let driver = tokio::spawn(context.runtime().drive());
 
@@ -36,7 +45,17 @@ impl Runtime {
         for<'js> T: FromJs<'js> + Send,
     {
         let source = source.into();
-        self.context.with(move |ctx| ctx.eval(source)).await
+        self.context
+            .with(move |ctx| {
+                ctx.eval(source)
+                    .catch(&ctx)
+                    .map_err(|error| {
+                        eprintln!("JavaScript evaluation failed: {error}");
+                        error
+                    })
+                    .throw(&ctx)
+            })
+            .await
     }
 
     /// Evaluate a JavaScript expression that returns a promise.

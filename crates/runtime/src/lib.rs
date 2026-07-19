@@ -8,6 +8,7 @@ mod task;
 #[cfg(test)]
 mod tests;
 
+pub use rquickjs;
 pub use rquickjs::Error;
 pub use runtime::Runtime;
 
