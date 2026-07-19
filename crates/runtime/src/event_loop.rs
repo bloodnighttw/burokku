@@ -6,9 +6,14 @@ use tokio::time::{sleep, Duration};
 
 pub(crate) const TIMER_REGISTRY: &str = "__burokku_timers";
 
+pub(crate) struct TimerTask {
+    pub(crate) id: u32,
+    pub(crate) repeats: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct EventLoopState {
-    pub(crate) tasks: tokio::sync::mpsc::UnboundedSender<u32>,
+    pub(crate) tasks: tokio::sync::mpsc::UnboundedSender<TimerTask>,
     pub(crate) next_timer_id: Arc<AtomicU32>,
 }
 
@@ -42,15 +47,17 @@ pub(crate) async fn install(context: &AsyncContext) -> Result<()> {
         .await
 }
 
-async fn run_macrotasks<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<u32>) {
+async fn run_macrotasks<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<TimerTask>) {
     let timers: Object = context
         .globals()
         .get(TIMER_REGISTRY)
         .expect("timer registry is installed before the event loop starts");
 
-    while let Some(id) = tasks.recv().await {
-        if let Ok(callback) = timers.get::<_, rquickjs::Function>(id) {
-            let _ = timers.remove(id);
+    while let Some(task) = tasks.recv().await {
+        if let Ok(callback) = timers.get::<_, rquickjs::Function>(task.id) {
+            if !task.repeats {
+                let _ = timers.remove(task.id);
+            }
             let _ = callback.call::<_, ()>(());
         }
 
