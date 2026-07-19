@@ -2,9 +2,17 @@ use runtime::Runtime;
 
 const DEFAULT_SCRIPT: &str = r#"
 (async () => {
-    await Promise.resolve();
-    return `Hello, Burokku! ${20 + 22}`;
-})()
+    console.log("A");
+
+    setTimeout(() => console.log("B"), 0);
+
+    Promise.resolve().then(() => console.log("C"));
+
+    console.log("D");
+
+    // Keep the top-level promise alive long enough for the timer macrotask.
+    await new Promise(resolve => setTimeout(resolve, 0));
+})();
 "#;
 
 #[tokio::main]
@@ -19,8 +27,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let runtime = Runtime::new().await?;
-    let result: String = runtime.eval_promise(source).await?;
-    println!("{result}");
+    runtime.eval_promise::<()>(source).await?;
 
     Ok(())
 }
