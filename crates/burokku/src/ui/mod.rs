@@ -64,13 +64,28 @@ mod tests {
                 .unwrap();
         }
         let mut text_system = render::TextSystem::new();
-        let layout =
+        let mut layout =
             UiLayout::compute(&document, 800.0, 600.0, &mut text_system).expect("Taffy layout");
         let size = layout.root_size().expect("root layout");
         assert_eq!(size.width, 800.0);
         assert_eq!(size.height, 600.0);
         let canvas = layout.paint(render::Color::WHITE).expect("paint canvas");
         assert_eq!(canvas.commands().len(), 4);
+
+        layout
+            .relayout(640.0, 480.0, &mut text_system)
+            .expect("reuse Taffy tree for resize");
+        let resized = layout.root_size().expect("resized root layout");
+        assert_eq!(resized.width, 640.0);
+        assert_eq!(resized.height, 480.0);
+        assert_eq!(
+            layout
+                .paint(render::Color::WHITE)
+                .expect("paint resized canvas")
+                .commands()
+                .len(),
+            4
+        );
 
         document
             .apply_mutation(UiMutation::Remove {

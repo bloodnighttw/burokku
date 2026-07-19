@@ -35,12 +35,6 @@ impl SurfaceState {
             .find(wgpu::TextureFormat::is_srgb)
             .or_else(|| capabilities.formats.first().copied())
             .ok_or(RenderError::NoSurfaceFormat)?;
-        let present_mode = capabilities
-            .present_modes
-            .iter()
-            .copied()
-            .find(|mode| *mode == wgpu::PresentMode::Fifo)
-            .unwrap_or(capabilities.present_modes[0]);
         let alpha_mode = capabilities
             .alpha_modes
             .first()
@@ -51,10 +45,10 @@ impl SurfaceState {
             format,
             width: size.width,
             height: size.height,
-            present_mode,
+            present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(device, &config);
         Ok(Self { config })

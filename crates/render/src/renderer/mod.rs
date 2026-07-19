@@ -107,11 +107,25 @@ impl Renderer {
         canvas: &Canvas,
         text_system: &mut TextSystem,
     ) -> Result<(), RenderError> {
+        self.render_with_pre_present(surface, canvas, text_system, || {})
+    }
+
+    /// Draws one frame and notifies the window system immediately before it is
+    /// presented. This keeps redraw scheduling synchronized with compositors
+    /// that use presentation notifications.
+    pub fn render_with_pre_present(
+        &mut self,
+        surface: &wgpu::Surface<'_>,
+        canvas: &Canvas,
+        text_system: &mut TextSystem,
+        on_pre_present: impl FnOnce(),
+    ) -> Result<(), RenderError> {
         let frame = self.surface.acquire(surface)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.draw_to_view(&view, canvas, self.surface.size(), text_system)?;
+        on_pre_present();
         frame.present();
         Ok(())
     }
@@ -123,8 +137,7 @@ impl Renderer {
         size: SurfaceSize,
         text_system: &mut TextSystem,
     ) -> Result<(), RenderError> {
-        let prepared_shapes = self
-            .shapes
+        self.shapes
             .prepare(&self.gpu.device, &self.gpu.queue, canvas, size);
         self.text
             .prepare(&self.gpu.device, &self.gpu.queue, canvas, size, text_system)?;
@@ -152,7 +165,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.shapes.draw(&prepared_shapes, &mut pass);
+            self.shapes.draw(&mut pass);
             self.text.draw(&mut pass)?;
         }
         self.gpu.queue.submit([encoder.finish()]);
@@ -247,6 +260,14 @@ mod tests {
             .pixels
             .chunks_exact(4)
             .any(|pixel| pixel[0] < 220 && pixel[3] > 0));
+        let cached_text_image = readback::draw_to_image(
+            &mut renderer,
+            &text_canvas,
+            SurfaceSize::new(160, 48),
+            &mut text_system,
+        )
+        .expect("cached text test render");
+        assert_eq!(cached_text_image.pixels, text_image.pixels);
 
         drop(adapter);
     }

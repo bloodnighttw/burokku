@@ -39,7 +39,11 @@ struct UiApplication {
     surface: Option<wgpu::Surface<'static>>,
     renderer: Option<Renderer>,
     text_system: TextSystem,
+    layout: Option<UiLayout>,
     canvas: Canvas,
+    pending_surface_size: Option<PhysicalSize<u32>>,
+    canvas_dirty: bool,
+    perf_logging: bool,
     frame_number: u64,
     error: Option<String>,
 }
@@ -56,7 +60,11 @@ impl UiApplication {
             surface: None,
             renderer: None,
             text_system: TextSystem::new(),
+            layout: None,
             canvas: Canvas::new(),
+            pending_surface_size: None,
+            canvas_dirty: false,
+            perf_logging: std::env::var_os("BUROKKU_PERF").is_some(),
             frame_number: 0,
             error: None,
         }
@@ -82,10 +90,12 @@ impl UiApplication {
             &surface,
             SurfaceSize::new(size.width, size.height),
         ))?;
-        println!(
-            "[Burokku perf] WebGPU initialization: {:.3} ms",
-            renderer_started_at.elapsed().as_secs_f64() * 1_000.0
-        );
+        if self.perf_logging {
+            println!(
+                "[Burokku perf] WebGPU initialization: {:.3} ms",
+                renderer_started_at.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
 
         self.rebuild_canvas(size, window.scale_factor(), "initial")?;
         self.renderer = Some(renderer);
@@ -104,8 +114,11 @@ impl UiApplication {
     ) -> Result<(), Box<dyn Error>> {
         let scale_factor = scale_factor as f32;
         let layout_started_at = Instant::now();
-        let layout = UiLayout::compute(
-            &self.document,
+        if self.layout.is_none() {
+            self.layout = Some(UiLayout::new(&self.document)?);
+        }
+        let layout = self.layout.as_mut().expect("layout was initialized");
+        layout.relayout(
             size.width as f32 / scale_factor,
             size.height as f32 / scale_factor,
             &mut self.text_system,
@@ -114,48 +127,85 @@ impl UiApplication {
         let paint_started_at = Instant::now();
         self.canvas = layout.paint_with_scale(Color::WHITE, scale_factor)?;
         let paint_duration = paint_started_at.elapsed();
-        println!(
-            "[Burokku perf] UI commit #{} ({reason}): layout {:.3} ms, paint {:.3} ms, {} commands",
-            self.document.commit_id,
-            layout_duration.as_secs_f64() * 1_000.0,
-            paint_duration.as_secs_f64() * 1_000.0,
-            self.canvas.commands().len()
-        );
+        if self.perf_logging {
+            println!(
+                "[Burokku perf] UI commit #{} ({reason}): layout {:.3} ms, paint {:.3} ms, {} commands",
+                self.document.commit_id,
+                layout_duration.as_secs_f64() * 1_000.0,
+                paint_duration.as_secs_f64() * 1_000.0,
+                self.canvas.commands().len()
+            );
+        }
         Ok(())
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), Box<dyn Error>> {
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
-        if let (Some(renderer), Some(surface)) = (&mut self.renderer, &self.surface) {
-            renderer.resize(surface, SurfaceSize::new(size.width, size.height));
-        }
-        let scale_factor = self
-            .window
-            .as_ref()
-            .map_or(1.0, |window| window.scale_factor());
-        self.rebuild_canvas(size, scale_factor, "resize")?;
+    fn queue_resize(&mut self, size: PhysicalSize<u32>) {
+        self.pending_surface_size = Some(size);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
-        Ok(())
+    }
+
+    fn prepare_redraw(&mut self) -> Result<bool, Box<dyn Error>> {
+        let pending_surface_size = self.pending_surface_size.take();
+        let size =
+            pending_surface_size.or_else(|| self.window.as_ref().map(|window| window.inner_size()));
+        let Some(size) = size else {
+            return Ok(false);
+        };
+        if size.width == 0 || size.height == 0 {
+            return Ok(false);
+        }
+
+        if pending_surface_size.is_some() || self.canvas_dirty {
+            let scale_factor = self
+                .window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor());
+            let reason = if pending_surface_size.is_some() {
+                "resize"
+            } else {
+                "update"
+            };
+            self.rebuild_canvas(size, scale_factor, reason)?;
+            self.canvas_dirty = false;
+        }
+
+        if pending_surface_size.is_some() {
+            if let (Some(renderer), Some(surface)) = (&mut self.renderer, &self.surface) {
+                renderer.resize(surface, SurfaceSize::new(size.width, size.height));
+            }
+        }
+
+        Ok(true)
     }
 
     fn render(&mut self) -> Result<(), RenderError> {
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &self.surface) else {
             return Ok(());
         };
+        let window = self.window.as_ref().cloned();
         let render_started_at = Instant::now();
-        let result = renderer.render(surface, &self.canvas, &mut self.text_system);
+        let result = renderer.render_with_pre_present(
+            surface,
+            &self.canvas,
+            &mut self.text_system,
+            move || {
+                if let Some(window) = window {
+                    window.pre_present_notify();
+                }
+            },
+        );
         if result.is_ok() {
             self.frame_number += 1;
-            println!(
-                "[Burokku perf] WebGPU frame #{} (commit #{}): {:.3} ms CPU submit + present",
-                self.frame_number,
-                self.document.commit_id,
-                render_started_at.elapsed().as_secs_f64() * 1_000.0
-            );
+            if self.perf_logging {
+                println!(
+                    "[Burokku perf] WebGPU frame #{} (commit #{}): {:.3} ms CPU submit + present",
+                    self.frame_number,
+                    self.document.commit_id,
+                    render_started_at.elapsed().as_secs_f64() * 1_000.0
+                );
+            }
         }
         result
     }
@@ -177,20 +227,44 @@ impl UiApplication {
         if !flushed {
             return Ok(false);
         }
-        println!(
-            "[Burokku perf] Host commit #{}: applied {} native mutations",
-            self.document.commit_id, committed_mutations
-        );
-        let Some(window) = &self.window else {
-            return Ok(false);
-        };
-        self.rebuild_canvas(window.inner_size(), window.scale_factor(), "update")?;
-        Ok(true)
+        if self.perf_logging {
+            println!(
+                "[Burokku perf] Host commit #{}: applied {} native mutations",
+                self.document.commit_id, committed_mutations
+            );
+        }
+        self.layout = None;
+        self.canvas_dirty = true;
+        Ok(self.window.is_some())
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
         self.error = Some(error.to_string());
         event_loop.exit();
+    }
+
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        match self.prepare_redraw() {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        }
+
+        match self.render() {
+            Ok(()) | Err(RenderError::SurfaceTimeout | RenderError::SurfaceOccluded) => {}
+            Err(RenderError::SurfaceLost | RenderError::SurfaceOutdated) => {
+                let size = self
+                    .window
+                    .as_ref()
+                    .expect("matching window exists")
+                    .inner_size();
+                self.queue_resize(size);
+            }
+            Err(error) => self.fail(event_loop, error),
+        }
     }
 }
 
@@ -231,35 +305,16 @@ impl ApplicationHandler for UiApplication {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                if let Err(error) = self.resize(size) {
-                    self.fail(event_loop, error);
-                }
-            }
+            WindowEvent::Resized(size) => self.queue_resize(size),
             WindowEvent::ScaleFactorChanged { .. } => {
                 let size = self
                     .window
                     .as_ref()
                     .expect("matching window exists")
                     .inner_size();
-                if let Err(error) = self.resize(size) {
-                    self.fail(event_loop, error);
-                }
+                self.queue_resize(size);
             }
-            WindowEvent::RedrawRequested => match self.render() {
-                Ok(()) | Err(RenderError::SurfaceTimeout | RenderError::SurfaceOccluded) => {}
-                Err(RenderError::SurfaceLost | RenderError::SurfaceOutdated) => {
-                    let size = self
-                        .window
-                        .as_ref()
-                        .expect("matching window exists")
-                        .inner_size();
-                    if let Err(error) = self.resize(size) {
-                        self.fail(event_loop, error);
-                    }
-                }
-                Err(error) => self.fail(event_loop, error),
-            },
+            WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Occluded(false) => {
                 if let Some(window) = &self.window {
                     window.request_redraw();

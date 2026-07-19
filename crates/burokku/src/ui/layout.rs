@@ -37,24 +37,28 @@ pub struct UiLayout {
 }
 
 impl UiLayout {
-    pub fn compute(
-        document: &UiDocument,
-        viewport_width: f32,
-        viewport_height: f32,
-        text_system: &mut TextSystem,
-    ) -> Result<Self, LayoutError> {
+    pub fn new(document: &UiDocument) -> Result<Self, LayoutError> {
         let mut tree = TaffyTree::new();
         let mut paint = HashMap::new();
         let inherited = TextStyle::default();
         let root = build_node(&mut tree, &mut paint, document, document.root(), &inherited)?;
-        let mut root_style = tree.style(root)?.clone();
+        Ok(Self { tree, root, paint })
+    }
+
+    pub fn relayout(
+        &mut self,
+        viewport_width: f32,
+        viewport_height: f32,
+        text_system: &mut TextSystem,
+    ) -> Result<(), LayoutError> {
+        let mut root_style = self.tree.style(self.root)?.clone();
         root_style.size = Size {
             width: Dimension::from_length(viewport_width.max(0.0)),
             height: Dimension::from_length(viewport_height.max(0.0)),
         };
-        tree.set_style(root, root_style)?;
-        tree.compute_layout_with_measure(
-            root,
+        self.tree.set_style(self.root, root_style)?;
+        self.tree.compute_layout_with_measure(
+            self.root,
             Size {
                 width: AvailableSpace::Definite(viewport_width.max(0.0)),
                 height: AvailableSpace::Definite(viewport_height.max(0.0)),
@@ -79,7 +83,18 @@ impl UiLayout {
                 }
             },
         )?;
-        Ok(Self { tree, root, paint })
+        Ok(())
+    }
+
+    pub fn compute(
+        document: &UiDocument,
+        viewport_width: f32,
+        viewport_height: f32,
+        text_system: &mut TextSystem,
+    ) -> Result<Self, LayoutError> {
+        let mut layout = Self::new(document)?;
+        layout.relayout(viewport_width, viewport_height, text_system)?;
+        Ok(layout)
     }
 
     pub fn root_size(&self) -> Result<Size<f32>, LayoutError> {

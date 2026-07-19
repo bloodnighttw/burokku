@@ -1,6 +1,6 @@
-use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, Viewport};
+use glyphon::{Buffer, Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, Viewport};
 
-use crate::{Canvas, Color, DrawCommand, Rect, TextSystem};
+use crate::{Canvas, Color, DrawCommand, Rect, TextStyle, TextSystem};
 
 use super::{RenderError, SurfaceSize};
 
@@ -9,6 +9,14 @@ pub(super) struct TextRenderer {
     viewport: Viewport,
     atlas: TextAtlas,
     renderer: glyphon::TextRenderer,
+    buffers: Vec<CachedText>,
+}
+
+struct CachedText {
+    bounds: Rect,
+    text: String,
+    style: TextStyle,
+    buffer: Buffer,
 }
 
 impl TextRenderer {
@@ -28,6 +36,7 @@ impl TextRenderer {
             viewport,
             atlas,
             renderer,
+            buffers: Vec::new(),
         }
     }
 
@@ -60,28 +69,42 @@ impl TextRenderer {
                 _ => None,
             })
             .collect();
-        let mut buffers = Vec::with_capacity(commands.len());
-        for (bounds, text, style) in &commands {
-            buffers.push(text_system.layout_buffer(
-                text,
-                style,
-                Some(bounds.width),
-                Some(bounds.height),
-                None,
-            ));
+        let buffers_match = self.buffers.len() == commands.len()
+            && self
+                .buffers
+                .iter()
+                .zip(&commands)
+                .all(|(cached, (bounds, text, style))| {
+                    cached.bounds == *bounds && cached.text == *text && cached.style == **style
+                });
+        if !buffers_match {
+            self.buffers.clear();
+            self.buffers.reserve(commands.len());
+            for (bounds, text, style) in &commands {
+                self.buffers.push(CachedText {
+                    bounds: *bounds,
+                    text: (*text).to_owned(),
+                    style: (*style).clone(),
+                    buffer: text_system.layout_buffer(
+                        text,
+                        style,
+                        Some(bounds.width),
+                        Some(bounds.height),
+                        None,
+                    ),
+                });
+            }
         }
-        let areas = buffers
-            .iter()
-            .zip(&commands)
-            .map(|(buffer, (bounds, _, style))| TextArea {
-                buffer,
-                left: bounds.x,
-                top: bounds.y,
-                scale: 1.0,
-                bounds: clipped_bounds(*bounds, size),
-                default_color: glyphon_color(style.color),
-                custom_glyphs: &[],
-            });
+
+        let areas = self.buffers.iter().map(|cached| TextArea {
+            buffer: &cached.buffer,
+            left: cached.bounds.x,
+            top: cached.bounds.y,
+            scale: 1.0,
+            bounds: clipped_bounds(cached.bounds, size),
+            default_color: glyphon_color(cached.style.color),
+            custom_glyphs: &[],
+        });
         self.renderer.prepare(
             device,
             queue,

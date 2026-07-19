@@ -9,11 +9,9 @@ pub(super) struct ShapeRenderer {
     pipeline: wgpu::RenderPipeline,
     screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
-}
-
-pub(super) struct PreparedShapes {
-    buffer: wgpu::Buffer,
-    count: u32,
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: u64,
+    instances: Vec<ShapeInstance>,
 }
 
 impl ShapeRenderer {
@@ -45,20 +43,30 @@ impl ShapeRenderer {
             }],
         });
         let pipeline = create_pipeline(device, &screen_layout, target_format);
+        let instance_capacity = std::mem::size_of::<ShapeInstance>() as u64;
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render shape instances"),
+            size: instance_capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline,
             screen_buffer,
             screen_bind_group,
+            instance_buffer,
+            instance_capacity,
+            instances: Vec::new(),
         }
     }
 
     pub fn prepare(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         canvas: &Canvas,
         size: SurfaceSize,
-    ) -> PreparedShapes {
+    ) {
         queue.write_buffer(
             &self.screen_buffer,
             0,
@@ -67,45 +75,44 @@ impl ShapeRenderer {
                 _padding: [0.0; 2],
             }),
         );
-        let instances: Vec<_> = canvas
-            .commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Box { rect, style } if rect.width > 0.0 && rect.height > 0.0 => {
-                    Some(ShapeInstance::new(*rect, *style))
-                }
-                _ => None,
-            })
-            .collect();
-        let empty = ShapeInstance::zeroed();
-        let bytes = if instances.is_empty() {
-            bytemuck::bytes_of(&empty)
-        } else {
-            bytemuck::cast_slice(&instances)
-        };
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("render shape instances"),
-            contents: bytes,
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        PreparedShapes {
-            buffer,
-            count: instances.len() as u32,
+        self.instances.clear();
+        self.instances.extend(
+            canvas
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCommand::Box { rect, style } if rect.width > 0.0 && rect.height > 0.0 => {
+                        Some(ShapeInstance::new(*rect, *style))
+                    }
+                    _ => None,
+                }),
+        );
+        if self.instances.is_empty() {
+            return;
         }
+
+        let bytes = bytemuck::cast_slice(&self.instances);
+        let required_capacity = bytes.len() as u64;
+        if required_capacity > self.instance_capacity {
+            self.instance_capacity = required_capacity.next_power_of_two();
+            self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("render shape instances"),
+                size: self.instance_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        queue.write_buffer(&self.instance_buffer, 0, bytes);
     }
 
-    pub fn draw<'pass>(
-        &'pass self,
-        prepared: &'pass PreparedShapes,
-        pass: &mut wgpu::RenderPass<'pass>,
-    ) {
-        if prepared.count == 0 {
+    pub fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
+        if self.instances.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
-        pass.set_vertex_buffer(0, prepared.buffer.slice(..));
-        pass.draw(0..6, 0..prepared.count);
+        pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
+        pass.draw(0..6, 0..self.instances.len() as u32);
     }
 }
 

@@ -103,7 +103,7 @@ cargo run -p burokku -- example/react/dist/app.js
 
 This opens an `800x600` native window and presents the React UI through WebGPU.
 
-The example prints timing for every stage to the terminal:
+Set `BUROKKU_PERF=1` to print timing for every native stage to the terminal:
 
 ```text
 [Burokku perf] React commit #1: bridge 0.092 ms (79 mutations)
