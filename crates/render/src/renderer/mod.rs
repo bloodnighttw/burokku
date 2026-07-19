@@ -8,7 +8,7 @@ mod readback;
 
 use thiserror::Error;
 
-use crate::Canvas;
+use crate::{Canvas, TextSystem};
 use gpu::Gpu;
 use shape::ShapeRenderer;
 use surface::SurfaceState;
@@ -105,12 +105,13 @@ impl Renderer {
         &mut self,
         surface: &wgpu::Surface<'_>,
         canvas: &Canvas,
+        text_system: &mut TextSystem,
     ) -> Result<(), RenderError> {
         let frame = self.surface.acquire(surface)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.draw_to_view(&view, canvas, self.surface.size())?;
+        self.draw_to_view(&view, canvas, self.surface.size(), text_system)?;
         frame.present();
         Ok(())
     }
@@ -120,12 +121,13 @@ impl Renderer {
         view: &wgpu::TextureView,
         canvas: &Canvas,
         size: SurfaceSize,
+        text_system: &mut TextSystem,
     ) -> Result<(), RenderError> {
         let prepared_shapes = self
             .shapes
             .prepare(&self.gpu.device, &self.gpu.queue, canvas, size);
         self.text
-            .prepare(&self.gpu.device, &self.gpu.queue, canvas, size)?;
+            .prepare(&self.gpu.device, &self.gpu.queue, canvas, size, text_system)?;
 
         let mut encoder = self
             .gpu
@@ -175,6 +177,7 @@ mod tests {
             SurfaceSize::new(64, 64),
         );
         let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
         let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
         canvas.draw_box(
             Rect::new(16.0, 16.0, 32.0, 32.0),
@@ -186,8 +189,13 @@ mod tests {
             },
         );
 
-        let image = readback::draw_to_image(&mut renderer, &canvas, SurfaceSize::new(64, 64))
-            .expect("off-screen test render");
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen test render");
         assert_eq!(image.pixels.len(), 64 * 64 * 4);
         assert_eq!(image.pixel(0, 0), Some([255, 255, 255, 255]));
         let center = image.pixel(32, 32).expect("center pixel");
@@ -228,9 +236,13 @@ mod tests {
                 ..TextStyle::default()
             },
         );
-        let text_image =
-            readback::draw_to_image(&mut renderer, &text_canvas, SurfaceSize::new(160, 48))
-                .expect("text test render");
+        let text_image = readback::draw_to_image(
+            &mut renderer,
+            &text_canvas,
+            SurfaceSize::new(160, 48),
+            &mut text_system,
+        )
+        .expect("text test render");
         assert!(text_image
             .pixels
             .chunks_exact(4)

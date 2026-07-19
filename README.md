@@ -17,7 +17,7 @@ surface supplied by the application:
 ```rust
 use render::{
     wgpu, Border, BoxStyle, Canvas, Color, CornerRadius, Outline, Rect,
-    Renderer, SurfaceSize, TextStyle,
+    Renderer, SurfaceSize, TextConstraints, TextStyle, TextSystem,
 };
 
 // `window` is owned by the winit application.
@@ -28,6 +28,7 @@ let surface = instance.create_surface(window.clone())?;
 let window_size = window.inner_size();
 let size = SurfaceSize::new(window_size.width, window_size.height);
 let mut renderer = Renderer::new(&instance, &surface, size).await?;
+let mut text_system = TextSystem::new();
 
 let mut canvas = Canvas::new()
     .with_clear_color(Color::from_rgba8(245, 247, 250, 255));
@@ -44,17 +45,23 @@ canvas.draw_box(
         )),
     },
 );
+let text_style = TextStyle {
+    font_size: 28.0,
+    line_height: 34.0,
+    ..TextStyle::default()
+};
+let text_size = text_system.measure(
+    "Measured for Taffy, rendered by Glyphon",
+    &text_style,
+    TextConstraints::at_most(512.0),
+);
 canvas.draw_text(
-    Rect::new(64.0, 64.0, 512.0, 80.0),
-    "Drawn without application WGSL",
-    TextStyle {
-        font_size: 28.0,
-        line_height: 34.0,
-        ..TextStyle::default()
-    },
+    Rect::new(64.0, 64.0, text_size.width, text_size.height),
+    "Measured for Taffy, rendered by Glyphon",
+    text_style,
 );
 
-renderer.render(&surface, &canvas)?;
+renderer.render(&surface, &canvas, &mut text_system)?;
 
 // On WindowEvent::Resized:
 renderer.resize(&surface, SurfaceSize::new(new_size.width, new_size.height));

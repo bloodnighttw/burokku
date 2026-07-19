@@ -1,14 +1,10 @@
-use glyphon::{
-    Attrs, Buffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
-    TextAtlas, TextBounds, Viewport, Weight, Wrap,
-};
+use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, Viewport};
 
-use crate::{Canvas, Color, DrawCommand, FontFamily, Rect, TextWrap};
+use crate::{Canvas, Color, DrawCommand, Rect, TextSystem};
 
 use super::{RenderError, SurfaceSize};
 
 pub(super) struct TextRenderer {
-    font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -21,7 +17,6 @@ impl TextRenderer {
         queue: &wgpu::Queue,
         target_format: wgpu::TextureFormat,
     ) -> Self {
-        let font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
@@ -29,7 +24,6 @@ impl TextRenderer {
         let renderer =
             glyphon::TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         Self {
-            font_system,
             swash_cache,
             viewport,
             atlas,
@@ -43,6 +37,7 @@ impl TextRenderer {
         queue: &wgpu::Queue,
         canvas: &Canvas,
         size: SurfaceSize,
+        text_system: &mut TextSystem,
     ) -> Result<(), RenderError> {
         self.viewport.update(
             queue,
@@ -67,35 +62,13 @@ impl TextRenderer {
             .collect();
         let mut buffers = Vec::with_capacity(commands.len());
         for (bounds, text, style) in &commands {
-            let font_size = style.font_size.max(1.0);
-            let line_height = style.line_height.max(font_size);
-            let mut buffer =
-                Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
-            buffer.set_size(
-                &mut self.font_system,
+            buffers.push(text_system.layout_buffer(
+                text,
+                style,
                 Some(bounds.width),
                 Some(bounds.height),
-            );
-            buffer.set_wrap(
-                &mut self.font_system,
-                match style.wrap {
-                    TextWrap::None => Wrap::None,
-                    TextWrap::Glyph => Wrap::Glyph,
-                    TextWrap::Word => Wrap::Word,
-                },
-            );
-            let family = match &style.font_family {
-                FontFamily::SansSerif => Family::SansSerif,
-                FontFamily::Serif => Family::Serif,
-                FontFamily::Monospace => Family::Monospace,
-                FontFamily::Named(name) => Family::Name(name),
-            };
-            let attrs = Attrs::new()
-                .family(family)
-                .weight(Weight(style.font_weight));
-            buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(&mut self.font_system, false);
-            buffers.push(buffer);
+                None,
+            ));
         }
         let areas = buffers
             .iter()
@@ -112,7 +85,7 @@ impl TextRenderer {
         self.renderer.prepare(
             device,
             queue,
-            &mut self.font_system,
+            text_system.font_system_mut(),
             &mut self.atlas,
             &self.viewport,
             areas,

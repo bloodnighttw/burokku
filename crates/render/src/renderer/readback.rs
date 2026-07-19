@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 
 use super::{RenderError, Renderer, SurfaceSize};
-use crate::Canvas;
+use crate::{Canvas, TextSystem};
 
 const BYTES_PER_PIXEL: u32 = 4;
 
@@ -29,6 +29,7 @@ pub(super) fn draw_to_image(
     renderer: &mut Renderer,
     canvas: &Canvas,
     size: SurfaceSize,
+    text_system: &mut TextSystem,
 ) -> Result<TestImage, RenderError> {
     let texture = renderer
         .gpu
@@ -48,7 +49,7 @@ pub(super) fn draw_to_image(
             view_formats: &[],
         });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    renderer.draw_to_view(&view, canvas, size)?;
+    renderer.draw_to_view(&view, canvas, size, text_system)?;
 
     let row_bytes = size.width * BYTES_PER_PIXEL;
     let padded_row_bytes =
