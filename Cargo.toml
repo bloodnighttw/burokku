@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/runtime", "crates/burokku"]
+members = ["crates/runtime", "crates/render", "crates/burokku"]
 resolver = "2"

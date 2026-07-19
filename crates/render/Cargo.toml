@@ -1,0 +1,15 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2021"
+description = "Surface-backed WebGPU drawing primitives for Burokku"
+license = "MIT"
+
+[dependencies]
+bytemuck = { version = "1.25", features = ["derive"] }
+glyphon = "0.11"
+thiserror = "2"
+wgpu = "29"
+
+[dev-dependencies]
+pollster = "0.4"
