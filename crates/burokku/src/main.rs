@@ -38,10 +38,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let runtime =
         Runtime::new_with_host(move |context| ui::bridge::install(context, sender)).await?;
     runtime.eval::<()>(source).await?;
-    let snapshot = timeout(Duration::from_secs(1), receiver.recv())
-        .await?
-        .ok_or("UI script finished without committing a React tree")?;
-    let document = ui::UiDocument::from_json(&snapshot)?;
+    let mut document = ui::UiDocument::new();
+    let mutation_count = receive_flush(
+        &mut document,
+        &mut receiver,
+        Duration::from_secs(1),
+        "UI script finished without committing a React tree",
+    )
+    .await?;
+    println!(
+        "[Burokku perf] Host commit #{}: applied {} native mutations",
+        document.commit_id, mutation_count
+    );
     if open_window {
         window::run(document, receiver)?;
     } else {
@@ -55,15 +63,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             size.height,
             canvas.commands().len()
         );
-        let updated_snapshot = timeout(Duration::from_millis(1_500), receiver.recv())
-            .await?
-            .ok_or("UI runtime stopped before producing a state update")?;
-        if updated_snapshot == snapshot {
+        let initial_commit_id = document.commit_id;
+        receive_flush(
+            &mut document,
+            &mut receiver,
+            Duration::from_millis(1_500),
+            "UI runtime stopped before producing a state update",
+        )
+        .await?;
+        if document.commit_id == initial_commit_id {
             return Err("UI state update did not change the rendered tree".into());
         }
-        let updated_document = ui::UiDocument::from_json(&updated_snapshot)?;
-        let updated_layout =
-            ui::UiLayout::compute(&updated_document, 800.0, 600.0, &mut text_system)?;
+        let updated_layout = ui::UiLayout::compute(&document, 800.0, 600.0, &mut text_system)?;
         let updated_canvas = updated_layout.paint(render::Color::WHITE)?;
         println!(
             "UI state update: {} drawing commands",
@@ -72,6 +83,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+async fn receive_flush(
+    document: &mut ui::UiDocument,
+    receiver: &mut mpsc::UnboundedReceiver<ui::UiUpdate>,
+    duration: Duration,
+    closed_message: &'static str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    timeout(duration, async {
+        let mut mutation_count = 0;
+        loop {
+            let update = receiver
+                .recv()
+                .await
+                .ok_or_else(|| std::io::Error::other(closed_message))?;
+            if matches!(update, ui::UiUpdate::Mutation(_)) {
+                mutation_count += 1;
+            }
+            if document.apply(update)? {
+                return Ok::<_, Box<dyn std::error::Error>>(mutation_count);
+            }
+        }
+    })
+    .await?
 }
 
 enum RunMode {

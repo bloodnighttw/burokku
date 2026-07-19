@@ -36,14 +36,30 @@ export interface ElementProps {
   children?: ReactNode;
 }
 
-export interface SnapshotNode {
-  id: number;
-  type: ElementName;
-  style: Record<string, unknown>;
-  text?: string;
-  children?: SnapshotNode[];
-}
-
 declare global {
-  var __burokku_commit: ((snapshot: string) => void) | undefined;
+  var __burokku_create: ((id: number, type: ElementName) => void) | undefined;
+  var __burokku_set_text: ((id: number, text: string) => void) | undefined;
+  var __burokku_set_style_number:
+    | ((id: number, name: keyof Style, value: number) => void)
+    | undefined;
+  var __burokku_set_style_string:
+    | ((id: number, name: keyof Style, value: string) => void)
+    | undefined;
+  var __burokku_set_style_color:
+    | ((
+        id: number,
+        name: keyof Style,
+        red: number,
+        green: number,
+        blue: number,
+        alpha: number,
+      ) => void)
+    | undefined;
+  var __burokku_clear_style: ((id: number, name: keyof Style) => void) | undefined;
+  var __burokku_insert:
+    | ((parentId: number, childId: number, beforeId: number) => void)
+    | undefined;
+  var __burokku_remove: ((parentId: number, childId: number) => void) | undefined;
+  var __burokku_flush: ((commitId: number) => void) | undefined;
+  var __burokku_now: (() => number) | undefined;
 }

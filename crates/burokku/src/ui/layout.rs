@@ -46,15 +46,13 @@ impl UiLayout {
         let mut tree = TaffyTree::new();
         let mut paint = HashMap::new();
         let inherited = TextStyle::default();
-        let root = build_node(&mut tree, &mut paint, &document.root, &inherited)?;
-        if document.root.id == 0 {
-            let mut root_style = tree.style(root)?.clone();
-            root_style.size = Size {
-                width: Dimension::from_length(viewport_width.max(0.0)),
-                height: Dimension::from_length(viewport_height.max(0.0)),
-            };
-            tree.set_style(root, root_style)?;
-        }
+        let root = build_node(&mut tree, &mut paint, document, document.root(), &inherited)?;
+        let mut root_style = tree.style(root)?.clone();
+        root_style.size = Size {
+            width: Dimension::from_length(viewport_width.max(0.0)),
+            height: Dimension::from_length(viewport_height.max(0.0)),
+        };
+        tree.set_style(root, root_style)?;
         tree.compute_layout_with_measure(
             root,
             Size {
@@ -92,6 +90,7 @@ impl UiLayout {
 fn build_node(
     tree: &mut TaffyTree<TextContext>,
     paint: &mut HashMap<NodeId, PaintData>,
+    document: &UiDocument,
     node: &UiNode,
     inherited_text: &TextStyle,
 ) -> Result<NodeId, TaffyError> {
@@ -110,7 +109,12 @@ fn build_node(
         let children = node
             .children
             .iter()
-            .map(|child| build_node(tree, paint, child, &text_style))
+            .map(|child| {
+                let child = document
+                    .node(*child)
+                    .expect("document child IDs are validated when mutations are applied");
+                build_node(tree, paint, document, child, &text_style)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         (tree.new_with_children(taffy_style, &children)?, None)
     };

@@ -87,9 +87,11 @@ cargo run -p burokku -- ./script.js
 
 The React API maps `div`, `button`, `span`, and `text` to Burokku UI nodes. Set
 `jsxImportSource` to `@burokku/ui` so TypeScript checks styles against the
-Burokku API. React commits a serializable tree to the Rust host; Rust measures
-text with `TextSystem`, computes the full tree with Taffy, then converts it into
-`render::Canvas` drawing commands.
+Burokku API. At each React commit, the reconciler sends only typed create,
+style, text, insert, and remove mutations to the Rust host, followed by one
+flush marker. Rust owns the persistent UI tree, measures text with `TextSystem`,
+computes layout with Taffy, then converts it into `render::Canvas` drawing
+commands. No JSON tree serialization is involved.
 
 Build and run the Vite example with:
 
@@ -100,6 +102,21 @@ cargo run -p burokku -- example/react/dist/app.js
 ```
 
 This opens an `800x600` native window and presents the React UI through WebGPU.
+
+The example prints timing for every stage to the terminal:
+
+```text
+[Burokku perf] React commit #1: bridge 0.092 ms (79 mutations)
+[Burokku perf] React root render: 0.832 ms (reconcile + commit)
+[Burokku perf] Host commit #1: applied 79 native mutations
+[Burokku perf] UI commit #1 (initial): layout 0.410 ms, paint 0.021 ms, 8 commands
+[Burokku perf] WebGPU frame #1 (commit #1): 0.350 ms CPU submit + present
+```
+
+The WebGPU number measures CPU preparation, command submission, and the call to
+present the surface. It intentionally does not claim to be GPU execution time;
+measuring that requires timestamp queries or waiting for the GPU, which would
+change the behavior being measured.
 
 The current bridge covers rendering and layout. Window/input event dispatch is
 not part of this React API yet.
