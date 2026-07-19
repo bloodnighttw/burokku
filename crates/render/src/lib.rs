@@ -11,6 +11,6 @@ pub use drawing::{
     Border, BoxStyle, Canvas, Color, CornerRadius, DrawCommand, FontFamily, Outline, Rect,
     TextStyle, TextWrap,
 };
-pub use renderer::{RenderError, Renderer, SurfaceSize};
+pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};
 pub use text_system::{TextConstraints, TextMetrics, TextSystem, TextWidth};
 pub use wgpu;

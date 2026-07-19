@@ -45,6 +45,10 @@ struct UiApplication {
     canvas_dirty: bool,
     perf_logging: bool,
     frame_number: u64,
+    gpu_submit_samples: u64,
+    gpu_submit_total: Duration,
+    gpu_submit_max: Duration,
+    gpu_submit_log_started_at: Instant,
     error: Option<String>,
 }
 
@@ -66,6 +70,10 @@ impl UiApplication {
             canvas_dirty: false,
             perf_logging: std::env::var_os("BUROKKU_PERF").is_some(),
             frame_number: 0,
+            gpu_submit_samples: 0,
+            gpu_submit_total: Duration::ZERO,
+            gpu_submit_max: Duration::ZERO,
+            gpu_submit_log_started_at: Instant::now(),
             error: None,
         }
     }
@@ -97,7 +105,9 @@ impl UiApplication {
             );
         }
 
-        self.rebuild_canvas(size, window.scale_factor(), "initial")?;
+        let scale_factor = window.scale_factor();
+        let layout_duration = self.relayout(size, scale_factor)?;
+        self.repaint_canvas(scale_factor, "initial", layout_duration)?;
         self.renderer = Some(renderer);
         self.surface = Some(surface);
         self.instance = Some(instance);
@@ -106,12 +116,11 @@ impl UiApplication {
         Ok(())
     }
 
-    fn rebuild_canvas(
+    fn relayout(
         &mut self,
         size: PhysicalSize<u32>,
         scale_factor: f64,
-        reason: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<Duration, Box<dyn Error>> {
         let scale_factor = scale_factor as f32;
         let layout_started_at = Instant::now();
         if self.layout.is_none() {
@@ -123,9 +132,18 @@ impl UiApplication {
             size.height as f32 / scale_factor,
             &mut self.text_system,
         )?;
-        let layout_duration = layout_started_at.elapsed();
+        Ok(layout_started_at.elapsed())
+    }
+
+    fn repaint_canvas(
+        &mut self,
+        scale_factor: f64,
+        reason: &str,
+        layout_duration: Duration,
+    ) -> Result<(), Box<dyn Error>> {
         let paint_started_at = Instant::now();
-        self.canvas = layout.paint_with_scale(Color::WHITE, scale_factor)?;
+        let layout = self.layout.as_ref().expect("layout was initialized");
+        self.canvas = layout.paint_with_scale(Color::WHITE, scale_factor as f32)?;
         let paint_duration = paint_started_at.elapsed();
         if self.perf_logging {
             println!(
@@ -156,6 +174,12 @@ impl UiApplication {
         if size.width == 0 || size.height == 0 {
             return Ok(false);
         }
+        let surface_size = SurfaceSize::new(size.width, size.height);
+        let surface_size_changed = pending_surface_size.is_some()
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|renderer| renderer.size() != surface_size);
 
         if pending_surface_size.is_some() || self.canvas_dirty {
             let scale_factor = self
@@ -167,14 +191,16 @@ impl UiApplication {
             } else {
                 "update"
             };
-            self.rebuild_canvas(size, scale_factor, reason)?;
-            self.canvas_dirty = false;
-        }
+            let layout_duration = self.relayout(size, scale_factor)?;
 
-        if pending_surface_size.is_some() {
-            if let (Some(renderer), Some(surface)) = (&mut self.renderer, &self.surface) {
-                renderer.resize(surface, SurfaceSize::new(size.width, size.height));
+            if surface_size_changed {
+                if let (Some(renderer), Some(surface)) = (&mut self.renderer, &self.surface) {
+                    renderer.resize(surface, surface_size);
+                }
             }
+
+            self.repaint_canvas(scale_factor, reason, layout_duration)?;
+            self.canvas_dirty = false;
         }
 
         Ok(true)
@@ -186,7 +212,7 @@ impl UiApplication {
         };
         let window = self.window.as_ref().cloned();
         let render_started_at = Instant::now();
-        let result = renderer.render_with_pre_present(
+        let result = renderer.render_timed_with_pre_present(
             surface,
             &self.canvas,
             &mut self.text_system,
@@ -196,18 +222,41 @@ impl UiApplication {
                 }
             },
         );
-        if result.is_ok() {
-            self.frame_number += 1;
-            if self.perf_logging {
-                println!(
-                    "[Burokku perf] WebGPU frame #{} (commit #{}): {:.3} ms CPU submit + present",
-                    self.frame_number,
-                    self.document.commit_id,
-                    render_started_at.elapsed().as_secs_f64() * 1_000.0
-                );
-            }
+        let timings = result?;
+        self.frame_number += 1;
+        self.gpu_submit_samples += 1;
+        self.gpu_submit_total += timings.queue_submit;
+        self.gpu_submit_max = self.gpu_submit_max.max(timings.queue_submit);
+        if self.perf_logging {
+            println!(
+                "[Burokku perf] WebGPU frame #{} (commit #{}): GPU queue submit {:.3} ms CPU, {:.3} ms total submit + present",
+                self.frame_number,
+                self.document.commit_id,
+                timings.queue_submit.as_secs_f64() * 1_000.0,
+                render_started_at.elapsed().as_secs_f64() * 1_000.0
+            );
         }
-        result
+        self.log_gpu_submit_summary();
+        Ok(())
+    }
+
+    fn log_gpu_submit_summary(&mut self) {
+        if self.gpu_submit_log_started_at.elapsed() < Duration::from_secs(1)
+            || self.gpu_submit_samples == 0
+        {
+            return;
+        }
+        let average = self.gpu_submit_total / self.gpu_submit_samples as u32;
+        println!(
+            "[Burokku perf] GPU queue submit: {:.3} ms average, {:.3} ms max ({} frames)",
+            average.as_secs_f64() * 1_000.0,
+            self.gpu_submit_max.as_secs_f64() * 1_000.0,
+            self.gpu_submit_samples
+        );
+        self.gpu_submit_samples = 0;
+        self.gpu_submit_total = Duration::ZERO;
+        self.gpu_submit_max = Duration::ZERO;
+        self.gpu_submit_log_started_at = Instant::now();
     }
 
     fn apply_updates(&mut self) -> Result<bool, Box<dyn Error>> {

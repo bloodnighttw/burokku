@@ -6,6 +6,8 @@ mod text;
 #[cfg(test)]
 mod readback;
 
+use std::time::{Duration, Instant};
+
 use thiserror::Error;
 
 use crate::{Canvas, TextSystem};
@@ -15,6 +17,12 @@ use surface::SurfaceState;
 use text::TextRenderer;
 
 pub use surface::SurfaceSize;
+
+/// CPU-side timing for submitting one rendered frame to the GPU queue.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderTimings {
+    pub queue_submit: Duration,
+}
 
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -120,14 +128,27 @@ impl Renderer {
         text_system: &mut TextSystem,
         on_pre_present: impl FnOnce(),
     ) -> Result<(), RenderError> {
+        self.render_timed_with_pre_present(surface, canvas, text_system, on_pre_present)
+            .map(|_| ())
+    }
+
+    /// Draws and presents one frame while returning the CPU time spent sending
+    /// its command buffer to the GPU queue.
+    pub fn render_timed_with_pre_present(
+        &mut self,
+        surface: &wgpu::Surface<'_>,
+        canvas: &Canvas,
+        text_system: &mut TextSystem,
+        on_pre_present: impl FnOnce(),
+    ) -> Result<RenderTimings, RenderError> {
         let frame = self.surface.acquire(surface)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.draw_to_view(&view, canvas, self.surface.size(), text_system)?;
+        let queue_submit = self.draw_to_view(&view, canvas, self.surface.size(), text_system)?;
         on_pre_present();
         frame.present();
-        Ok(())
+        Ok(RenderTimings { queue_submit })
     }
 
     fn draw_to_view(
@@ -136,7 +157,7 @@ impl Renderer {
         canvas: &Canvas,
         size: SurfaceSize,
         text_system: &mut TextSystem,
-    ) -> Result<(), RenderError> {
+    ) -> Result<Duration, RenderError> {
         self.shapes
             .prepare(&self.gpu.device, &self.gpu.queue, canvas, size);
         self.text
@@ -168,9 +189,11 @@ impl Renderer {
             self.shapes.draw(&mut pass);
             self.text.draw(&mut pass)?;
         }
+        let submit_started_at = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);
+        let queue_submit = submit_started_at.elapsed();
         self.text.finish_frame();
-        Ok(())
+        Ok(queue_submit)
     }
 }
 
