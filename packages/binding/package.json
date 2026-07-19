@@ -1,0 +1,27 @@
+{
+  "name": "@burokku/binding",
+  "version": "0.1.0",
+  "description": "TypeScript bindings for the burokku Rust library",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../crates/burokku --target bundler --out-dir ../../packages/binding/wasm --release --no-pack --no-opt",
+    "build": "pnpm build:wasm && tsdown",
+    "clean": "rm -rf dist wasm",
+    "typecheck": "pnpm build:wasm && tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.12.9",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "burokku"
+version = "0.1.0"
+edition = "2021"
+description = "Core Rust library for the burokku TypeScript binding"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+
