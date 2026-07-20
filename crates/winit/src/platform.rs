@@ -1,0 +1,619 @@
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    ptr::NonNull,
+    rc::Rc,
+    sync::{atomic::Ordering, Arc, Weak},
+};
+
+use crate::window::WindowState;
+use crate::{
+    ElementState, Error, KeyEvent, Modifiers, MouseButton, PhysicalPosition, PhysicalSize, Window,
+    WindowAttributes, WindowEvent, WindowId,
+};
+use objc2::{
+    define_class, msg_send,
+    rc::{autoreleasepool, Retained},
+    runtime::ProtocolObject,
+    sel, DefinedClass, MainThreadOnly,
+};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSView, NSViewFrameDidChangeNotification,
+    NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowStyleMask,
+};
+use objc2_foundation::{
+    MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSObject,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
+use objc2_quartz_core::{kCAGravityTopLeft, CALayer, CAMetalLayer};
+
+const MAX_NATIVE_EVENTS_PER_TICK: usize = 256;
+
+#[derive(Debug)]
+struct NativeEvent {
+    window_id: WindowId,
+    event: WindowEvent,
+}
+
+#[derive(Debug)]
+struct WindowDelegateIvars {
+    state: Arc<WindowState>,
+    dispatcher: Rc<EventDispatcher>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements and the generated
+    // dealloc implementation correctly drops WindowDelegateIvars.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = WindowDelegateIvars]
+    struct WindowDelegate;
+
+    // SAFETY: NSObjectProtocol has no additional safety requirements.
+    unsafe impl NSObjectProtocol for WindowDelegate {}
+
+    // SAFETY: All method signatures match NSWindowDelegate and this class is
+    // restricted to the main thread.
+    unsafe impl NSWindowDelegate for WindowDelegate {
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _window: &NSWindow) -> bool {
+            self.send(WindowEvent::CloseRequested);
+            // Closing is controlled by the Rust handler, just like winit.
+            false
+        }
+
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing_properties(&self, notification: &NSNotification) {
+            if let Some(window) = notification_window(notification) {
+                let scale_factor = window.backingScaleFactor();
+                let new_inner_size = window
+                    .contentView()
+                    .map(|view| physical_view_size(&view, scale_factor))
+                    .unwrap_or_else(|| self.ivars().state.size());
+                self.ivars().state.set_scale_factor(scale_factor);
+                self.ivars().state.set_size(new_inner_size);
+                self.send(WindowEvent::ScaleFactorChanged {
+                    scale_factor,
+                    new_inner_size,
+                });
+            }
+        }
+
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            self.send(WindowEvent::Focused(true));
+        }
+
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            self.send(WindowEvent::Focused(false));
+        }
+
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn window_did_change_occlusion_state(&self, notification: &NSNotification) {
+            if let Some(window) = notification_window(notification) {
+                let visible = window
+                    .occlusionState()
+                    .contains(NSWindowOcclusionState::Visible);
+                self.send(WindowEvent::Occluded(!visible));
+            }
+        }
+    }
+);
+
+impl WindowDelegate {
+    fn new(
+        mtm: MainThreadMarker,
+        state: Arc<WindowState>,
+        dispatcher: Rc<EventDispatcher>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(WindowDelegateIvars { state, dispatcher });
+        // SAFETY: NSObject's init has the declared signature and the ivars were
+        // initialized above.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn send(&self, event: WindowEvent) {
+        self.ivars().dispatcher.dispatch(NativeEvent {
+            window_id: self.ivars().state.id,
+            event,
+        });
+    }
+}
+
+#[derive(Debug)]
+struct ContentViewIvars {
+    state: Arc<WindowState>,
+    dispatcher: Rc<EventDispatcher>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing. ContentView is confined to
+    // the AppKit main thread and its generated dealloc drops the Rust ivars.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ContentViewIvars]
+    struct ContentView;
+
+    // SAFETY: NSObjectProtocol has no additional safety requirements.
+    unsafe impl NSObjectProtocol for ContentView {}
+
+    impl ContentView {
+        #[unsafe(method(frameDidChange:))]
+        fn frame_did_change(&self, _notification: &NSNotification) {
+            let scale_factor = self
+                .window()
+                .map(|window| window.backingScaleFactor())
+                .unwrap_or_else(|| self.ivars().state.scale_factor());
+            let size = physical_view_size(self, scale_factor);
+
+            // raw-window-metal normally installs a CAMetalLayer sublayer with
+            // resize gravity. Keep the next drawable at the new physical size
+            // immediately, and do not stretch the last presented drawable
+            // while the coalesced redraw is still pending.
+            self.sync_metal_surface(size);
+
+            if size != self.ivars().state.size() {
+                self.ivars().state.set_size(size);
+                self.send(WindowEvent::Resized(size));
+            }
+
+            // AppKit coalesces these invalidations and calls drawRect: at a
+            // display-safe point, including from its nested live-resize loop.
+            self.setNeedsDisplay(true);
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, dirty_rect: NSRect) {
+            self.sync_metal_surface(self.ivars().state.size());
+            self.ivars()
+                .state
+                .redraw_requested
+                .store(false, Ordering::Release);
+            self.send(WindowEvent::RedrawRequested);
+
+            // SAFETY: The selector and argument exactly match NSView's
+            // drawRect: method.
+            unsafe {
+                let _: () = msg_send![super(self), drawRect: dirty_rect];
+            }
+        }
+    }
+);
+
+impl ContentView {
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        state: Arc<WindowState>,
+        dispatcher: Rc<EventDispatcher>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ContentViewIvars { state, dispatcher });
+        // SAFETY: The selector and argument exactly match NSView's designated
+        // frame initializer, and the Rust ivars were initialized above.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+
+        this.setWantsLayer(true);
+        this.setPostsFrameChangedNotifications(true);
+
+        let notification_center = NSNotificationCenter::defaultCenter();
+        // SAFETY: frameDidChange: is implemented above with the notification
+        // signature, and the observer/object live together as the same view.
+        unsafe {
+            notification_center.addObserver_selector_name_object(
+                &this,
+                sel!(frameDidChange:),
+                Some(NSViewFrameDidChangeNotification),
+                Some(&this),
+            );
+        }
+
+        this
+    }
+
+    fn send(&self, event: WindowEvent) {
+        self.ivars().dispatcher.dispatch(NativeEvent {
+            window_id: self.ivars().state.id,
+            event,
+        });
+    }
+
+    fn sync_metal_surface(&self, size: PhysicalSize<u32>) {
+        let Some(root_layer) = self.layer() else {
+            return;
+        };
+
+        sync_metal_layer(&root_layer, size);
+
+        // SAFETY: Reading an AppKit-owned layer tree is safe on the main
+        // thread; ContentView is main-thread-only.
+        if let Some(sublayers) = unsafe { root_layer.sublayers() } {
+            for layer in sublayers.iter() {
+                sync_metal_layer(&layer, size);
+            }
+        }
+    }
+}
+
+fn sync_metal_layer(layer: &CALayer, size: PhysicalSize<u32>) {
+    let Some(layer) = layer.downcast_ref::<CAMetalLayer>() else {
+        return;
+    };
+
+    layer.setDrawableSize(NSSize::new(size.width as f64, size.height as f64));
+    // SAFETY: This QuartzCore constant is initialized by the framework before
+    // an AppKit view can create a layer.
+    layer.setContentsGravity(unsafe { kCAGravityTopLeft });
+}
+
+type EventHandler = Box<dyn FnMut(WindowId, WindowEvent)>;
+
+#[derive(Default)]
+struct EventDispatcher {
+    handler: RefCell<Option<EventHandler>>,
+    pending: RefCell<VecDeque<NativeEvent>>,
+}
+
+impl std::fmt::Debug for EventDispatcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EventDispatcher")
+            .field("has_handler", &self.handler.borrow().is_some())
+            .field("pending_events", &self.pending.borrow().len())
+            .finish()
+    }
+}
+
+impl EventDispatcher {
+    fn set_handler(&self, handler: EventHandler) {
+        *self.handler.borrow_mut() = Some(handler);
+
+        let pending = self.pending.borrow_mut().drain(..).collect::<Vec<_>>();
+        for event in pending {
+            self.dispatch(event);
+        }
+    }
+
+    fn clear_handler(&self) {
+        self.handler.borrow_mut().take();
+    }
+
+    fn dispatch(&self, event: NativeEvent) {
+        let Some(mut handler) = self.handler.borrow_mut().take() else {
+            self.pending.borrow_mut().push_back(event);
+            return;
+        };
+
+        handler(event.window_id, event.event);
+        while let Some(event) = self.pending.borrow_mut().pop_front() {
+            handler(event.window_id, event.event);
+        }
+
+        *self.handler.borrow_mut() = Some(handler);
+    }
+}
+
+fn notification_window(notification: &NSNotification) -> Option<Retained<NSWindow>> {
+    // NSWindow delegate notifications expose an Objective-C object, which is
+    // dynamically checked before use.
+    notification.object()?.downcast::<NSWindow>().ok()
+}
+
+fn physical_view_size(view: &NSView, scale: f64) -> PhysicalSize<u32> {
+    let logical = view.frame().size;
+    PhysicalSize::new(
+        physical_dimension(logical.width, scale),
+        physical_dimension(logical.height, scale),
+    )
+}
+
+fn physical_dimension(points: f64, scale: f64) -> u32 {
+    (points * scale).round().clamp(0.0, u32::MAX as f64) as u32
+}
+
+pub(crate) struct NativeWindow {
+    window: Retained<NSWindow>,
+    view: Retained<ContentView>,
+    // NSWindow's delegate property is weak, so Rust must retain it.
+    _delegate: Retained<WindowDelegate>,
+}
+
+impl NativeWindow {
+    pub(crate) fn view_ptr(&self) -> NonNull<std::ffi::c_void> {
+        NonNull::from(&*self.view).cast()
+    }
+
+    pub(crate) fn set_title(&self, title: &str) {
+        assert!(
+            MainThreadMarker::new().is_some(),
+            "Window::set_title must be called on the main thread"
+        );
+        self.window.setTitle(&NSString::from_str(title));
+    }
+
+    pub(crate) fn request_redraw(&self) {
+        assert!(
+            MainThreadMarker::new().is_some(),
+            "Window::request_redraw must be called on the main thread"
+        );
+        self.view.setNeedsDisplay(true);
+    }
+}
+
+pub(crate) struct PlatformEventLoop {
+    app: Retained<NSApplication>,
+    mtm: MainThreadMarker,
+    dispatcher: Rc<EventDispatcher>,
+    windows: HashMap<isize, Weak<WindowState>>,
+    next_window_id: u64,
+}
+
+impl PlatformEventLoop {
+    pub(crate) fn new() -> crate::Result<Self> {
+        let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        app.finishLaunching();
+        app.activate();
+
+        Ok(Self {
+            app,
+            mtm,
+            dispatcher: Rc::new(EventDispatcher::default()),
+            windows: HashMap::new(),
+            next_window_id: 1,
+        })
+    }
+
+    pub(crate) fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
+        if !(attributes.inner_size.width.is_finite()
+            && attributes.inner_size.height.is_finite()
+            && attributes.inner_size.width > 0.0
+            && attributes.inner_size.height > 0.0)
+        {
+            return Err(Error::WindowCreation(
+                "inner size must contain positive finite dimensions".into(),
+            ));
+        }
+
+        let mut style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable;
+        if attributes.resizable {
+            style |= NSWindowStyleMask::Resizable;
+        }
+
+        // SAFETY: The content rectangle and style flags meet NSWindow's
+        // initializer requirements, and creation occurs on the main thread.
+        let native_window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(self.mtm),
+                NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(attributes.inner_size.width, attributes.inner_size.height),
+                ),
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: Windows created without an NSWindowController must disable
+        // release-on-close while Rust retains the object.
+        unsafe { native_window.setReleasedWhenClosed(false) };
+
+        let id = WindowId(self.next_window_id);
+        self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
+        let scale_factor = native_window.backingScaleFactor();
+        let state = Arc::new(WindowState::new(
+            id,
+            PhysicalSize::new(
+                physical_dimension(attributes.inner_size.width, scale_factor),
+                physical_dimension(attributes.inner_size.height, scale_factor),
+            ),
+            scale_factor,
+        ));
+
+        native_window.setTitle(&NSString::from_str(&attributes.title));
+        native_window.setAcceptsMouseMovedEvents(true);
+        // A GPU-backed view cannot benefit from AppKit copying and stretching
+        // cached view contents during a live resize.
+        native_window.setPreservesContentDuringLiveResize(false);
+        let view = ContentView::new(
+            self.mtm,
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(attributes.inner_size.width, attributes.inner_size.height),
+            ),
+            state.clone(),
+            self.dispatcher.clone(),
+        );
+        view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
+        native_window.setContentView(Some(&view));
+
+        let delegate = WindowDelegate::new(self.mtm, state.clone(), self.dispatcher.clone());
+        native_window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        native_window.center();
+        native_window.makeKeyAndOrderFront(None);
+
+        self.windows
+            .insert(native_window.windowNumber(), Arc::downgrade(&state));
+
+        Ok(Window {
+            state,
+            native: NativeWindow {
+                window: native_window,
+                view,
+                _delegate: delegate,
+            },
+        })
+    }
+
+    pub(crate) fn set_handler(&self, handler: impl FnMut(WindowId, WindowEvent) + 'static) {
+        self.dispatcher.set_handler(Box::new(handler));
+    }
+
+    pub(crate) fn clear_handler(&self) {
+        self.dispatcher.clear_handler();
+    }
+
+    pub(crate) fn pump(&mut self) {
+        for _ in 0..MAX_NATIVE_EVENTS_PER_TICK {
+            let Some(mapped) = autoreleasepool(|_| {
+                let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                    NSEventMask::Any,
+                    Some(&NSDate::distantPast()),
+                    // SAFETY: This AppKit-provided run-loop mode is initialized by
+                    // Foundation before the application event loop is available.
+                    unsafe { NSDefaultRunLoopMode },
+                    true,
+                )?;
+
+                let mapped = self.map_event(&event);
+                self.app.sendEvent(&event);
+                Some(mapped)
+            }) else {
+                break;
+            };
+
+            if let Some((window_id, event)) = mapped {
+                self.dispatcher.dispatch(NativeEvent { window_id, event });
+            }
+        }
+
+        autoreleasepool(|_| self.app.updateWindows());
+
+        let dispatcher = self.dispatcher.clone();
+        self.windows.retain(|_, state| {
+            let Some(state) = state.upgrade() else {
+                return false;
+            };
+            if state.redraw_requested.swap(false, Ordering::AcqRel) {
+                dispatcher.dispatch(NativeEvent {
+                    window_id: state.id,
+                    event: WindowEvent::RedrawRequested,
+                });
+            }
+            true
+        });
+    }
+
+    fn map_event(&self, event: &NSEvent) -> Option<(WindowId, WindowEvent)> {
+        let state = self.windows.get(&event.windowNumber())?.upgrade()?;
+        let event_type = event.r#type();
+        let modifiers = modifiers(event.modifierFlags());
+
+        let event = if event_type == NSEventType::KeyDown || event_type == NSEventType::KeyUp {
+            WindowEvent::KeyboardInput(KeyEvent {
+                key_code: event.keyCode(),
+                text: event.characters().map(|text| text.to_string()),
+                state: if event_type == NSEventType::KeyDown {
+                    ElementState::Pressed
+                } else {
+                    ElementState::Released
+                },
+                repeat: event.isARepeat(),
+                modifiers,
+            })
+        } else if event_type == NSEventType::FlagsChanged {
+            WindowEvent::ModifiersChanged(modifiers)
+        } else if matches!(
+            event_type,
+            NSEventType::MouseMoved
+                | NSEventType::LeftMouseDragged
+                | NSEventType::RightMouseDragged
+                | NSEventType::OtherMouseDragged
+        ) {
+            WindowEvent::CursorMoved {
+                position: cursor_position(event, &state),
+            }
+        } else if matches!(
+            event_type,
+            NSEventType::LeftMouseDown
+                | NSEventType::LeftMouseUp
+                | NSEventType::RightMouseDown
+                | NSEventType::RightMouseUp
+                | NSEventType::OtherMouseDown
+                | NSEventType::OtherMouseUp
+        ) {
+            WindowEvent::MouseInput {
+                state: if matches!(
+                    event_type,
+                    NSEventType::LeftMouseDown
+                        | NSEventType::RightMouseDown
+                        | NSEventType::OtherMouseDown
+                ) {
+                    ElementState::Pressed
+                } else {
+                    ElementState::Released
+                },
+                button: mouse_button(event.buttonNumber()),
+            }
+        } else if event_type == NSEventType::ScrollWheel {
+            WindowEvent::MouseWheel {
+                delta_x: event.scrollingDeltaX(),
+                delta_y: event.scrollingDeltaY(),
+                precise: event.hasPreciseScrollingDeltas(),
+            }
+        } else {
+            return None;
+        };
+
+        Some((state.id, event))
+    }
+}
+
+fn cursor_position(event: &NSEvent, state: &WindowState) -> PhysicalPosition<f64> {
+    let scale = state.scale_factor();
+    let location = event.locationInWindow();
+    let height = state.size().height as f64;
+    PhysicalPosition::new(location.x * scale, height - location.y * scale)
+}
+
+fn mouse_button(button: isize) -> MouseButton {
+    match button {
+        0 => MouseButton::Left,
+        1 => MouseButton::Right,
+        2 => MouseButton::Middle,
+        button => MouseButton::Other(button.clamp(0, u16::MAX as isize) as u16),
+    }
+}
+
+fn modifiers(flags: NSEventModifierFlags) -> Modifiers {
+    Modifiers {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        control: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        command: flags.contains(NSEventModifierFlags::Command),
+        caps_lock: flags.contains(NSEventModifierFlags::CapsLock),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegate_events_dispatch_immediately_when_handler_is_installed() {
+        let dispatcher = EventDispatcher::default();
+        let received = Rc::new(RefCell::new(Vec::new()));
+        dispatcher.set_handler(Box::new({
+            let received = received.clone();
+            move |window_id, event| received.borrow_mut().push((window_id, event))
+        }));
+
+        dispatcher.dispatch(NativeEvent {
+            window_id: WindowId(7),
+            event: WindowEvent::Resized(PhysicalSize::new(1024, 768)),
+        });
+
+        assert_eq!(
+            *received.borrow(),
+            [(
+                WindowId(7),
+                WindowEvent::Resized(PhysicalSize::new(1024, 768))
+            )]
+        );
+    }
+}

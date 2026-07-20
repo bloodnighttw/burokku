@@ -1,10 +1,7 @@
-use std::{error::Error, thread};
+use std::error::Error;
 
 use runtime::{Runtime, WindowEventMessage};
-use tokio::{
-    runtime::Builder,
-    sync::mpsc::{self, Receiver},
-};
+use tokio::sync::mpsc::{self, Receiver};
 
 mod window;
 
@@ -36,58 +33,36 @@ setInterval(() => {
 }, 1000);
 "#;
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<(), Box<dyn Error>> {
     let (window_events_tx, window_events_rx) = mpsc::channel(256);
-    let js_thread = thread::Builder::new()
-        .name("burokku-js".into())
-        .spawn(move || run_javascript(window_events_rx))?;
+    let js_task = tokio::spawn(run_javascript(window_events_rx));
 
-    let window_result = window::run(window_events_tx);
-    let js_result = js_thread
-        .join()
-        .map_err(|_| std::io::Error::other("JavaScript thread panicked"))?;
+    let window_result = window::run(window_events_tx).await;
+    let js_result = js_task.await?;
 
     window_result?;
     js_result.map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())
 }
 
-fn run_javascript(
+async fn run_javascript(
     mut window_events_rx: Receiver<WindowEventMessage>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let tokio = Builder::new_current_thread().enable_all().build()?;
+    let runtime = Runtime::new().await?;
+    runtime.eval::<()>(DEFAULT_SCRIPT).await?;
 
-    Ok(tokio.block_on(async move {
-        let runtime = Runtime::new().await?;
-        runtime.eval::<()>(DEFAULT_SCRIPT).await?;
+    let mut batch = Vec::with_capacity(16);
 
-        let mut batch = Vec::with_capacity(16);
-
-        while let Some(event) = window_events_rx.recv().await {
+    while let Some(event) = window_events_rx.recv().await {
+        batch.push(event);
+        while let Ok(event) = window_events_rx.try_recv() {
             batch.push(event);
-            while let Ok(event) = window_events_rx.try_recv() {
-                batch.push(event);
-            }
-
-            let mut latest_resize = None;
-            let mut close_requested = false;
-            for event in batch.drain(..) {
-                match event {
-                    WindowEventMessage::CloseRequested => close_requested = true,
-                    resize @ WindowEventMessage::Resized { .. } => latest_resize = Some(resize),
-                }
-            }
-            if let Some(resize) = latest_resize {
-                batch.push(resize);
-            }
-            if close_requested {
-                batch.push(WindowEventMessage::CloseRequested);
-            }
-
-            runtime.enqueue_window_events(&batch).await?;
-            batch.clear();
         }
 
-        Ok::<(), runtime::Error>(())
-    })?)
+        runtime.enqueue_window_events(&batch).await?;
+        batch.clear();
+    }
+
+    Ok(())
 }

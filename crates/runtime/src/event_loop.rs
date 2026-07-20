@@ -1,4 +1,6 @@
-use crate::{host, task::Macrotask, Result, WindowEventMessage};
+use crate::{
+    host, task::Macrotask, InputState, ModifiersState, MouseButton, Result, WindowEventMessage,
+};
 use rquickjs::{AsyncContext, Ctx, Function, JsLifetime, Object};
 use std::{
     collections::HashSet,
@@ -108,9 +110,75 @@ fn dispatch_window_event<'js>(context: &Ctx<'js>, event: WindowEventMessage) {
             .set("type", "resized")
             .and_then(|()| js_event.set("width", width))
             .and_then(|()| js_event.set("height", height)),
+        WindowEventMessage::ScaleFactorChanged {
+            scale_factor,
+            width,
+            height,
+        } => js_event
+            .set("type", "scale-factor-changed")
+            .and_then(|()| js_event.set("scaleFactor", scale_factor))
+            .and_then(|()| js_event.set("width", width))
+            .and_then(|()| js_event.set("height", height)),
+        WindowEventMessage::Focused(focused) => js_event
+            .set("type", "focused")
+            .and_then(|()| js_event.set("focused", focused)),
+        WindowEventMessage::Occluded(occluded) => js_event
+            .set("type", "occluded")
+            .and_then(|()| js_event.set("occluded", occluded)),
+        WindowEventMessage::KeyboardInput {
+            key_code,
+            text,
+            state,
+            repeat,
+            modifiers,
+        } => js_event
+            .set("type", "keyboard-input")
+            .and_then(|()| js_event.set("keyCode", key_code))
+            .and_then(|()| js_event.set("text", text))
+            .and_then(|()| js_event.set("pressed", state == InputState::Pressed))
+            .and_then(|()| js_event.set("repeat", repeat))
+            .and_then(|()| set_modifiers(&js_event, modifiers)),
+        WindowEventMessage::ModifiersChanged(modifiers) => js_event
+            .set("type", "modifiers-changed")
+            .and_then(|()| set_modifiers(&js_event, modifiers)),
+        WindowEventMessage::CursorMoved { x, y } => js_event
+            .set("type", "cursor-moved")
+            .and_then(|()| js_event.set("x", x))
+            .and_then(|()| js_event.set("y", y)),
+        WindowEventMessage::MouseInput { state, button } => js_event
+            .set("type", "mouse-input")
+            .and_then(|()| js_event.set("pressed", state == InputState::Pressed))
+            .and_then(|()| js_event.set("button", mouse_button_code(button))),
+        WindowEventMessage::MouseWheel {
+            delta_x,
+            delta_y,
+            precise,
+        } => js_event
+            .set("type", "mouse-wheel")
+            .and_then(|()| js_event.set("deltaX", delta_x))
+            .and_then(|()| js_event.set("deltaY", delta_y))
+            .and_then(|()| js_event.set("precise", precise)),
     };
     if result.is_ok() {
         let _ = dispatch.call::<_, ()>((js_event,));
+    }
+}
+
+fn set_modifiers<'js>(event: &Object<'js>, modifiers: ModifiersState) -> Result<()> {
+    event
+        .set("shiftKey", modifiers.shift)
+        .and_then(|()| event.set("ctrlKey", modifiers.control))
+        .and_then(|()| event.set("altKey", modifiers.alt))
+        .and_then(|()| event.set("metaKey", modifiers.command))
+        .and_then(|()| event.set("capsLock", modifiers.caps_lock))
+}
+
+fn mouse_button_code(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::Other(button) => button,
     }
 }
 
@@ -126,10 +194,10 @@ pub(crate) fn enqueue_window_events<'js>(
     events: &[WindowEventMessage],
 ) -> Result<()> {
     let state = state(context)?;
-    for &event in events {
+    for event in events {
         state
             .tasks
-            .send(MacrotaskMessage::WindowEvent(event))
+            .send(MacrotaskMessage::WindowEvent(event.clone()))
             .map_err(|_| rquickjs::Error::Unknown)?;
     }
     Ok(())

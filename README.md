@@ -6,13 +6,14 @@ A Rust workspace containing an asynchronous JavaScript runtime and the Burokku a
 
 - `crates/runtime` — rquickjs-based JavaScript runtime with Tokio integration
 - `crates/render` — surface-backed WebGPU drawing library for boxes and text
+- `crates/winit` — small macOS/AppKit windowing layer with an async Tokio driver
 - `crates/burokku` — Taffy-based UI layout and application host
 - `packages/ui` — host protocol and React renderer
 - `example/react` — React + Vite example compiled for the QuickJS host
 
 ## Drawing
 
-`burokku` owns the `winit` window and WebGPU surface. `render` owns the drawing
+`burokku` owns the native window and WebGPU surface. `render` owns the drawing
 pipelines, shader code, text shaping, and texture atlas, and renders into the
 surface supplied by the application:
 
@@ -22,7 +23,7 @@ use render::{
     Renderer, SurfaceSize, TextConstraints, TextStyle, TextSystem,
 };
 
-// `window` is owned by the winit application.
+// `window` is an Rc<burokku_winit::Window> on the AppKit main thread.
 let instance = wgpu::Instance::new(
     wgpu::InstanceDescriptor::new_without_display_handle(),
 );
@@ -70,6 +71,12 @@ renderer.resize(&surface, SurfaceSize::new(new_size.width, new_size.height));
 ```
 
 ## Getting started
+
+Burokku currently supports macOS. Its AppKit event loop stays on the main
+thread inside a Tokio runtime, while JavaScript futures, timers, I/O, and other
+Tokio tasks can run on worker threads. AppKit delegate notifications dispatch
+immediately, including from the nested event-tracking loop used during live
+window resizing.
 
 ```sh
 cargo build --workspace
@@ -121,8 +128,10 @@ to `wgpu`. The total includes CPU preparation and presentation. Neither claims
 to measure GPU execution time; that requires timestamp queries or waiting for
 the GPU, which would change the behavior being measured.
 
-The current bridge covers rendering and layout. Window/input event dispatch is
-not part of this React API yet.
+Native close, resize, scale-factor, focus, occlusion, keyboard, modifier,
+cursor, mouse-button, and wheel events are delivered to
+`globalThis.__burokku_dispatch_event`. React node-level event props are not
+connected to that host event stream yet.
 
 Run checks with:
 

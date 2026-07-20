@@ -2,10 +2,64 @@ use crate::{event_loop, task::Microtask, Result};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, FromJs, Promise, ThrowResultExt};
 use tokio::task::JoinHandle;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputState {
+    Pressed,
+    Released,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Other(u16),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ModifiersState {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub command: bool,
+    pub caps_lock: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum WindowEventMessage {
     CloseRequested,
-    Resized { width: u32, height: u32 },
+    Resized {
+        width: u32,
+        height: u32,
+    },
+    ScaleFactorChanged {
+        scale_factor: f64,
+        width: u32,
+        height: u32,
+    },
+    Focused(bool),
+    Occluded(bool),
+    KeyboardInput {
+        key_code: u16,
+        text: Option<String>,
+        state: InputState,
+        repeat: bool,
+        modifiers: ModifiersState,
+    },
+    ModifiersChanged(ModifiersState),
+    CursorMoved {
+        x: f64,
+        y: f64,
+    },
+    MouseInput {
+        state: InputState,
+        button: MouseButton,
+    },
+    MouseWheel {
+        delta_x: f64,
+        delta_y: f64,
+        precise: bool,
+    },
 }
 
 /// A JavaScript execution context that integrates with Tokio.
