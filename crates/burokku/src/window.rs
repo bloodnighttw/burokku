@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc};
 
 use runtime::WindowEventMessage;
 use tokio::{runtime::Builder, sync::mpsc::Sender};
@@ -13,8 +13,6 @@ use winit::{
 use crate::window::gpu::GPU;
 
 mod gpu;
-
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 pub fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error>> {
     let tokio = Builder::new_current_thread().enable_all().build()?;
@@ -35,9 +33,6 @@ pub struct AppWindow {
     gpu: Option<GPU>,
     surface_version: u32,
     config_surface_version: u32,
-    redraw_requested: bool,
-    last_redraw: Option<std::time::Instant>,
-    next_redraw_at: Option<std::time::Instant>,
     error: Option<String>,
 }
 
@@ -50,9 +45,6 @@ impl AppWindow {
             gpu: None,
             surface_version: 0,
             config_surface_version: 0,
-            redraw_requested: false,
-            last_redraw: None,
-            next_redraw_at: None,
             error: None,
         }
     }
@@ -67,21 +59,8 @@ impl AppWindow {
     }
 
     fn request_redraw(&mut self) {
-        if self.redraw_requested {
-            return;
-        }
-
-        if let Some(last_redraw) = self.last_redraw {
-            let deadline = last_redraw + FRAME_INTERVAL;
-            if std::time::Instant::now() < deadline {
-                self.next_redraw_at = Some(deadline);
-                return;
-            }
-        }
-
         if let Some(window) = &self.window {
             window.request_redraw();
-            self.redraw_requested = true;
         }
     }
 
@@ -106,8 +85,6 @@ impl AppWindow {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        self.redraw_requested = false;
-
         let (Some(window), Some(gpu)) = (self.window.as_ref().cloned(), self.gpu.as_mut()) else {
             return;
         };
@@ -115,8 +92,6 @@ impl AppWindow {
         if size.width == 0 || size.height == 0 {
             return;
         }
-
-        self.last_redraw = Some(std::time::Instant::now());
 
         if self.surface_version != self.config_surface_version {
             gpu.resize(size);
@@ -188,16 +163,6 @@ impl ApplicationHandler for AppWindow {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(deadline) = self.next_redraw_at {
-            if std::time::Instant::now() >= deadline {
-                self.next_redraw_at = None;
-                self.request_redraw();
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-                return;
-            }
-        }
-
         event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
