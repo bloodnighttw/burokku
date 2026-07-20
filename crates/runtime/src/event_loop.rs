@@ -1,5 +1,5 @@
-use crate::{host, task::Macrotask, Result};
-use rquickjs::{AsyncContext, Ctx, JsLifetime, Object};
+use crate::{host, task::Macrotask, Result, WindowEventMessage};
+use rquickjs::{AsyncContext, Ctx, Function, JsLifetime, Object};
 use std::{
     collections::HashSet,
     sync::{atomic::AtomicU32, Arc, Mutex},
@@ -14,9 +14,14 @@ pub(crate) struct TimerTask {
     pub(crate) repeats: bool,
 }
 
+pub(crate) enum MacrotaskMessage {
+    Timer(TimerTask),
+    WindowEvent(WindowEventMessage),
+}
+
 #[derive(Clone)]
 pub(crate) struct EventLoopState {
-    pub(crate) tasks: tokio::sync::mpsc::UnboundedSender<TimerTask>,
+    pub(crate) tasks: tokio::sync::mpsc::UnboundedSender<MacrotaskMessage>,
     pub(crate) next_timer_id: Arc<AtomicU32>,
     pub(crate) cancelled_timers: Arc<Mutex<HashSet<u32>>>,
 }
@@ -52,32 +57,60 @@ pub(crate) async fn install(context: &AsyncContext) -> Result<()> {
         .await
 }
 
-async fn run_macrotasks<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<TimerTask>) {
+async fn run_macrotasks<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<MacrotaskMessage>) {
     let timers: Object = context
         .globals()
         .get(TIMER_REGISTRY)
         .expect("timer registry is installed before the event loop starts");
 
     while let Some(task) = tasks.recv().await {
-        if context.userdata::<EventLoopState>().is_some_and(|state| {
-            state
-                .cancelled_timers
-                .lock()
-                .expect("cancelled timer registry is not poisoned")
-                .contains(&task.id)
-        }) {
-            let _ = timers.remove(task.id);
-            continue;
-        }
-        if let Ok(callback) = timers.get::<_, rquickjs::Function>(task.id) {
-            if !task.repeats {
-                let _ = timers.remove(task.id);
+        match task {
+            MacrotaskMessage::Timer(task) => {
+                if context.userdata::<EventLoopState>().is_some_and(|state| {
+                    state
+                        .cancelled_timers
+                        .lock()
+                        .expect("cancelled timer registry is not poisoned")
+                        .contains(&task.id)
+                }) {
+                    let _ = timers.remove(task.id);
+                    continue;
+                }
+                if let Ok(callback) = timers.get::<_, Function>(task.id) {
+                    if !task.repeats {
+                        let _ = timers.remove(task.id);
+                    }
+                    let _ = callback.call::<_, ()>(());
+                }
             }
-            let _ = callback.call::<_, ()>(());
+            MacrotaskMessage::WindowEvent(event) => dispatch_window_event(&context, event),
         }
 
         // Give QuickJS a chance to drain promise jobs before the next timer.
         sleep(Duration::from_millis(0)).await;
+    }
+}
+
+fn dispatch_window_event<'js>(context: &Ctx<'js>, event: WindowEventMessage) {
+    let Ok(dispatch) = context
+        .globals()
+        .get::<_, Function>("__burokku_dispatch_event")
+    else {
+        return;
+    };
+    let Ok(js_event) = Object::new(context.clone()) else {
+        return;
+    };
+
+    let result = match event {
+        WindowEventMessage::CloseRequested => js_event.set("type", "close-requested"),
+        WindowEventMessage::Resized { width, height } => js_event
+            .set("type", "resized")
+            .and_then(|()| js_event.set("width", width))
+            .and_then(|()| js_event.set("height", height)),
+    };
+    if result.is_ok() {
+        let _ = dispatch.call::<_, ()>((js_event,));
     }
 }
 
@@ -86,4 +119,18 @@ pub(crate) fn state<'js>(context: &Ctx<'js>) -> Result<EventLoopState> {
         .userdata::<EventLoopState>()
         .ok_or(rquickjs::Error::Unknown)
         .map(|state| state.clone())
+}
+
+pub(crate) fn enqueue_window_events<'js>(
+    context: &Ctx<'js>,
+    events: &[WindowEventMessage],
+) -> Result<()> {
+    let state = state(context)?;
+    for &event in events {
+        state
+            .tasks
+            .send(MacrotaskMessage::WindowEvent(event))
+            .map_err(|_| rquickjs::Error::Unknown)?;
+    }
+    Ok(())
 }

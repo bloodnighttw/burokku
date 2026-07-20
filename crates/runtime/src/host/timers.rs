@@ -1,5 +1,5 @@
 use crate::{
-    event_loop::{self, TimerTask},
+    event_loop::{self, MacrotaskMessage, TimerTask},
     task::Macrotask,
     Result,
 };
@@ -53,7 +53,9 @@ fn set_timeout<'js>(context: Ctx<'js>, callback: Function<'js>, delay: Option<u6
         {
             return;
         }
-        let _ = state.tasks.send(TimerTask { id, repeats: false });
+        let _ = state
+            .tasks
+            .send(MacrotaskMessage::Timer(TimerTask { id, repeats: false }));
     }));
 
     Ok(id)
@@ -83,7 +85,11 @@ fn set_interval<'js>(
             {
                 break;
             }
-            if state.tasks.send(TimerTask { id, repeats: true }).is_err() {
+            if state
+                .tasks
+                .send(MacrotaskMessage::Timer(TimerTask { id, repeats: true }))
+                .is_err()
+            {
                 break;
             }
         }

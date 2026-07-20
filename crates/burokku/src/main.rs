@@ -12,18 +12,17 @@ const DEFAULT_SCRIPT: &str = r#"
 let resizeEvents = 0;
 let latestResize = null;
 
-globalThis.__burokku_dispatch_events = events => {
-    for (const event of events) {
-        if (event.type === "resized") {
-            resizeEvents += 1;
-            latestResize = event;
+globalThis.__burokku_dispatch_event = event => {
+    if (event.type === "resized") {
+        resizeEvents += 1;
+        latestResize = event;
+        console.log(`[JS] Event`);
 
-            if (resizeEvents === 1) {
-                console.log(`[JS] first resize: ${event.width}x${event.height}`);
-            }
-        } else {
-            console.log(`[JS] received Winit event: ${event.type}`);
+        if (resizeEvents === 1) {
+            console.log(`[JS] first resize: ${event.width}x${event.height}`);
         }
+    } else {
+        console.log(`[JS] received Winit event: ${event.type}`);
     }
 };
 
@@ -85,7 +84,7 @@ fn run_javascript(
                 batch.push(WindowEventMessage::CloseRequested);
             }
 
-            runtime.dispatch_window_events(&batch).await?;
+            runtime.enqueue_window_events(&batch).await?;
             batch.clear();
         }
 
