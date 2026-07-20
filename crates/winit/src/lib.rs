@@ -1,15 +1,16 @@
-//! A deliberately small, macOS-only windowing crate for Burokku.
+//! A deliberately small windowing crate for Burokku.
 //!
 //! The API follows the useful parts of winit's application-handler model, but
-//! [`EventLoop::run_app`] is asynchronous. AppKit events are drained in small
+//! [`EventLoop::run_app`] is asynchronous. Native events are drained in small
 //! batches and the driver yields to Tokio whenever the native queue is idle.
+//! macOS is currently implemented; other platform backends can be added behind
+//! the crate's internal platform boundary without changing this public API.
 
 pub mod dpi;
 pub mod event;
 pub mod event_loop;
 pub mod window;
 
-#[cfg(target_os = "macos")]
 mod platform;
 
 pub mod application {
@@ -31,7 +32,7 @@ pub enum Error {
     AlreadyRun,
     #[error("window creation failed: {0}")]
     WindowCreation(String),
-    #[error("burokku-winit currently supports only macOS")]
+    #[error("burokku-winit does not support this platform yet")]
     UnsupportedPlatform,
 }
 

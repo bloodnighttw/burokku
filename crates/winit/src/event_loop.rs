@@ -64,19 +64,13 @@ impl ActiveEventLoop {
 pub struct EventLoop {
     active: ActiveEventLoop,
     has_run: bool,
-    #[cfg(target_os = "macos")]
     platform: crate::platform::PlatformEventLoop,
 }
 
 impl EventLoop {
     pub fn new() -> crate::Result<Self> {
-        #[cfg(target_os = "macos")]
         let platform = crate::platform::PlatformEventLoop::new()?;
 
-        #[cfg(not(target_os = "macos"))]
-        return Err(crate::Error::UnsupportedPlatform);
-
-        #[cfg(target_os = "macos")]
         Ok(Self {
             active: ActiveEventLoop {
                 state: Rc::new(ActiveEventLoopState {
@@ -91,21 +85,18 @@ impl EventLoop {
 
     /// Create and show a native window.
     ///
-    /// This must be called on the macOS main thread, before or during
-    /// [`run_app`](Self::run_app).
+    /// This must be called on the platform event-loop thread, before or during
+    /// [`run_app`](Self::run_app). On macOS, that is the process main thread.
     pub fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
-        #[cfg(target_os = "macos")]
-        return self.platform.create_window(attributes);
-
-        #[cfg(not(target_os = "macos"))]
-        Err(crate::Error::UnsupportedPlatform)
+        self.platform.create_window(attributes)
     }
 
-    /// Drive AppKit as part of the current Tokio runtime.
+    /// Drive the native event queue as part of the current Tokio runtime.
     ///
-    /// This future is intentionally `!Send`: AppKit must remain on the process
-    /// main thread. Drive it directly from the runtime's main `block_on`
-    /// future; other `Send` tasks may use Tokio worker threads normally.
+    /// This future is intentionally `!Send` because native event loops are
+    /// thread-affine (AppKit requires the process main thread). Drive it
+    /// directly from the runtime's main `block_on` future; other `Send` tasks
+    /// may use Tokio worker threads normally.
     /// The handler is returned after the loop exits so callers can inspect
     /// application state or deferred errors.
     pub async fn run_app<A: ApplicationHandler + 'static>(
@@ -119,7 +110,6 @@ impl EventLoop {
 
         let application = Rc::new(RefCell::new(application));
 
-        #[cfg(target_os = "macos")]
         self.platform.set_handler({
             let application = application.clone();
             let active = self.active.clone();
@@ -133,7 +123,6 @@ impl EventLoop {
         application.borrow_mut().resumed(&self.active);
 
         while !self.active.exiting() {
-            #[cfg(target_os = "macos")]
             self.platform.pump();
 
             application.borrow_mut().about_to_wait(&self.active);
@@ -160,7 +149,6 @@ impl EventLoop {
 
         application.borrow_mut().exiting(&self.active);
 
-        #[cfg(target_os = "macos")]
         self.platform.clear_handler();
 
         match Rc::try_unwrap(application) {

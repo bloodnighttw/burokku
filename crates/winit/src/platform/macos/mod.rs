@@ -1,3 +1,5 @@
+//! macOS implementation backed by AppKit.
+
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
@@ -29,6 +31,10 @@ use objc2_foundation::{
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use objc2_quartz_core::{kCAGravityTopLeft, CALayer, CAMetalLayer};
+use raw_window_handle::{
+    AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
+    HasWindowHandle, WindowHandle,
+};
 
 const MAX_NATIVE_EVENTS_PER_TICK: usize = 256;
 
@@ -314,18 +320,18 @@ fn physical_dimension(points: f64, scale: f64) -> u32 {
     (points * scale).round().clamp(0.0, u32::MAX as f64) as u32
 }
 
-struct NativeWindowInner {
+struct PlatformWindowInner {
     window: Retained<NSWindow>,
     view: Retained<ContentView>,
     // NSWindow's delegate property is weak, so Rust must retain it.
     _delegate: Retained<WindowDelegate>,
 }
 
-pub(crate) struct NativeWindow {
-    inner: MainThreadBound<NativeWindowInner>,
+pub(crate) struct PlatformWindow {
+    inner: MainThreadBound<PlatformWindowInner>,
 }
 
-impl NativeWindow {
+impl PlatformWindow {
     fn new(
         mtm: MainThreadMarker,
         window: Retained<NSWindow>,
@@ -334,7 +340,7 @@ impl NativeWindow {
     ) -> Self {
         Self {
             inner: MainThreadBound::new(
-                NativeWindowInner {
+                PlatformWindowInner {
                     window,
                     view,
                     _delegate: delegate,
@@ -362,6 +368,25 @@ impl NativeWindow {
         let mtm = MainThreadMarker::new()
             .expect("Window::request_redraw must be called on the main thread");
         self.inner.get(mtm).view.setNeedsDisplay(true);
+    }
+}
+
+impl HasWindowHandle for PlatformWindow {
+    fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
+        let view = self.view_ptr().ok_or(HandleError::Unavailable)?;
+        let handle = AppKitWindowHandle::new(view);
+        // SAFETY: PlatformWindow retains the NSWindow and its content NSView
+        // for at least as long as this borrowed WindowHandle.
+        Ok(unsafe { WindowHandle::borrow_raw(handle.into()) })
+    }
+}
+
+impl HasDisplayHandle for PlatformWindow {
+    fn display_handle(&self) -> std::result::Result<DisplayHandle<'_>, HandleError> {
+        let handle = AppKitDisplayHandle::new();
+        // SAFETY: AppKit has no per-connection display pointer; this empty
+        // handle represents the process-wide AppKit display.
+        Ok(unsafe { DisplayHandle::borrow_raw(handle.into()) })
     }
 }
 
@@ -465,7 +490,7 @@ impl PlatformEventLoop {
 
         Ok(Window {
             state,
-            native: NativeWindow::new(self.mtm, native_window, view, delegate),
+            platform: PlatformWindow::new(self.mtm, native_window, view, delegate),
         })
     }
 

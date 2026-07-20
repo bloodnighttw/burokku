@@ -25,7 +25,7 @@ pub struct Modifiers {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyEvent {
-    /// The hardware-independent macOS virtual key code.
+    /// The platform's numeric virtual key code.
     pub key_code: u16,
     /// Text after applying the current keyboard layout, when available.
     pub text: Option<String>,

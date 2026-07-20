@@ -2,7 +2,7 @@
 name = "burokku-winit"
 version = "0.1.0"
 edition = "2021"
-description = "A small macOS window and Tokio event-loop crate for Burokku"
+description = "A small native window and Tokio event-loop crate for Burokku"
 license = "MIT"
 
 [dependencies]

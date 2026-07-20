@@ -1,8 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use raw_window_handle::{
-    AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
-    HasWindowHandle, WindowHandle,
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
 use crate::{LogicalSize, PhysicalSize};
@@ -52,7 +51,10 @@ pub(crate) struct WindowState {
     pub(crate) redraw_requested: AtomicBool,
 }
 
+// The unsupported placeholder backend does not construct window state, while
+// every native backend uses these shared state transitions.
 impl WindowState {
+    #[allow(dead_code)]
     pub(crate) fn new(id: WindowId, size: PhysicalSize<u32>, scale_factor: f64) -> Self {
         Self {
             id,
@@ -62,10 +64,12 @@ impl WindowState {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_size(&self, size: PhysicalSize<u32>) {
         self.size.store(pack_size(size), Ordering::Release);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_scale_factor(&self, scale_factor: f64) {
         self.scale_factor
             .store(scale_factor.to_bits(), Ordering::Release);
@@ -80,6 +84,7 @@ impl WindowState {
     }
 }
 
+#[allow(dead_code)]
 const fn pack_size(size: PhysicalSize<u32>) -> u64 {
     ((size.width as u64) << 32) | size.height as u64
 }
@@ -90,8 +95,7 @@ const fn unpack_size(size: u64) -> PhysicalSize<u32> {
 
 pub struct Window {
     pub(crate) state: std::sync::Arc<WindowState>,
-    #[cfg(target_os = "macos")]
-    pub(crate) native: crate::platform::NativeWindow,
+    pub(crate) platform: crate::platform::PlatformWindow,
 }
 
 impl Window {
@@ -114,19 +118,17 @@ impl Window {
     pub fn request_redraw(&self) {
         self.state.redraw_requested.store(true, Ordering::Release);
 
-        #[cfg(target_os = "macos")]
-        self.native.request_redraw();
+        self.platform.request_redraw();
     }
 
     /// Hook called immediately before presenting a frame.
     ///
-    /// AppKit and Metal do not require additional work here, but keeping this
-    /// hook makes renderers portable across winit and burokku-winit.
+    /// The current backend does not require additional work here, but keeping
+    /// this hook makes renderers portable across winit and burokku-winit.
     pub fn pre_present_notify(&self) {}
 
-    #[cfg(target_os = "macos")]
     pub fn set_title(&self, title: &str) {
-        self.native.set_title(title);
+        self.platform.set_title(title);
     }
 }
 
@@ -143,36 +145,13 @@ impl std::fmt::Debug for Window {
 
 impl HasWindowHandle for Window {
     fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
-        #[cfg(target_os = "macos")]
-        {
-            let view = self.native.view_ptr().ok_or(HandleError::Unavailable)?;
-            let handle = AppKitWindowHandle::new(view);
-            // SAFETY: NativeWindow retains the NSWindow and its content NSView
-            // for at least as long as this borrowed WindowHandle.
-            Ok(unsafe { WindowHandle::borrow_raw(handle.into()) })
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(HandleError::Unavailable)
-        }
+        self.platform.window_handle()
     }
 }
 
 impl HasDisplayHandle for Window {
     fn display_handle(&self) -> std::result::Result<DisplayHandle<'_>, HandleError> {
-        #[cfg(target_os = "macos")]
-        {
-            let handle = AppKitDisplayHandle::new();
-            // SAFETY: AppKit has no per-connection display pointer; this empty
-            // handle represents the process-wide AppKit display.
-            Ok(unsafe { DisplayHandle::borrow_raw(handle.into()) })
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(HandleError::Unavailable)
-        }
+        self.platform.display_handle()
     }
 }
 
