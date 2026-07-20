@@ -1,6 +1,15 @@
 use crate::{event_loop, task::Microtask, Result};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, FromJs, Promise, ThrowResultExt};
+use rquickjs::{
+    Array, AsyncContext, AsyncRuntime, CatchResultExt, Ctx, FromJs, Function, Object, Promise,
+    ThrowResultExt,
+};
 use tokio::task::JoinHandle;
+
+#[derive(Clone, Copy, Debug)]
+pub enum WindowEventMessage {
+    CloseRequested,
+    Resized { width: u32, height: u32 },
+}
 
 /// A JavaScript execution context that integrates with Tokio.
 ///
@@ -54,6 +63,33 @@ impl Runtime {
                         error
                     })
                     .throw(&ctx)
+            })
+            .await
+    }
+
+    /// Dispatch a batch of native window events to the JavaScript event bridge.
+    pub async fn dispatch_window_events(&self, events: &[WindowEventMessage]) -> Result<()> {
+        self.context
+            .with(move |ctx| {
+                let dispatch: Function = ctx.globals().get("__burokku_dispatch_events")?;
+                let js_events = Array::new(ctx.clone())?;
+
+                for (index, event) in events.iter().enumerate() {
+                    let js_event = Object::new(ctx.clone())?;
+                    match event {
+                        WindowEventMessage::CloseRequested => {
+                            js_event.set("type", "close-requested")?;
+                        }
+                        WindowEventMessage::Resized { width, height } => {
+                            js_event.set("type", "resized")?;
+                            js_event.set("width", *width)?;
+                            js_event.set("height", *height)?;
+                        }
+                    }
+                    js_events.set(index, js_event)?;
+                }
+
+                dispatch.call::<_, ()>((js_events,))
             })
             .await
     }

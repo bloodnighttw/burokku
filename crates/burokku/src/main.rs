@@ -1,30 +1,94 @@
-use runtime::Runtime;
+use std::{error::Error, thread};
+
+use runtime::{Runtime, WindowEventMessage};
+use tokio::{
+    runtime::Builder,
+    sync::mpsc::{self, Receiver},
+};
 
 mod window;
 
 const DEFAULT_SCRIPT: &str = r#"
-(async () => {
-    console.log("A");
+let resizeEvents = 0;
+let latestResize = null;
 
-    setTimeout(() => console.log("B"), 0);
+globalThis.__burokku_dispatch_events = events => {
+    for (const event of events) {
+        if (event.type === "resized") {
+            resizeEvents += 1;
+            latestResize = event;
 
-    Promise.resolve().then(() => console.log("C"));
+            if (resizeEvents === 1) {
+                console.log(`[JS] first resize: ${event.width}x${event.height}`);
+            }
+        } else {
+            console.log(`[JS] received Winit event: ${event.type}`);
+        }
+    }
+};
 
-    console.log("D");
+console.log("[JS] event loop started");
 
-    // Keep the top-level promise alive long enough for the timer macrotask.
-    await new Promise(resolve => setTimeout(resolve, 0));
-})();
+setInterval(() => {
+    const size = latestResize
+        ? `, latest size: ${latestResize.width}x${latestResize.height}`
+        : "";
+    console.log(`[JS] heartbeat; resize events received: ${resizeEvents}${size}`);
+}, 1000);
 "#;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run().await
+fn main() -> Result<(), Box<dyn Error>> {
+    let (window_events_tx, window_events_rx) = mpsc::channel(256);
+    let js_thread = thread::Builder::new()
+        .name("burokku-js".into())
+        .spawn(move || run_javascript(window_events_rx))?;
+
+    let window_result = window::run(window_events_tx);
+    let js_result = js_thread
+        .join()
+        .map_err(|_| std::io::Error::other("JavaScript thread panicked"))?;
+
+    window_result?;
+    js_result.map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(())
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = Runtime::new().await?;
-    runtime.eval_promise::<()>(DEFAULT_SCRIPT).await?;
-    window::run()?;
-    Ok(())
+fn run_javascript(
+    mut window_events_rx: Receiver<WindowEventMessage>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let tokio = Builder::new_current_thread().enable_all().build()?;
+
+    Ok(tokio.block_on(async move {
+        let runtime = Runtime::new().await?;
+        runtime.eval::<()>(DEFAULT_SCRIPT).await?;
+
+        let mut batch = Vec::with_capacity(16);
+
+        while let Some(event) = window_events_rx.recv().await {
+            batch.push(event);
+            while let Ok(event) = window_events_rx.try_recv() {
+                batch.push(event);
+            }
+
+            let mut latest_resize = None;
+            let mut close_requested = false;
+            for event in batch.drain(..) {
+                match event {
+                    WindowEventMessage::CloseRequested => close_requested = true,
+                    resize @ WindowEventMessage::Resized { .. } => latest_resize = Some(resize),
+                }
+            }
+            if let Some(resize) = latest_resize {
+                batch.push(resize);
+            }
+            if close_requested {
+                batch.push(WindowEventMessage::CloseRequested);
+            }
+
+            runtime.dispatch_window_events(&batch).await?;
+            batch.clear();
+        }
+
+        Ok::<(), runtime::Error>(())
+    })?)
 }

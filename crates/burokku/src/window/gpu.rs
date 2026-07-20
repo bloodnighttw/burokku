@@ -1,6 +1,6 @@
 use std::{error::Error, sync::Arc};
 
-use render::{wgpu, Canvas, Color, RenderError, Renderer, SurfaceSize, TextSystem};
+use render::{wgpu, BoxStyle, Canvas, Color, Rect, RenderError, Renderer, SurfaceSize, TextSystem};
 use winit::{dpi::PhysicalSize, window::Window};
 
 /// The WebGPU state used by the application window.
@@ -25,11 +25,20 @@ impl GPU {
             SurfaceSize::new(size.width, size.height),
         ))?;
 
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(100.0, 100.0, 200.0, 150.0),
+            BoxStyle {
+                background: Color::from_rgba8(30, 120, 220, 255),
+                ..BoxStyle::default()
+            },
+        );
+
         Ok(Self {
             _instance: instance,
             surface,
             renderer,
-            canvas: Canvas::new().with_clear_color(Color::WHITE),
+            canvas,
             text_system: TextSystem::new(),
         })
     }

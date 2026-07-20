@@ -10,7 +10,7 @@ mod tests;
 
 pub use rquickjs;
 pub use rquickjs::Error;
-pub use runtime::Runtime;
+pub use runtime::{Runtime, WindowEventMessage};
 
 /// The result type returned by this crate.
 pub type Result<T> = rquickjs::Result<T>;
