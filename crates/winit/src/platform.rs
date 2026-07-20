@@ -11,6 +11,7 @@ use crate::{
     ElementState, Error, KeyEvent, Modifiers, MouseButton, PhysicalPosition, PhysicalSize, Window,
     WindowAttributes, WindowEvent, WindowId,
 };
+use dispatch2::MainThreadBound;
 use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
@@ -313,32 +314,54 @@ fn physical_dimension(points: f64, scale: f64) -> u32 {
     (points * scale).round().clamp(0.0, u32::MAX as f64) as u32
 }
 
-pub(crate) struct NativeWindow {
+struct NativeWindowInner {
     window: Retained<NSWindow>,
     view: Retained<ContentView>,
     // NSWindow's delegate property is weak, so Rust must retain it.
     _delegate: Retained<WindowDelegate>,
 }
 
+pub(crate) struct NativeWindow {
+    inner: MainThreadBound<NativeWindowInner>,
+}
+
 impl NativeWindow {
-    pub(crate) fn view_ptr(&self) -> NonNull<std::ffi::c_void> {
-        NonNull::from(&*self.view).cast()
+    fn new(
+        mtm: MainThreadMarker,
+        window: Retained<NSWindow>,
+        view: Retained<ContentView>,
+        delegate: Retained<WindowDelegate>,
+    ) -> Self {
+        Self {
+            inner: MainThreadBound::new(
+                NativeWindowInner {
+                    window,
+                    view,
+                    _delegate: delegate,
+                },
+                mtm,
+            ),
+        }
+    }
+
+    pub(crate) fn view_ptr(&self) -> Option<NonNull<std::ffi::c_void>> {
+        let mtm = MainThreadMarker::new()?;
+        Some(NonNull::from(&*self.inner.get(mtm).view).cast())
     }
 
     pub(crate) fn set_title(&self, title: &str) {
-        assert!(
-            MainThreadMarker::new().is_some(),
-            "Window::set_title must be called on the main thread"
-        );
-        self.window.setTitle(&NSString::from_str(title));
+        let mtm =
+            MainThreadMarker::new().expect("Window::set_title must be called on the main thread");
+        self.inner
+            .get(mtm)
+            .window
+            .setTitle(&NSString::from_str(title));
     }
 
     pub(crate) fn request_redraw(&self) {
-        assert!(
-            MainThreadMarker::new().is_some(),
-            "Window::request_redraw must be called on the main thread"
-        );
-        self.view.setNeedsDisplay(true);
+        let mtm = MainThreadMarker::new()
+            .expect("Window::request_redraw must be called on the main thread");
+        self.inner.get(mtm).view.setNeedsDisplay(true);
     }
 }
 
@@ -442,11 +465,7 @@ impl PlatformEventLoop {
 
         Ok(Window {
             state,
-            native: NativeWindow {
-                window: native_window,
-                view,
-                _delegate: delegate,
-            },
+            native: NativeWindow::new(self.mtm, native_window, view, delegate),
         })
     }
 

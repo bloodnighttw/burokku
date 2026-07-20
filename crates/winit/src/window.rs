@@ -145,7 +145,8 @@ impl HasWindowHandle for Window {
     fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
         #[cfg(target_os = "macos")]
         {
-            let handle = AppKitWindowHandle::new(self.native.view_ptr());
+            let view = self.native.view_ptr().ok_or(HandleError::Unavailable)?;
+            let handle = AppKitWindowHandle::new(view);
             // SAFETY: NativeWindow retains the NSWindow and its content NSView
             // for at least as long as this borrowed WindowHandle.
             Ok(unsafe { WindowHandle::borrow_raw(handle.into()) })
@@ -195,5 +196,12 @@ mod tests {
     fn physical_size_round_trips_through_atomic_storage() {
         let size = PhysicalSize::new(u32::MAX, 42);
         assert_eq!(unpack_size(pack_size(size)), size);
+    }
+
+    #[test]
+    fn window_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<Window>();
     }
 }

@@ -23,7 +23,7 @@ use render::{
     Renderer, SurfaceSize, TextConstraints, TextStyle, TextSystem,
 };
 
-// `window` is an Rc<burokku_winit::Window> on the AppKit main thread.
+// `window` is an Arc<burokku_winit::Window> on the AppKit main thread.
 let instance = wgpu::Instance::new(
     wgpu::InstanceDescriptor::new_without_display_handle(),
 );

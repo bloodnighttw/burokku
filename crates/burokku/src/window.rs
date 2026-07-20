@@ -1,4 +1,4 @@
-use std::{error::Error, rc::Rc};
+use std::{error::Error, sync::Arc};
 
 use runtime::{InputState, ModifiersState, MouseButton, WindowEventMessage};
 use tokio::sync::mpsc::Sender;
@@ -16,7 +16,7 @@ mod gpu;
 
 pub async fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error>> {
     let mut event_loop = EventLoop::new()?;
-    let window = Rc::new(
+    let window = Arc::new(
         event_loop.create_window(
             Window::default_attributes()
                 .with_title("Burokku")
@@ -35,7 +35,7 @@ pub async fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error
 
 pub struct AppWindow {
     events: Sender<WindowEventMessage>,
-    window: Rc<Window>,
+    window: Arc<Window>,
     gpu: GPU,
     surface_version: u32,
     config_surface_version: u32,
@@ -43,7 +43,7 @@ pub struct AppWindow {
 }
 
 impl AppWindow {
-    fn new(events: Sender<WindowEventMessage>, window: Rc<Window>, gpu: GPU) -> Self {
+    fn new(events: Sender<WindowEventMessage>, window: Arc<Window>, gpu: GPU) -> Self {
         Self {
             events,
             window,
