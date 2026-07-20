@@ -1,3 +1,4 @@
 [workspace]
 members = ["crates/runtime", "crates/render", "crates/burokku"]
+exclude = ["crates/winit"]
 resolver = "2"
