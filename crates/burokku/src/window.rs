@@ -37,8 +37,8 @@ pub struct AppWindow {
     events: Sender<WindowEventMessage>,
     window: Arc<Window>,
     gpu: GPU,
-    surface_version: u32,
-    config_surface_version: u32,
+    surface_version: u16,
+    config_surface_version: u16,
     error: Option<String>,
 }
 
