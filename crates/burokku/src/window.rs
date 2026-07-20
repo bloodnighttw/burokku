@@ -1,4 +1,8 @@
-use std::{error::Error, sync::Arc};
+use std::{
+    error::Error,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use runtime::{InputState, ModifiersState, MouseButton, WindowEventMessage};
 use tokio::sync::mpsc::Sender;
@@ -10,11 +14,12 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use crate::dom::DomStore;
 use crate::window::gpu::GPU;
 
 mod gpu;
 
-pub async fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error>> {
+pub async fn run(events: Sender<WindowEventMessage>, dom: DomStore) -> Result<(), Box<dyn Error>> {
     let mut event_loop = EventLoop::new()?;
     let window = Arc::new(
         event_loop.create_window(
@@ -23,7 +28,7 @@ pub async fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error
                 .with_inner_size(LogicalSize::new(800.0, 600.0)),
         )?,
     );
-    let gpu = GPU::new(window.clone()).await?;
+    let gpu = GPU::new(window.clone(), dom).await?;
     let application = AppWindow::new(events, window, gpu);
     let application = event_loop.run_app(application).await?;
 
@@ -75,7 +80,10 @@ impl AppWindow {
         }
 
         if self.surface_version != self.config_surface_version {
-            self.gpu.resize(size);
+            if let Err(error) = self.gpu.resize(size, window.scale_factor()) {
+                self.fail(event_loop, error);
+                return;
+            }
             self.config_surface_version = self.surface_version;
         }
 
@@ -180,7 +188,14 @@ impl ApplicationHandler for AppWindow {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Wait);
+        match self.gpu.sync_dom(&self.window) {
+            Ok(true) => self.request_redraw(),
+            Ok(false) => {}
+            Err(error) => self.fail(event_loop, error),
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(16),
+        ));
     }
 }
 

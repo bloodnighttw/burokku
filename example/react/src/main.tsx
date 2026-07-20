@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createRoot } from "@burokku/ui/react";
+import { createRoot } from "@burokku/react";
 
 function App() {
   const [remaining, setRemaining] = useState(10);
@@ -33,10 +33,10 @@ function App() {
       }}
     >
       <span style={{ display: "flex", flexDirection: "row", gap: 6 }}>
-        <text style={{ color: "#18202b", fontSize: 28, lineHeight: 34, fontWeight: 700 }}>
+        <span style={{ color: "#18202b", fontSize: 28, lineHeight: "34px", fontWeight: 700 }}>
           Burokku
-        </text>
-        <text style={{ color: "#526071", fontSize: 28, lineHeight: 34 }}>React</text>
+        </span>
+        <span style={{ color: "#526071", fontSize: 28, lineHeight: "34px" }}>React DOM</span>
       </span>
       <span
         style={{
@@ -49,12 +49,12 @@ function App() {
           borderRadius: 12,
         }}
       >
-        <text style={{ color: "#526071", fontSize: 16, lineHeight: 24 }}>
+        <span style={{ color: "#526071", fontSize: 16, lineHeight: "24px" }}>
           Countdown
-        </text>
-        <text style={{ color: "#18202b", fontSize: 72, lineHeight: 82, fontWeight: 700 }}>
+        </span>
+        <span style={{ color: "#18202b", fontSize: 72, lineHeight: "82px", fontWeight: 700 }}>
           {remaining}
-        </text>
+        </span>
       </span>
       <button
         style={{
@@ -64,12 +64,12 @@ function App() {
           borderRadius: 10,
         }}
       >
-        <text style={{ color: "#ffffff", fontSize: 16, lineHeight: 20, fontWeight: 700 }}>
+        <span style={{ color: "#ffffff", fontSize: 16, lineHeight: "20px", fontWeight: 700 }}>
           {remaining === 0 ? "Finished" : "Counting down…"}
-        </text>
+        </span>
       </button>
     </div>
   );
 }
 
-createRoot().render(<App />);
+createRoot(document.body).render(<App />);

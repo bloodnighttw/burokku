@@ -1,5 +1,5 @@
 {
-  "name": "@burokku/example-react",
+  "name": "@burokku/example-solid",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,14 +8,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@burokku/react": "workspace:*",
-    "react": "19.2.7",
-    "react-reconciler": "0.33.0"
+    "@burokku/solid": "workspace:*",
+    "solid-js": "^1.9.9"
   },
   "devDependencies": {
-    "@types/react": "^19.2.0",
-    "@vitejs/plugin-react": "6.0.3",
     "typescript": "^5.9.0",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "vite-plugin-solid": "^2.11.10"
   }
 }

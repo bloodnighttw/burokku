@@ -7,9 +7,11 @@ A Rust workspace containing an asynchronous JavaScript runtime and the Burokku a
 - `crates/runtime` — rquickjs-based JavaScript runtime with Tokio integration
 - `crates/render` — surface-backed WebGPU drawing library for boxes and text
 - `crates/winit` — small macOS/AppKit windowing layer with an async Tokio driver
-- `crates/burokku` — Taffy-based UI layout and application host
-- `packages/ui` — host protocol and React renderer
-- `example/react` — React + Vite example compiled for the QuickJS host
+- `crates/burokku` — DOM-like API, Taffy layout, and application host
+- `packages/runtime` — shared DOM property and style operations
+- `packages/react` — custom React reconciler for Burokku nodes
+- `packages/solid` — custom Solid universal renderer for Burokku nodes
+- `example/react` and `example/solid` — Vite examples compiled for QuickJS
 
 ## Drawing
 
@@ -83,22 +85,44 @@ cargo build --workspace
 cargo run -p burokku
 ```
 
-The application prints a greeting and the result of a JavaScript calculation. Pass a
-JavaScript file as the first argument to run it instead:
+The default script draws a small DOM example. Pass a compiled JavaScript file as
+the first argument to run it instead:
 
 ```sh
 cargo run -p burokku -- ./script.js
 ```
 
-## React UI
+## DOM UI
 
-The React API maps `div`, `button`, `span`, and `text` to Burokku UI nodes. Set
-`jsxImportSource` to `@burokku/ui` so TypeScript checks styles against the
-Burokku API. At each React commit, the reconciler sends only typed create,
-style, text, insert, and remove mutations to the Rust host, followed by one
-flush marker. Rust owns the persistent UI tree, measures text with `TextSystem`,
-computes layout with Taffy, then converts it into `render::Canvas` drawing
-commands. No JSON tree serialization is involved.
+Burokku installs `document`, `Node`, `Element`, `HTMLElement`, `Text`, and
+`DocumentFragment` in QuickJS. JavaScript can use familiar DOM operations such
+as `document.createElement`, `appendChild`, `insertBefore`, `removeChild`,
+`textContent`, attributes, and `element.style`. Rust owns the persistent tree,
+measures text with `TextSystem`, computes layout with Taffy, then converts the
+result into `render::Canvas` drawing commands.
+
+React uses the custom reconciler in `@burokku/react`:
+
+```tsx
+import { createRoot } from "@burokku/react";
+
+createRoot(document.body).render(
+  <div style={{ padding: 24, backgroundColor: "#f5f7fa" }}>Hello</div>,
+);
+```
+
+Solid uses `@burokku/solid`, which is built on `solid-js/universal` and performs
+fine-grained updates against the same native nodes:
+
+```tsx
+import { render } from "@burokku/solid";
+
+render(() => <div style={{ padding: "24px" }}>Hello</div>, document.body);
+```
+
+The currently supported visual CSS subset is flex/block display, width and
+height constraints, gap, padding, margin, background and text color, border,
+outline, radius, and basic font properties.
 
 Build and run the Vite example with:
 
@@ -106,32 +130,18 @@ Build and run the Vite example with:
 pnpm install
 pnpm --filter @burokku/example-react build
 cargo run -p burokku -- example/react/dist/app.js
+
+pnpm --filter @burokku/example-solid build
+cargo run -p burokku -- example/solid/dist/app.js
 ```
 
-This opens an `800x600` native window and presents the React UI through WebGPU.
-
-GPU queue-submit timing is summarized once per second without blocking every
-resize frame. Set `BUROKKU_PERF=1` to additionally print every native stage and
-frame:
-
-```text
-[Burokku perf] React commit #1: bridge 0.092 ms (79 mutations)
-[Burokku perf] React root render: 0.832 ms (reconcile + commit)
-[Burokku perf] Host commit #1: applied 79 native mutations
-[Burokku perf] UI commit #1 (initial): layout 0.410 ms, paint 0.021 ms, 8 commands
-[Burokku perf] WebGPU frame #1 (commit #1): GPU queue submit 0.018 ms CPU, 0.350 ms total submit + present
-[Burokku perf] GPU queue submit: 0.020 ms average, 0.031 ms max (60 frames)
-```
-
-The GPU queue-submit number measures the CPU call that sends the command buffer
-to `wgpu`. The total includes CPU preparation and presentation. Neither claims
-to measure GPU execution time; that requires timestamp queries or waiting for
-the GPU, which would change the behavior being measured.
+Each command opens an `800x600` native window and presents the UI through
+WebGPU.
 
 Native close, resize, scale-factor, focus, occlusion, keyboard, modifier,
 cursor, mouse-button, and wheel events are delivered to
-`globalThis.__burokku_dispatch_event`. React node-level event props are not
-connected to that host event stream yet.
+`window` event listeners. Element-level hit testing and event bubbling are not
+connected yet.
 
 Run checks with:
 
@@ -139,5 +149,5 @@ Run checks with:
 just test
 ```
 
-`just test` runs the Rust workspace tests, React renderer tests and type checks,
-builds the Vite example, and executes that bundle through QuickJS.
+`just test` runs the Rust workspace tests, type-checks all three runtime
+packages, builds both Vite examples, and executes both bundles through QuickJS.

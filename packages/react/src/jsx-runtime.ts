@@ -1,8 +1,16 @@
-import type { JSX as ReactJSX } from "react";
-
-import type { ElementProps } from "./index";
+import type { JSX as ReactJSX, ReactNode } from "react";
+import type { BurokkuStyle } from "@burokku/runtime";
 
 export { Fragment, jsx, jsxs } from "react/jsx-runtime";
+
+export interface ElementProps {
+  children?: ReactNode;
+  style?: BurokkuStyle;
+  id?: string;
+  className?: string;
+  onClick?: (event: Event) => void;
+  [name: string]: unknown;
+}
 
 export namespace JSX {
   export type Element = ReactJSX.Element;
@@ -16,9 +24,6 @@ export namespace JSX {
   export interface IntrinsicAttributes extends ReactJSX.IntrinsicAttributes {}
   export interface IntrinsicClassAttributes<T> extends ReactJSX.IntrinsicClassAttributes<T> {}
   export interface IntrinsicElements {
-    div: ElementProps;
-    button: ElementProps;
-    span: ElementProps;
-    text: ElementProps;
+    [name: string]: ElementProps;
   }
 }

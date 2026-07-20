@@ -1,5 +1,5 @@
 {
-  "name": "@burokku/ui",
+  "name": "@burokku/react",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,10 +7,6 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./react": {
-      "types": "./src/react.ts",
-      "default": "./src/react.ts"
     },
     "./jsx-runtime": {
       "types": "./src/jsx-runtime.ts",
@@ -22,19 +18,18 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "react": "19.2.7"
   },
   "dependencies": {
+    "@burokku/runtime": "workspace:*",
     "react-reconciler": "0.33.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",
     "react": "19.2.7",
-    "typescript": "^5.9.0",
-    "vitest": "^4.0.0"
+    "typescript": "^5.9.0"
   }
 }
