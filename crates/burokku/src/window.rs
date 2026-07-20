@@ -32,7 +32,6 @@ pub fn run(
 struct UiApplication {
     document: UiDocument,
     pending_document: UiDocument,
-    pending_mutation_count: usize,
     updates: UnboundedReceiver<UiUpdate>,
     window: Option<Arc<Window>>,
     instance: Option<wgpu::Instance>,
@@ -43,12 +42,6 @@ struct UiApplication {
     canvas: Canvas,
     pending_surface_size: Option<PhysicalSize<u32>>,
     canvas_dirty: bool,
-    perf_logging: bool,
-    frame_number: u64,
-    gpu_submit_samples: u64,
-    gpu_submit_total: Duration,
-    gpu_submit_max: Duration,
-    gpu_submit_log_started_at: Instant,
     error: Option<String>,
 }
 
@@ -56,7 +49,6 @@ impl UiApplication {
     fn new(document: UiDocument, updates: UnboundedReceiver<UiUpdate>) -> Self {
         Self {
             pending_document: document.clone(),
-            pending_mutation_count: 0,
             document,
             updates,
             window: None,
@@ -68,12 +60,6 @@ impl UiApplication {
             canvas: Canvas::new(),
             pending_surface_size: None,
             canvas_dirty: false,
-            perf_logging: std::env::var_os("BUROKKU_PERF").is_some(),
-            frame_number: 0,
-            gpu_submit_samples: 0,
-            gpu_submit_total: Duration::ZERO,
-            gpu_submit_max: Duration::ZERO,
-            gpu_submit_log_started_at: Instant::now(),
             error: None,
         }
     }
@@ -92,22 +78,15 @@ impl UiApplication {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface: wgpu::Surface<'static> = instance.create_surface(window.clone())?;
-        let renderer_started_at = Instant::now();
         let renderer = pollster::block_on(Renderer::new(
             &instance,
             &surface,
             SurfaceSize::new(size.width, size.height),
         ))?;
-        if self.perf_logging {
-            println!(
-                "[Burokku perf] WebGPU initialization: {:.3} ms",
-                renderer_started_at.elapsed().as_secs_f64() * 1_000.0
-            );
-        }
 
         let scale_factor = window.scale_factor();
-        let layout_duration = self.relayout(size, scale_factor)?;
-        self.repaint_canvas(scale_factor, "initial", layout_duration)?;
+        self.relayout(size, scale_factor)?;
+        self.repaint_canvas(scale_factor)?;
         self.renderer = Some(renderer);
         self.surface = Some(surface);
         self.instance = Some(instance);
@@ -120,9 +99,8 @@ impl UiApplication {
         &mut self,
         size: PhysicalSize<u32>,
         scale_factor: f64,
-    ) -> Result<Duration, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let scale_factor = scale_factor as f32;
-        let layout_started_at = Instant::now();
         if self.layout.is_none() {
             self.layout = Some(UiLayout::new(&self.document)?);
         }
@@ -132,28 +110,12 @@ impl UiApplication {
             size.height as f32 / scale_factor,
             &mut self.text_system,
         )?;
-        Ok(layout_started_at.elapsed())
+        Ok(())
     }
 
-    fn repaint_canvas(
-        &mut self,
-        scale_factor: f64,
-        reason: &str,
-        layout_duration: Duration,
-    ) -> Result<(), Box<dyn Error>> {
-        let paint_started_at = Instant::now();
+    fn repaint_canvas(&mut self, scale_factor: f64) -> Result<(), Box<dyn Error>> {
         let layout = self.layout.as_ref().expect("layout was initialized");
         self.canvas = layout.paint_with_scale(Color::WHITE, scale_factor as f32)?;
-        let paint_duration = paint_started_at.elapsed();
-        if self.perf_logging {
-            println!(
-                "[Burokku perf] UI commit #{} ({reason}): layout {:.3} ms, paint {:.3} ms, {} commands",
-                self.document.commit_id,
-                layout_duration.as_secs_f64() * 1_000.0,
-                paint_duration.as_secs_f64() * 1_000.0,
-                self.canvas.commands().len()
-            );
-        }
         Ok(())
     }
 
@@ -186,12 +148,7 @@ impl UiApplication {
                 .window
                 .as_ref()
                 .map_or(1.0, |window| window.scale_factor());
-            let reason = if pending_surface_size.is_some() {
-                "resize"
-            } else {
-                "update"
-            };
-            let layout_duration = self.relayout(size, scale_factor)?;
+            self.relayout(size, scale_factor)?;
 
             if surface_size_changed {
                 if let (Some(renderer), Some(surface)) = (&mut self.renderer, &self.surface) {
@@ -199,7 +156,7 @@ impl UiApplication {
                 }
             }
 
-            self.repaint_canvas(scale_factor, reason, layout_duration)?;
+            self.repaint_canvas(scale_factor)?;
             self.canvas_dirty = false;
         }
 
@@ -211,8 +168,7 @@ impl UiApplication {
             return Ok(());
         };
         let window = self.window.as_ref().cloned();
-        let render_started_at = Instant::now();
-        let result = renderer.render_timed_with_pre_present(
+        renderer.render_with_pre_present(
             surface,
             &self.canvas,
             &mut self.text_system,
@@ -221,66 +177,20 @@ impl UiApplication {
                     window.pre_present_notify();
                 }
             },
-        );
-        let timings = result?;
-        self.frame_number += 1;
-        self.gpu_submit_samples += 1;
-        self.gpu_submit_total += timings.queue_submit;
-        self.gpu_submit_max = self.gpu_submit_max.max(timings.queue_submit);
-        if self.perf_logging {
-            println!(
-                "[Burokku perf] WebGPU frame #{} (commit #{}): GPU queue submit {:.3} ms CPU, {:.3} ms total submit + present",
-                self.frame_number,
-                self.document.commit_id,
-                timings.queue_submit.as_secs_f64() * 1_000.0,
-                render_started_at.elapsed().as_secs_f64() * 1_000.0
-            );
-        }
-        self.log_gpu_submit_summary();
+        )?;
         Ok(())
-    }
-
-    fn log_gpu_submit_summary(&mut self) {
-        if self.gpu_submit_log_started_at.elapsed() < Duration::from_secs(1)
-            || self.gpu_submit_samples == 0
-        {
-            return;
-        }
-        let average = self.gpu_submit_total / self.gpu_submit_samples as u32;
-        println!(
-            "[Burokku perf] GPU queue submit: {:.3} ms average, {:.3} ms max ({} frames)",
-            average.as_secs_f64() * 1_000.0,
-            self.gpu_submit_max.as_secs_f64() * 1_000.0,
-            self.gpu_submit_samples
-        );
-        self.gpu_submit_samples = 0;
-        self.gpu_submit_total = Duration::ZERO;
-        self.gpu_submit_max = Duration::ZERO;
-        self.gpu_submit_log_started_at = Instant::now();
     }
 
     fn apply_updates(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut flushed = false;
-        let mut committed_mutations = 0;
         while let Ok(update) = self.updates.try_recv() {
-            if matches!(update, UiUpdate::Mutation(_)) {
-                self.pending_mutation_count += 1;
-            }
             if self.pending_document.apply(update)? {
                 self.document = self.pending_document.clone();
-                committed_mutations += self.pending_mutation_count;
-                self.pending_mutation_count = 0;
                 flushed = true;
             }
         }
         if !flushed {
             return Ok(false);
-        }
-        if self.perf_logging {
-            println!(
-                "[Burokku perf] Host commit #{}: applied {} native mutations",
-                self.document.commit_id, committed_mutations
-            );
         }
         self.layout = None;
         self.canvas_dirty = true;

@@ -39,17 +39,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Runtime::new_with_host(move |context| ui::bridge::install(context, sender)).await?;
     runtime.eval::<()>(source).await?;
     let mut document = ui::UiDocument::new();
-    let mutation_count = receive_flush(
+    receive_flush(
         &mut document,
         &mut receiver,
         Duration::from_secs(1),
         "UI script finished without committing a React tree",
     )
     .await?;
-    println!(
-        "[Burokku perf] Host commit #{}: applied {} native mutations",
-        document.commit_id, mutation_count
-    );
     if open_window {
         window::run(document, receiver)?;
     } else {
@@ -90,19 +86,15 @@ async fn receive_flush(
     receiver: &mut mpsc::UnboundedReceiver<ui::UiUpdate>,
     duration: Duration,
     closed_message: &'static str,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     timeout(duration, async {
-        let mut mutation_count = 0;
         loop {
             let update = receiver
                 .recv()
                 .await
                 .ok_or_else(|| std::io::Error::other(closed_message))?;
-            if matches!(update, ui::UiUpdate::Mutation(_)) {
-                mutation_count += 1;
-            }
             if document.apply(update)? {
-                return Ok::<_, Box<dyn std::error::Error>>(mutation_count);
+                return Ok::<_, Box<dyn std::error::Error>>(());
             }
         }
     })
