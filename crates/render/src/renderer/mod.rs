@@ -202,10 +202,10 @@ mod tests {
     use super::*;
     use crate::{Border, BoxStyle, Color, CornerRadius, Outline, Rect, TextStyle};
 
-    #[test]
-    fn renders_box_border_outline_text_and_readback() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn renders_box_border_outline_text_and_readback() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let Ok((gpu, adapter)) = pollster::block_on(Gpu::new(&instance, None)) else {
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
             return;
         };
         let surface = SurfaceState::offscreen(

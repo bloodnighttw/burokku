@@ -1,7 +1,7 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
 use runtime::WindowEventMessage;
-use tokio::sync::mpsc::Sender;
+use tokio::{runtime::Builder, sync::mpsc::Sender};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -17,8 +17,9 @@ mod gpu;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 pub fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error>> {
+    let tokio = Builder::new_current_thread().enable_all().build()?;
     let event_loop = EventLoop::new()?;
-    let mut application = AppWindow::new(events);
+    let mut application = AppWindow::new(events, tokio.handle().clone());
     event_loop.run_app(&mut application)?;
 
     match application.error {
@@ -29,6 +30,7 @@ pub fn run(events: Sender<WindowEventMessage>) -> Result<(), Box<dyn Error>> {
 
 pub struct AppWindow {
     events: Sender<WindowEventMessage>,
+    tokio: tokio::runtime::Handle,
     window: Option<Arc<Window>>,
     gpu: Option<GPU>,
     surface_version: u32,
@@ -40,9 +42,10 @@ pub struct AppWindow {
 }
 
 impl AppWindow {
-    fn new(events: Sender<WindowEventMessage>) -> Self {
+    fn new(events: Sender<WindowEventMessage>, tokio: tokio::runtime::Handle) -> Self {
         Self {
             events,
+            tokio,
             window: None,
             gpu: None,
             surface_version: 0,
@@ -94,7 +97,7 @@ impl AppWindow {
                     .with_inner_size(LogicalSize::new(800.0, 600.0)),
             )?,
         );
-        let gpu = GPU::new(window.clone())?;
+        let gpu = GPU::new(window.clone(), &self.tokio)?;
 
         self.window = Some(window.clone());
         self.gpu = Some(gpu);
