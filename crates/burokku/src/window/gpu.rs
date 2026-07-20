@@ -1,7 +1,6 @@
 use std::{error::Error, sync::Arc};
 
 use render::{wgpu, BoxStyle, Canvas, Color, Rect, RenderError, Renderer, SurfaceSize, TextSystem};
-use tokio::runtime::Handle;
 use winit::{dpi::PhysicalSize, window::Window};
 
 /// The WebGPU state used by the application window.
@@ -16,15 +15,16 @@ pub struct GPU {
 }
 
 impl GPU {
-    pub fn new(window: Arc<Window>, tokio: &Handle) -> Result<Self, Box<dyn Error>> {
+    pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn Error>> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window.clone())?;
         let size = window.inner_size();
-        let renderer = tokio.block_on(Renderer::new(
+        let renderer = Renderer::new(
             &instance,
             &surface,
             SurfaceSize::new(size.width, size.height),
-        ))?;
+        )
+        .await?;
 
         let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
         canvas.draw_box(

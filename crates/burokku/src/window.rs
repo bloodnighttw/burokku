@@ -85,7 +85,7 @@ impl AppWindow {
         }
     }
 
-    fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Box<dyn Error>> {
+    async fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Box<dyn Error>> {
         if self.window.is_some() {
             return Ok(());
         }
@@ -97,7 +97,7 @@ impl AppWindow {
                     .with_inner_size(LogicalSize::new(800.0, 600.0)),
             )?,
         );
-        let gpu = GPU::new(window.clone(), &self.tokio)?;
+        let gpu = GPU::new(window.clone()).await?;
 
         self.window = Some(window.clone());
         self.gpu = Some(gpu);
@@ -137,7 +137,8 @@ impl AppWindow {
 
 impl ApplicationHandler for AppWindow {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(error) = self.create_window(event_loop) {
+        let tokio = self.tokio.clone();
+        if let Err(error) = tokio.block_on(self.create_window(event_loop)) {
             self.fail(event_loop, error);
         }
     }
