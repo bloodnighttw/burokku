@@ -3,7 +3,7 @@
 use std::error::Error;
 
 use runtime::{Runtime, WindowEventMessage};
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 mod dom;
 mod window;
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if check_only {
         return check_dom(dom, source).await;
     }
-    let (window_events_tx, window_events_rx) = mpsc::channel(256);
+    let (window_events_tx, window_events_rx) = mpsc::unbounded_channel();
     let js_dom = dom.clone();
     let js_task = tokio::spawn(run_javascript(window_events_rx, js_dom, source));
 
@@ -87,7 +87,7 @@ async fn check_dom(dom: dom::DomStore, source: String) -> Result<(), Box<dyn Err
 }
 
 async fn run_javascript(
-    mut window_events_rx: Receiver<WindowEventMessage>,
+    mut window_events_rx: UnboundedReceiver<WindowEventMessage>,
     dom: dom::DomStore,
     source: String,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {

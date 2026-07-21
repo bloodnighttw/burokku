@@ -1,7 +1,7 @@
 use std::{error::Error, sync::Arc};
 
 use runtime::{InputState, ModifiersState, MouseButton, WindowEventMessage};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{UnboundedSender};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -15,7 +15,7 @@ use crate::window::gpu::GPU;
 
 mod gpu;
 
-pub async fn run(events: Sender<WindowEventMessage>, dom: DomStore) -> Result<(), Box<dyn Error>> {
+pub async fn run(events: UnboundedSender<WindowEventMessage>, dom: DomStore) -> Result<(), Box<dyn Error>> {
     let mut event_loop = EventLoop::new()?;
     let window = Arc::new(
         event_loop.create_window(
@@ -35,7 +35,7 @@ pub async fn run(events: Sender<WindowEventMessage>, dom: DomStore) -> Result<()
 }
 
 pub struct AppWindow {
-    events: Sender<WindowEventMessage>,
+    events: UnboundedSender<WindowEventMessage>,
     window: Arc<Window>,
     gpu: GPU,
     surface_version: u16,
@@ -44,7 +44,7 @@ pub struct AppWindow {
 }
 
 impl AppWindow {
-    fn new(events: Sender<WindowEventMessage>, window: Arc<Window>, gpu: GPU) -> Self {
+    fn new(events: UnboundedSender<WindowEventMessage>, window: Arc<Window>, gpu: GPU) -> Self {
         Self {
             events,
             window,
@@ -108,11 +108,11 @@ impl ApplicationHandler for AppWindow {
 
         match event {
             WindowEvent::CloseRequested => {
-                let _ = self.events.try_send(WindowEventMessage::CloseRequested);
+                let _ = self.events.send(WindowEventMessage::CloseRequested);
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                let _ = self.events.try_send(WindowEventMessage::Resized {
+                let _ = self.events.send(WindowEventMessage::Resized {
                     width: size.width,
                     height: size.height,
                 });
@@ -125,7 +125,7 @@ impl ApplicationHandler for AppWindow {
             } => {
                 let _ = self
                     .events
-                    .try_send(WindowEventMessage::ScaleFactorChanged {
+                    .send(WindowEventMessage::ScaleFactorChanged {
                         scale_factor,
                         width: new_inner_size.width,
                         height: new_inner_size.height,
@@ -135,16 +135,16 @@ impl ApplicationHandler for AppWindow {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(focused) => {
-                let _ = self.events.try_send(WindowEventMessage::Focused(focused));
+                let _ = self.events.send(WindowEventMessage::Focused(focused));
             }
             WindowEvent::Occluded(occluded) => {
-                let _ = self.events.try_send(WindowEventMessage::Occluded(occluded));
+                let _ = self.events.send(WindowEventMessage::Occluded(occluded));
                 if !occluded {
                     self.request_redraw();
                 }
             }
             WindowEvent::KeyboardInput(event) => {
-                let _ = self.events.try_send(WindowEventMessage::KeyboardInput {
+                let _ = self.events.send(WindowEventMessage::KeyboardInput {
                     key_code: event.key_code,
                     text: event.text,
                     state: input_state(event.state),
@@ -155,16 +155,16 @@ impl ApplicationHandler for AppWindow {
             WindowEvent::ModifiersChanged(state) => {
                 let _ = self
                     .events
-                    .try_send(WindowEventMessage::ModifiersChanged(modifiers(state)));
+                    .send(WindowEventMessage::ModifiersChanged(modifiers(state)));
             }
             WindowEvent::CursorMoved { position } => {
-                let _ = self.events.try_send(WindowEventMessage::CursorMoved {
+                let _ = self.events.send(WindowEventMessage::CursorMoved {
                     x: position.x,
                     y: position.y,
                 });
             }
             WindowEvent::MouseInput { state, button } => {
-                let _ = self.events.try_send(WindowEventMessage::MouseInput {
+                let _ = self.events.send(WindowEventMessage::MouseInput {
                     state: input_state(state),
                     button: mouse_button(button),
                 });
@@ -174,7 +174,7 @@ impl ApplicationHandler for AppWindow {
                 delta_y,
                 precise,
             } => {
-                let _ = self.events.try_send(WindowEventMessage::MouseWheel {
+                let _ = self.events.send(WindowEventMessage::MouseWheel {
                     delta_x,
                     delta_y,
                     precise,
