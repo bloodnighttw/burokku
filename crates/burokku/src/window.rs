@@ -1,8 +1,4 @@
-use std::{
-    error::Error,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{error::Error, sync::Arc};
 
 use runtime::{InputState, ModifiersState, MouseButton, WindowEventMessage};
 use tokio::sync::mpsc::Sender;
@@ -193,9 +189,7 @@ impl ApplicationHandler for AppWindow {
             Ok(false) => {}
             Err(error) => self.fail(event_loop, error),
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(16),
-        ));
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 

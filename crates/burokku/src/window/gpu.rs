@@ -31,8 +31,8 @@ impl GPU {
         .await?;
 
         let mut text_system = TextSystem::new();
-        let dom_version = dom.version();
-        let canvas = build_canvas(&dom, size, window.scale_factor(), &mut text_system)?;
+        let (dom_version, snapshot) = dom.snapshot_with_version();
+        let canvas = build_canvas(&snapshot, size, window.scale_factor(), &mut text_system)?;
 
         Ok(Self {
             surface,
@@ -52,17 +52,18 @@ impl GPU {
     ) -> Result<(), dom::DomRenderError> {
         self.renderer
             .resize(&self.surface, SurfaceSize::new(size.width, size.height));
-        self.canvas = build_canvas(&self.dom, size, scale_factor, &mut self.text_system)?;
+        let (dom_version, snapshot) = self.dom.snapshot_with_version();
+        self.canvas = build_canvas(&snapshot, size, scale_factor, &mut self.text_system)?;
+        self.dom_version = dom_version;
         Ok(())
     }
 
     pub fn sync_dom(&mut self, window: &Window) -> Result<bool, dom::DomRenderError> {
-        let version = self.dom.version();
-        if version == self.dom_version {
+        let Some((version, snapshot)) = self.dom.snapshot_if_changed(self.dom_version) else {
             return Ok(false);
-        }
+        };
         self.canvas = build_canvas(
-            &self.dom,
+            &snapshot,
             window.inner_size(),
             window.scale_factor(),
             &mut self.text_system,
@@ -82,14 +83,14 @@ impl GPU {
 }
 
 fn build_canvas(
-    dom: &DomStore,
+    document: &dom::Document,
     size: PhysicalSize<u32>,
     scale_factor: f64,
     text_system: &mut TextSystem,
 ) -> Result<Canvas, dom::DomRenderError> {
     let scale_factor = scale_factor as f32;
     dom::build_canvas(
-        &dom.snapshot(),
+        document,
         size.width as f32 / scale_factor,
         size.height as f32 / scale_factor,
         scale_factor,
