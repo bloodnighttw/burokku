@@ -8,9 +8,48 @@ pub const BODY_ID: u64 = 0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeKind {
-    Element(String),
+    Body,
+    Button,
+    Div,
+    Heading(u8),
+    Image,
+    Select,
+    Span,
+    Other(String),
     Text,
     Comment,
+}
+
+impl NodeKind {
+    pub fn is_element(&self) -> bool {
+        !matches!(self, Self::Text | Self::Comment)
+    }
+}
+
+impl From<&str> for NodeKind {
+    fn from(name: &str) -> Self {
+        name.to_owned().into()
+    }
+}
+
+impl From<String> for NodeKind {
+    fn from(name: String) -> Self {
+        let name = name.to_ascii_lowercase();
+        match name.as_str() {
+            "button" => Self::Button,
+            "div" => Self::Div,
+            "h1" => Self::Heading(1),
+            "h2" => Self::Heading(2),
+            "h3" => Self::Heading(3),
+            "h4" => Self::Heading(4),
+            "h5" => Self::Heading(5),
+            "h6" => Self::Heading(6),
+            "img" => Self::Image,
+            "select" => Self::Select,
+            "span" => Self::Span,
+            _ => Self::Other(name),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -37,7 +76,7 @@ impl Default for Document {
 impl Document {
     pub fn new() -> Self {
         let body = Node {
-            kind: NodeKind::Element("body".into()),
+            kind: NodeKind::Body,
             text: String::new(),
             style: Style::default(),
             children: Vec::new(),
@@ -86,7 +125,7 @@ impl Document {
 
     pub fn set_style(&mut self, id: u64, name: &str, value: Option<&str>) -> Result<(), DomError> {
         let node = self.node_mut(id)?;
-        if !matches!(node.kind, NodeKind::Element(_)) {
+        if !node.kind.is_element() {
             return Err(DomError::NotElement(id));
         }
         set_style(&mut node.style, name, value).map_err(DomError::Style)
@@ -183,8 +222,8 @@ mod tests {
     #[test]
     fn nodes_can_be_moved_detached_and_reattached() {
         let mut document = Document::new();
-        let first = document.create_node(NodeKind::Element("div".into()));
-        let second = document.create_node(NodeKind::Element("span".into()));
+        let first = document.create_node(NodeKind::Div);
+        let second = document.create_node(NodeKind::Span);
         let text = document.create_node(NodeKind::Text);
         document.set_text(text, "hello".into()).unwrap();
         document.insert(BODY_ID, first, None).unwrap();
@@ -204,8 +243,8 @@ mod tests {
     #[test]
     fn rejects_cycles() {
         let mut document = Document::new();
-        let parent = document.create_node(NodeKind::Element("div".into()));
-        let child = document.create_node(NodeKind::Element("div".into()));
+        let parent = document.create_node(NodeKind::Div);
+        let child = document.create_node(NodeKind::Div);
         document.insert(BODY_ID, parent, None).unwrap();
         document.insert(parent, child, None).unwrap();
 
@@ -213,5 +252,15 @@ mod tests {
             document.insert(child, parent, None),
             Err(DomError::Cycle { .. })
         ));
+    }
+
+    #[test]
+    fn element_names_map_to_semantic_kinds() {
+        assert_eq!(NodeKind::from("BUTTON".to_owned()), NodeKind::Button);
+        assert_eq!(NodeKind::from("h3".to_owned()), NodeKind::Heading(3));
+        assert_eq!(
+            NodeKind::from("CUSTOM-CARD".to_owned()),
+            NodeKind::Other("custom-card".to_owned())
+        );
     }
 }

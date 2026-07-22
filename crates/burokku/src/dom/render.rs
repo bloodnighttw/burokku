@@ -115,7 +115,7 @@ fn build_node(
             )
         }
         NodeKind::Comment => (tree.new_leaf(layout_style)?, None),
-        NodeKind::Element(_) => {
+        _ => {
             let children = node
                 .children
                 .iter()
@@ -147,9 +147,9 @@ fn build_node(
 
 fn to_taffy_style(kind: &NodeKind, style: &DomStyle) -> Style {
     let default_display = match kind {
-        NodeKind::Element(name) if matches!(name.as_str(), "span" | "button") => Display::Flex,
-        NodeKind::Element(_) | NodeKind::Text => Display::Block,
+        NodeKind::Span | NodeKind::Button => Display::Flex,
         NodeKind::Comment => Display::None,
+        _ => Display::Block,
     };
     let dimension = |value: Option<f32>| value.map_or(Dimension::AUTO, Dimension::length);
     let length = |value: Option<f32>| LengthPercentage::length(value.unwrap_or(0.0));
@@ -252,7 +252,8 @@ fn paint_node(
                     canvas.draw_text(rect, &text.text, style);
                 }
             }
-            NodeKind::Element(_) if has_box_style(&data.style) => {
+            NodeKind::Comment => {}
+            _ if has_box_style(&data.style) => {
                 canvas.draw_box(
                     rect,
                     BoxStyle {
@@ -282,7 +283,7 @@ fn paint_node(
                     },
                 );
             }
-            NodeKind::Element(_) | NodeKind::Comment => {}
+            _ => {}
         }
     }
     for child in tree.children(id)? {
@@ -309,7 +310,7 @@ mod tests {
     #[test]
     fn lays_out_and_paints_a_dom_tree() {
         let mut document = Document::new();
-        let card = document.create_node(NodeKind::Element("div".into()));
+        let card = document.create_node(NodeKind::Div);
         let text = document.create_node(NodeKind::Text);
         document.set_text(text, "Hello DOM".into()).unwrap();
         document.set_style(card, "width", Some("300px")).unwrap();

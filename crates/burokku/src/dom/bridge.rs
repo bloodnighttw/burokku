@@ -10,7 +10,7 @@ pub fn install<'js>(context: &Ctx<'js>, store: DomStore) -> Result<()> {
             context.clone(),
             move |kind: String, name: String| -> Result<u64> {
                 let kind = match kind.as_str() {
-                    "element" => NodeKind::Element(name.to_ascii_lowercase()),
+                    "element" => NodeKind::from(name),
                     "text" => NodeKind::Text,
                     "comment" => NodeKind::Comment,
                     _ => return Err(js_error(format!("unsupported DOM node kind '{kind}'"))),

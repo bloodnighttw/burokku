@@ -41,7 +41,7 @@ mod tests {
         let snapshot = store.snapshot();
         let card_id = snapshot.body().children[0];
         let card = snapshot.node(card_id).unwrap();
-        assert_eq!(card.kind, NodeKind::Element("div".into()));
+        assert_eq!(card.kind, NodeKind::Div);
         assert_eq!(card.style.background_color, Some([16, 32, 48, 255]));
         assert_eq!(snapshot.node(card.children[0]).unwrap().text, "after");
     }
