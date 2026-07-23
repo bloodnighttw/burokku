@@ -1,7 +1,7 @@
 use super::{
-    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap,
+    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap, Isolation,
     JustifyContent, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow,
-    Position, SizeValue,
+    Position, SizeValue, ZIndex,
 };
 
 pub(crate) type Color = [u8; 4];
@@ -15,6 +15,8 @@ pub(crate) struct Style {
     pub(crate) position: Position,
     pub(crate) overflow_x: Overflow,
     pub(crate) overflow_y: Overflow,
+    pub(crate) z_index: ZIndex,
+    pub(crate) isolation: Isolation,
 
     // Size and positioning: these properties allow `auto`.
     pub(crate) width: SizeValue,
@@ -83,6 +85,8 @@ impl Default for Style {
             position: Position::Relative,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
+            z_index: ZIndex::Auto,
+            isolation: Isolation::Auto,
             width: SizeValue::Auto,
             height: SizeValue::Auto,
             min_width: SizeValue::Auto,

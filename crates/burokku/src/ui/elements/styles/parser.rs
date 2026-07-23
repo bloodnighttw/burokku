@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
 use super::{
-    AlignContent, AlignItems, BoxSizing, Color, Display, FlexDirection, FlexWrap,
+    AlignContent, AlignItems, BoxSizing, Color, Display, FlexDirection, FlexWrap, Isolation,
     LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, Position,
-    SizeValue, Style,
+    SizeValue, Style, ZIndex,
 };
 use thiserror::Error;
 
@@ -70,6 +70,24 @@ pub(crate) fn set_style(
         }
         "overflow-x" => style.overflow_x = parse_overflow(name, value)?,
         "overflow-y" => style.overflow_y = parse_overflow(name, value)?,
+        "z-index" => {
+            style.z_index = if value == "auto" {
+                ZIndex::Auto
+            } else {
+                ZIndex::Value(
+                    value
+                        .parse()
+                        .map_err(|_| StyleError::InvalidValue(name.into(), value.into()))?,
+                )
+            };
+        }
+        "isolation" => {
+            style.isolation = match value {
+                "auto" => Isolation::Auto,
+                "isolate" => Isolation::Isolate,
+                _ => return invalid(name, value),
+            };
+        }
 
         "width" => size!(width, false),
         "height" => size!(height, false),
@@ -237,6 +255,8 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
         }
         "overflow-x" => reset!(overflow_x),
         "overflow-y" => reset!(overflow_y),
+        "z-index" => reset!(z_index),
+        "isolation" => reset!(isolation),
         "width" => reset!(width),
         "height" => reset!(height),
         "min-width" => reset!(min_width),
@@ -668,11 +688,31 @@ mod tests {
         let mut style = Style::default();
         set_style(&mut style, "flex-shrink", Some("0")).unwrap();
         set_style(&mut style, "background-color", Some("#1234")).unwrap();
+        set_style(&mut style, "z-index", Some("12")).unwrap();
+        set_style(&mut style, "isolation", Some("isolate")).unwrap();
         set_style(&mut style, "flex-shrink", None).unwrap();
         set_style(&mut style, "background-color", Some("")).unwrap();
+        set_style(&mut style, "z-index", None).unwrap();
+        set_style(&mut style, "isolation", Some("")).unwrap();
 
         assert_eq!(style.flex_shrink, 1.0);
         assert_eq!(style.background_color, None);
+        assert_eq!(style.z_index, ZIndex::Auto);
+        assert_eq!(style.isolation, Isolation::Auto);
+    }
+
+    #[test]
+    fn parses_z_index_and_isolation_as_enums() {
+        let mut style = Style::default();
+
+        set_style(&mut style, "zIndex", Some("-3")).unwrap();
+        set_style(&mut style, "isolation", Some("isolate")).unwrap();
+
+        assert_eq!(style.z_index, ZIndex::Value(-3));
+        assert_eq!(style.isolation, Isolation::Isolate);
+
+        assert!(set_style(&mut style, "z-index", Some("1.5")).is_err());
+        assert!(set_style(&mut style, "isolation", Some("true")).is_err());
     }
 
     #[test]

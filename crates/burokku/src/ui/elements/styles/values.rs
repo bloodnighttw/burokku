@@ -1,5 +1,21 @@
 use super::measurement::{Auto, Percent, Px};
 
+/// The supported forms of CSS `z-index`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ZIndex {
+    #[default]
+    Auto,
+    Value(i32),
+}
+
+/// The supported values of CSS `isolation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Isolation {
+    #[default]
+    Auto,
+    Isolate,
+}
+
 /// A CSS size that accepts `<length-percentage> | auto`.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
 pub(crate) enum SizeValue {
