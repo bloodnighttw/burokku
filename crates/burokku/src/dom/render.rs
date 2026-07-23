@@ -7,11 +7,11 @@ use render::{
 use taffy::{prelude::*, TaffyError};
 use thiserror::Error;
 
-use super::{
-    document::Node,
-    style::{Display as DomDisplay, FlexDirection as DomFlexDirection, Style as DomStyle},
-    Document, NodeKind,
+use crate::ui::elements::styles::{
+    Display as DomDisplay, FlexDirection as DomFlexDirection, Style as DomStyle,
 };
+
+use super::{document::Node, Document, NodeKind};
 
 #[derive(Debug, Error)]
 pub enum DomRenderError {

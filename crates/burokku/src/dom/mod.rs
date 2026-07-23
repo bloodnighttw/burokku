@@ -2,7 +2,6 @@ mod bridge;
 mod document;
 mod render;
 mod store;
-mod style;
 
 pub use bridge::install;
 pub use document::{Document, DomError, NodeKind};

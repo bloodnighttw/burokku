@@ -4,7 +4,6 @@ impl Px {
     pub(crate) const fn value(self) -> i32 {
         self.0
     }
-    
 }
 
 // the percent measurement

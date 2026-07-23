@@ -212,7 +212,7 @@ pub enum DomError {
     #[error("node {child} is not a child of {parent}")]
     NotAChild { parent: u64, child: u64 },
     #[error(transparent)]
-    Style(#[from] super::style::StyleError),
+    Style(#[from] StyleError),
 }
 
 #[cfg(test)]
