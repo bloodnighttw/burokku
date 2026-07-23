@@ -4,11 +4,12 @@ use render::{
     Border, BoxStyle, Canvas, Color, CornerRadius, FontFamily, Outline, Rect as RenderRect,
     TextConstraints, TextStyle, TextSystem,
 };
-use taffy::{prelude::*, TaffyError};
+use taffy::{geometry::Point, prelude::*, TaffyError};
 use thiserror::Error;
 
 use crate::ui::elements::styles::{
-    Display as DomDisplay, FlexDirection as DomFlexDirection, Style as DomStyle,
+    Color as DomColor, Display as DomDisplay, LengthPercentageValue, LineHeightValue, MaxSizeValue,
+    SizeValue, Style as DomStyle,
 };
 
 use super::{document::Node, Document, NodeKind};
@@ -146,23 +147,24 @@ fn build_node(
 }
 
 fn to_taffy_style(kind: &NodeKind, style: &DomStyle) -> Style {
-    let default_display = match kind {
-        NodeKind::Span | NodeKind::Button => Display::Flex,
-        NodeKind::Comment => Display::None,
-        _ => Display::Block,
-    };
-    let dimension = |value: Option<f32>| value.map_or(Dimension::AUTO, Dimension::length);
-    let length = |value: Option<f32>| LengthPercentage::length(value.unwrap_or(0.0));
     Style {
-        display: match style.display {
-            Some(DomDisplay::Block) => Display::Block,
-            Some(DomDisplay::Flex) => Display::Flex,
-            Some(DomDisplay::None) => Display::None,
-            None => default_display,
+        display: match (kind, style.display) {
+            (NodeKind::Comment, _) | (_, DomDisplay::None) => Display::None,
+            (_, DomDisplay::Block) => Display::Block,
+            (_, DomDisplay::Flex) => Display::Flex,
+            (_, DomDisplay::Grid) => Display::Grid,
         },
-        flex_direction: match style.flex_direction {
-            Some(DomFlexDirection::Column) => FlexDirection::Column,
-            Some(DomFlexDirection::Row) | None => FlexDirection::Row,
+        box_sizing: style.box_sizing,
+        position: style.position,
+        overflow: Point {
+            x: style.overflow_x,
+            y: style.overflow_y,
+        },
+        inset: Rect {
+            left: length_percentage_auto(style.left),
+            right: length_percentage_auto(style.right),
+            top: length_percentage_auto(style.top),
+            bottom: length_percentage_auto(style.bottom),
         },
         size: Size {
             width: dimension(style.width),
@@ -173,34 +175,73 @@ fn to_taffy_style(kind: &NodeKind, style: &DomStyle) -> Style {
             height: dimension(style.min_height),
         },
         max_size: Size {
-            width: dimension(style.max_width),
-            height: dimension(style.max_height),
+            width: max_dimension(style.max_width),
+            height: max_dimension(style.max_height),
         },
-        flex_grow: style.flex_grow.unwrap_or(0.0),
-        flex_shrink: style.flex_shrink.unwrap_or(1.0),
-        gap: Size {
-            width: length(style.gap),
-            height: length(style.gap),
+        aspect_ratio: style.aspect_ratio,
+        margin: Rect {
+            left: length_percentage_auto(style.margin_left),
+            right: length_percentage_auto(style.margin_right),
+            top: length_percentage_auto(style.margin_top),
+            bottom: length_percentage_auto(style.margin_bottom),
         },
         padding: Rect {
-            left: length(style.padding),
-            right: length(style.padding),
-            top: length(style.padding),
-            bottom: length(style.padding),
-        },
-        margin: Rect {
-            left: LengthPercentageAuto::length(style.margin.unwrap_or(0.0)),
-            right: LengthPercentageAuto::length(style.margin.unwrap_or(0.0)),
-            top: LengthPercentageAuto::length(style.margin.unwrap_or(0.0)),
-            bottom: LengthPercentageAuto::length(style.margin.unwrap_or(0.0)),
+            left: length_percentage(style.padding_left),
+            right: length_percentage(style.padding_right),
+            top: length_percentage(style.padding_top),
+            bottom: length_percentage(style.padding_bottom),
         },
         border: Rect {
-            left: length(style.border_width),
-            right: length(style.border_width),
-            top: length(style.border_width),
-            bottom: length(style.border_width),
+            left: LengthPercentage::length(style.border_left_width.px()),
+            right: LengthPercentage::length(style.border_right_width.px()),
+            top: LengthPercentage::length(style.border_top_width.px()),
+            bottom: LengthPercentage::length(style.border_bottom_width.px()),
         },
+        align_content: style.align_content,
+        align_items: style.align_items,
+        align_self: style.align_self,
+        justify_content: style.justify_content,
+        gap: Size {
+            width: length_percentage(style.column_gap),
+            height: length_percentage(style.row_gap),
+        },
+        flex_direction: style.flex_direction,
+        flex_wrap: style.flex_wrap,
+        flex_basis: dimension(style.flex_basis),
+        flex_grow: style.flex_grow,
+        flex_shrink: style.flex_shrink,
         ..Default::default()
+    }
+}
+
+fn dimension(value: SizeValue) -> Dimension {
+    match value {
+        SizeValue::Auto => Dimension::AUTO,
+        SizeValue::Px(value) => Dimension::length(value),
+        SizeValue::Percent(value) => Dimension::percent(value / 100.0),
+    }
+}
+
+fn max_dimension(value: MaxSizeValue) -> Dimension {
+    match value {
+        MaxSizeValue::None => Dimension::AUTO,
+        MaxSizeValue::Px(value) => Dimension::length(value),
+        MaxSizeValue::Percent(value) => Dimension::percent(value / 100.0),
+    }
+}
+
+fn length_percentage(value: LengthPercentageValue) -> LengthPercentage {
+    match value {
+        LengthPercentageValue::Px(value) => LengthPercentage::length(value),
+        LengthPercentageValue::Percent(value) => LengthPercentage::percent(value / 100.0),
+    }
+}
+
+fn length_percentage_auto(value: SizeValue) -> LengthPercentageAuto {
+    match value {
+        SizeValue::Auto => LengthPercentageAuto::AUTO,
+        SizeValue::Px(value) => LengthPercentageAuto::length(value),
+        SizeValue::Percent(value) => LengthPercentageAuto::percent(value / 100.0),
     }
 }
 
@@ -210,10 +251,18 @@ fn merge_text_style(parent: &TextStyle, style: &DomStyle) -> TextStyle {
         merged.color = rgba(color);
     }
     if let Some(font_size) = style.font_size {
-        merged.font_size = font_size;
+        merged.font_size = match font_size {
+            LengthPercentageValue::Px(value) => value,
+            LengthPercentageValue::Percent(value) => parent.font_size * value / 100.0,
+        };
     }
     if let Some(line_height) = style.line_height {
-        merged.line_height = line_height;
+        merged.line_height = match line_height {
+            LineHeightValue::Normal => merged.font_size * 1.2,
+            LineHeightValue::Number(value) => merged.font_size * value,
+            LineHeightValue::Px(value) => value,
+            LineHeightValue::Percent(value) => merged.font_size * value / 100.0,
+        };
     }
     if let Some(font_weight) = style.font_weight {
         merged.font_weight = font_weight;
@@ -258,28 +307,33 @@ fn paint_node(
                     rect,
                     BoxStyle {
                         background: data.style.background_color.map_or(Color::TRANSPARENT, rgba),
-                        corner_radius: CornerRadius::all(
-                            data.style.border_radius.unwrap_or(0.0) * scale_factor,
+                        corner_radius: CornerRadius::new(
+                            painted_radius(data.style.border_top_left_radius, rect, scale_factor),
+                            painted_radius(data.style.border_top_right_radius, rect, scale_factor),
+                            painted_radius(
+                                data.style.border_bottom_right_radius,
+                                rect,
+                                scale_factor,
+                            ),
+                            painted_radius(
+                                data.style.border_bottom_left_radius,
+                                rect,
+                                scale_factor,
+                            ),
                         ),
-                        border: data
-                            .style
-                            .border_width
-                            .filter(|width| *width > 0.0)
-                            .map(|width| {
-                                Border::new(
-                                    width * scale_factor,
-                                    data.style.border_color.map_or(Color::BLACK, rgba),
-                                )
-                            }),
-                        outline: data.style.outline_width.filter(|width| *width > 0.0).map(
-                            |width| {
-                                Outline::new(
-                                    width * scale_factor,
-                                    data.style.outline_offset.unwrap_or(0.0) * scale_factor,
-                                    data.style.outline_color.map_or(Color::BLACK, rgba),
-                                )
-                            },
-                        ),
+                        border: (painted_border_width(&data.style) > 0.0).then(|| {
+                            Border::new(
+                                painted_border_width(&data.style) * scale_factor,
+                                data.style.border_color.map_or(Color::BLACK, rgba),
+                            )
+                        }),
+                        outline: (data.style.outline_width.px() > 0.0).then(|| {
+                            Outline::new(
+                                data.style.outline_width.px() * scale_factor,
+                                data.style.outline_offset.px() * scale_factor,
+                                data.style.outline_color.map_or(Color::BLACK, rgba),
+                            )
+                        }),
                     },
                 );
             }
@@ -294,11 +348,30 @@ fn paint_node(
 
 fn has_box_style(style: &DomStyle) -> bool {
     style.background_color.is_some()
-        || style.border_width.unwrap_or(0.0) > 0.0
-        || style.outline_width.unwrap_or(0.0) > 0.0
+        || painted_border_width(style) > 0.0
+        || style.outline_width.px() > 0.0
 }
 
-fn rgba(color: [u8; 4]) -> Color {
+fn painted_border_width(style: &DomStyle) -> f32 {
+    [
+        style.border_top_width.px(),
+        style.border_right_width.px(),
+        style.border_bottom_width.px(),
+        style.border_left_width.px(),
+    ]
+    .into_iter()
+    .reduce(f32::max)
+    .unwrap_or(0.0)
+}
+
+fn painted_radius(value: LengthPercentageValue, rect: RenderRect, scale_factor: f32) -> f32 {
+    match value {
+        LengthPercentageValue::Px(value) => value * scale_factor,
+        LengthPercentageValue::Percent(value) => rect.width.min(rect.height) * value / 100.0,
+    }
+}
+
+fn rgba(color: DomColor) -> Color {
     Color::from_rgba8(color[0], color[1], color[2], color[3])
 }
 

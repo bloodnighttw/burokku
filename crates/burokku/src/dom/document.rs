@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use super::style::{set_style, Style};
+use crate::ui::elements::styles::{set_style, Style, StyleError};
 
 pub const BODY_ID: u64 = 0;
 

@@ -1,7 +1,8 @@
-pub struct Px(i32);
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Px(f32);
 
 impl Px {
-    pub(crate) const fn value(self) -> i32 {
+    pub(crate) const fn value(self) -> f32 {
         self.0
     }
 }
@@ -19,9 +20,10 @@ impl Percent {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Fr(f32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Auto;
 
-trait MeasurementExt {
+pub(crate) trait MeasurementExt {
     fn px(self) -> Px;
     fn percent(self) -> Percent;
     fn fr(self) -> Fr;
@@ -32,7 +34,7 @@ macro_rules! impl_measurement_ext {
         $(
             impl MeasurementExt for $type {
                 fn px(self) -> Px {
-                    Px(self as i32)
+                    Px(self as f32)
                 }
 
                 fn percent(self) -> Percent {

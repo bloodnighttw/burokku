@@ -1,0 +1,136 @@
+use super::{
+    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap,
+    JustifyContent, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow,
+    Position, SizeValue,
+};
+
+pub(crate) type Color = [u8; 4];
+
+/// The computed style values understood by Burokku's layout and paint systems.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Style {
+    // Layout mode
+    pub(crate) display: Display,
+    pub(crate) box_sizing: BoxSizing,
+    pub(crate) position: Position,
+    pub(crate) overflow_x: Overflow,
+    pub(crate) overflow_y: Overflow,
+
+    // Size and positioning: these properties allow `auto`.
+    pub(crate) width: SizeValue,
+    pub(crate) height: SizeValue,
+    pub(crate) min_width: SizeValue,
+    pub(crate) min_height: SizeValue,
+    pub(crate) max_width: MaxSizeValue,
+    pub(crate) max_height: MaxSizeValue,
+    pub(crate) aspect_ratio: Option<f32>,
+    pub(crate) top: SizeValue,
+    pub(crate) right: SizeValue,
+    pub(crate) bottom: SizeValue,
+    pub(crate) left: SizeValue,
+
+    // Box model
+    pub(crate) margin_top: SizeValue,
+    pub(crate) margin_right: SizeValue,
+    pub(crate) margin_bottom: SizeValue,
+    pub(crate) margin_left: SizeValue,
+    pub(crate) padding_top: LengthPercentageValue,
+    pub(crate) padding_right: LengthPercentageValue,
+    pub(crate) padding_bottom: LengthPercentageValue,
+    pub(crate) padding_left: LengthPercentageValue,
+    pub(crate) border_top_width: LengthValue,
+    pub(crate) border_right_width: LengthValue,
+    pub(crate) border_bottom_width: LengthValue,
+    pub(crate) border_left_width: LengthValue,
+
+    // Flexbox and alignment
+    pub(crate) align_content: Option<AlignContent>,
+    pub(crate) align_items: Option<AlignItems>,
+    pub(crate) align_self: Option<AlignSelf>,
+    pub(crate) justify_content: Option<JustifyContent>,
+    pub(crate) row_gap: LengthPercentageValue,
+    pub(crate) column_gap: LengthPercentageValue,
+    pub(crate) flex_direction: FlexDirection,
+    pub(crate) flex_wrap: FlexWrap,
+    pub(crate) flex_basis: SizeValue,
+    pub(crate) flex_grow: f32,
+    pub(crate) flex_shrink: f32,
+
+    // Paint
+    pub(crate) background_color: Option<Color>,
+    pub(crate) color: Option<Color>,
+    pub(crate) border_color: Option<Color>,
+    pub(crate) border_top_left_radius: LengthPercentageValue,
+    pub(crate) border_top_right_radius: LengthPercentageValue,
+    pub(crate) border_bottom_right_radius: LengthPercentageValue,
+    pub(crate) border_bottom_left_radius: LengthPercentageValue,
+    pub(crate) outline_color: Option<Color>,
+    pub(crate) outline_width: LengthValue,
+    pub(crate) outline_offset: LengthValue,
+
+    // Typography
+    pub(crate) font_size: Option<LengthPercentageValue>,
+    pub(crate) line_height: Option<LineHeightValue>,
+    pub(crate) font_weight: Option<u16>,
+    pub(crate) font_family: Option<String>,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            display: Display::Block,
+            box_sizing: BoxSizing::ContentBox,
+            position: Position::Relative,
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
+            width: SizeValue::Auto,
+            height: SizeValue::Auto,
+            min_width: SizeValue::Auto,
+            min_height: SizeValue::Auto,
+            max_width: MaxSizeValue::None,
+            max_height: MaxSizeValue::None,
+            aspect_ratio: None,
+            top: SizeValue::Auto,
+            right: SizeValue::Auto,
+            bottom: SizeValue::Auto,
+            left: SizeValue::Auto,
+            margin_top: SizeValue::ZERO,
+            margin_right: SizeValue::ZERO,
+            margin_bottom: SizeValue::ZERO,
+            margin_left: SizeValue::ZERO,
+            padding_top: LengthPercentageValue::ZERO,
+            padding_right: LengthPercentageValue::ZERO,
+            padding_bottom: LengthPercentageValue::ZERO,
+            padding_left: LengthPercentageValue::ZERO,
+            border_top_width: LengthValue::ZERO,
+            border_right_width: LengthValue::ZERO,
+            border_bottom_width: LengthValue::ZERO,
+            border_left_width: LengthValue::ZERO,
+            align_content: None,
+            align_items: None,
+            align_self: None,
+            justify_content: None,
+            row_gap: LengthPercentageValue::ZERO,
+            column_gap: LengthPercentageValue::ZERO,
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::NoWrap,
+            flex_basis: SizeValue::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            background_color: None,
+            color: None,
+            border_color: None,
+            border_top_left_radius: LengthPercentageValue::ZERO,
+            border_top_right_radius: LengthPercentageValue::ZERO,
+            border_bottom_right_radius: LengthPercentageValue::ZERO,
+            border_bottom_left_radius: LengthPercentageValue::ZERO,
+            outline_color: None,
+            outline_width: LengthValue::ZERO,
+            outline_offset: LengthValue::ZERO,
+            font_size: None,
+            line_height: None,
+            font_weight: None,
+            font_family: None,
+        }
+    }
+}
