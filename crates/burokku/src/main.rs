@@ -5,6 +5,7 @@ use std::error::Error;
 use runtime::{Runtime, WindowEventMessage};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
+mod ui;
 mod dom;
 mod window;
 
