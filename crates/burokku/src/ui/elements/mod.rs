@@ -1,6 +1,6 @@
 //! Uncomputed UI nodes, called elements.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ui::elements::styles::{set_style, Style};
 mod error;
@@ -19,6 +19,7 @@ pub enum ElementKind {
     Div,
     Heading(u8),
     Image,
+    Option,
     Select,
     Span,
     Body,
@@ -50,6 +51,7 @@ impl From<String> for ElementKind {
             "h5" => Self::Heading(5),
             "h6" => Self::Heading(6),
             "img" => Self::Image,
+            "option" => Self::Option,
             "select" => Self::Select,
             "span" => Self::Span,
             _ => Self::Other(name),
@@ -63,6 +65,8 @@ pub struct Element {
     pub parent: Option<u64>,
     pub children: Vec<u64>,
     pub style: Style,
+    pub attributes: HashMap<String, String>,
+    pub(crate) specified_styles: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +86,8 @@ impl Document {
         let body = Element {
             kind: ElementKind::Body,
             style: Style::default(),
+            attributes: HashMap::new(),
+            specified_styles: HashSet::new(),
             children: Vec::new(),
             parent: None,
         };
@@ -109,6 +115,8 @@ impl Document {
             Element {
                 kind,
                 style: Style::default(),
+                attributes: HashMap::new(),
+                specified_styles: HashSet::new(),
                 children: Vec::new(),
                 parent: None,
             },
@@ -137,7 +145,36 @@ impl Document {
         if !node.kind.is_element() {
             return Err(DocumentError::NotElement(id));
         }
-        set_style(&mut node.style, name, value).map_err(DocumentError::Style)
+        set_style(&mut node.style, name, value).map_err(DocumentError::Style)?;
+        let name = normalize_style_name(name);
+        if value.is_some_and(|value| !value.trim().is_empty()) {
+            node.specified_styles.insert(name);
+        } else {
+            node.specified_styles.remove(&name);
+        }
+        Ok(())
+    }
+
+    pub fn set_attribute(
+        &mut self,
+        id: u64,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<(), DocumentError> {
+        let node = self.node_mut(id)?;
+        if !node.kind.is_element() {
+            return Err(DocumentError::NotElement(id));
+        }
+        let name = name.to_ascii_lowercase();
+        match value {
+            Some(value) => {
+                node.attributes.insert(name, value.to_owned());
+            }
+            None => {
+                node.attributes.remove(&name);
+            }
+        }
+        Ok(())
     }
 
     pub fn insert(
@@ -211,6 +248,19 @@ impl Document {
     }
 }
 
+fn normalize_style_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len() + 4);
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            normalized.push('-');
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,10 +302,31 @@ mod tests {
     #[test]
     fn element_names_map_to_semantic_kinds() {
         assert_eq!(ElementKind::from("BUTTON".to_owned()), ElementKind::Button);
+        assert_eq!(ElementKind::from("option".to_owned()), ElementKind::Option);
         assert_eq!(ElementKind::from("h3".to_owned()), ElementKind::Heading(3));
         assert_eq!(
             ElementKind::from("CUSTOM-CARD".to_owned()),
             ElementKind::Other("custom-card".to_owned())
         );
+    }
+
+    #[test]
+    fn attributes_are_stored_case_insensitively_and_can_be_removed() {
+        let mut document = Document::new();
+        let option = document.create_node(ElementKind::Option);
+        document
+            .set_attribute(option, "SELECTED", Some(""))
+            .unwrap();
+        assert!(document
+            .node(option)
+            .unwrap()
+            .attributes
+            .contains_key("selected"));
+        document.set_attribute(option, "selected", None).unwrap();
+        assert!(!document
+            .node(option)
+            .unwrap()
+            .attributes
+            .contains_key("selected"));
     }
 }

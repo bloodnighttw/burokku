@@ -43,5 +43,5 @@
 ## Elements
 
 - [ ] Render image contents and intrinsic image dimensions.
-- [ ] Add native visual behavior for buttons.
-- [ ] Add native visual behavior for selects and options.
+- [x] Add native visual behavior for buttons.
+- [x] Add native visual behavior for selects and options.

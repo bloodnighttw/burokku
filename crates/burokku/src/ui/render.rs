@@ -7,7 +7,10 @@ use render::{
 
 use super::{
     elements::Document,
-    layouts::{compute_layout, compute_layout_with_scroll, Layout, LayoutKind, ScrollOffset},
+    layouts::{
+        compute_layout, compute_layout_with_scroll, Layout, LayoutKind, NativeAppearance,
+        ScrollOffset,
+    },
 };
 
 /// The computed UI geometry and the drawing commands produced from it.
@@ -108,15 +111,23 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
             .clips
             .iter()
             .copied()
-            .map(|clip| scaled_clip(clip, scale_factor));
+            .map(|clip| scaled_clip(clip, scale_factor))
+            .collect::<Vec<_>>();
         match &layout.kind {
-            LayoutKind::Box { style, .. } => {
+            LayoutKind::Box {
+                style,
+                native_appearance,
+                ..
+            } => {
                 if style != &BoxStyle::default() {
                     canvas.draw_box_with_clips(
                         bounds,
                         scaled_box_style(style.clone(), scale_factor),
-                        clips,
+                        clips.iter().copied(),
                     );
+                }
+                if let Some(NativeAppearance::Select { color }) = native_appearance {
+                    paint_select_indicator(bounds, *color, scale_factor, &clips, canvas);
                 }
             }
             LayoutKind::Text {
@@ -176,6 +187,34 @@ fn paint_text_decorations(
             );
         }
     }
+}
+
+fn paint_select_indicator(
+    bounds: Rect,
+    color: Color,
+    scale_factor: f32,
+    clips: &[Clip],
+    canvas: &mut Canvas,
+) {
+    let font_size = 12.0 * scale_factor;
+    let line_height = 14.0 * scale_factor;
+    let indicator = Rect::new(
+        bounds.x + (bounds.width - 19.0 * scale_factor).max(0.0),
+        bounds.y + ((bounds.height - line_height) * 0.5).max(0.0),
+        14.0 * scale_factor,
+        line_height,
+    );
+    canvas.draw_text_with_clips(
+        indicator,
+        "▾",
+        TextStyle {
+            color,
+            font_size,
+            line_height,
+            ..TextStyle::default()
+        },
+        clips.iter().copied(),
+    );
 }
 
 fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
@@ -434,6 +473,23 @@ mod tests {
         let canvas = build_canvas(&document, 800.0, 600.0, 1.0, &mut TextSystem::new());
 
         assert_eq!(canvas.commands().len(), 2);
+    }
+
+    #[test]
+    fn paints_a_native_select_indicator() {
+        let mut document = Document::new();
+        let select = document.create_node(ElementKind::Select);
+        let option = document.create_node(ElementKind::Option);
+        let text = document.create_node(ElementKind::Text("Choice".into()));
+        document.insert(BODY_ID, select, None).unwrap();
+        document.insert(select, option, None).unwrap();
+        document.insert(option, text, None).unwrap();
+
+        let canvas = build_canvas(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+
+        assert!(canvas.commands().iter().any(
+            |command| matches!(command, render::DrawCommand::Text { text, .. } if text == "▾")
+        ));
     }
 
     #[test]

@@ -75,6 +75,15 @@ impl UiStore {
         self.mutate(|document| document.set_style(id, name, value))
     }
 
+    pub fn set_attribute(
+        &self,
+        id: u64,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<(), DocumentError> {
+        self.mutate(|document| document.set_attribute(id, name, value))
+    }
+
     pub fn insert(
         &self,
         parent: u64,

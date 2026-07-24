@@ -59,7 +59,7 @@ pub fn install<'js>(context: &Ctx<'js>, store: UiStore) -> Result<()> {
         )?,
     )?;
 
-    let style_store = store;
+    let style_store = store.clone();
     context.globals().set(
         "__burokku_dom_set_style",
         Function::new(
@@ -67,6 +67,19 @@ pub fn install<'js>(context: &Ctx<'js>, store: UiStore) -> Result<()> {
             move |id: u64, name: String, value: Option<String>| -> Result<()> {
                 style_store
                     .set_style(id, &name, value.as_deref())
+                    .map_err(|error| js_error(error.to_string()))
+            },
+        )?,
+    )?;
+
+    let attribute_store = store;
+    context.globals().set(
+        "__burokku_dom_set_attribute",
+        Function::new(
+            context.clone(),
+            move |id: u64, name: String, value: Option<String>| -> Result<()> {
+                attribute_store
+                    .set_attribute(id, &name, value.as_deref())
                     .map_err(|error| js_error(error.to_string()))
             },
         )?,

@@ -28,17 +28,19 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        BorderStyle as ElementBorderStyle, Color as ElementColor, CornerRadiusValue,
-        FontStyleValue, LengthPercentageValue, LineHeightValue, MaxSizeValue,
+        AlignItems, BorderStyle as ElementBorderStyle, BoxSizing, Color as ElementColor,
+        CornerRadiusValue, Display as ElementDisplay, FontStyleValue, JustifyContent,
+        LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue,
         Overflow as ElementOverflow, OverflowWrapValue, Position as ElementPosition, SizeValue,
         Style as ElementStyle, TextAlignValue, TextDecorationLineValue, WhiteSpaceValue,
         WordBreakValue,
     },
-    Document, ElementKind, BODY_ID,
+    Document, Element, ElementKind, BODY_ID,
 };
 
 use super::{
-    Layout, LayoutKind, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis, StackingLayer,
+    Layout, LayoutKind, NativeAppearance, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis,
+    StackingLayer,
 };
 
 /// Computes a renderable layout tree from an element document.
@@ -124,13 +126,14 @@ fn add_element(
     let element = document
         .node(element_id)
         .expect("element child IDs are validated when inserted");
-    let text_style = merge_text_style(inherited_text_style, &element.style);
+    let style = native_style(document, element_id, element);
+    let text_style = merge_text_style(inherited_text_style, &style);
     let node_id = nodes.len();
     nodes.push(LayoutNode {
         element_id,
         kind: element.kind.clone(),
-        style: to_taffy_style(&element.kind, &element.style),
-        paint_style: element.style.clone(),
+        style: to_taffy_style(&element.kind, &style),
+        paint_style: style,
         text_style: text_style.clone(),
         children: Vec::with_capacity(element.children.len()),
         cache: Cache::new(),
@@ -364,6 +367,7 @@ impl ElementLayoutTree<'_> {
             | ElementKind::Div
             | ElementKind::Heading(_)
             | ElementKind::Image
+            | ElementKind::Option
             | ElementKind::Select
             | ElementKind::Span
             | ElementKind::Body
@@ -474,6 +478,13 @@ impl ElementLayoutTree<'_> {
                             data.text_style.transform,
                         ),
                         stacking_layer: StackingLayer::from_style(&data.paint_style),
+                        native_appearance: match data.kind {
+                            ElementKind::Button => Some(NativeAppearance::Button),
+                            ElementKind::Select => Some(NativeAppearance::Select {
+                                color: data.text_style.color,
+                            }),
+                            _ => None,
+                        },
                         children,
                     },
                     scroll,
@@ -566,6 +577,213 @@ fn resolve_margin(value: SizeValue, basis: f32) -> f32 {
 
 fn translated_rect(rect: RenderRect, x: f32, y: f32) -> RenderRect {
     RenderRect::new(rect.x + x, rect.y + y, rect.width, rect.height)
+}
+
+fn native_style(document: &Document, element_id: u64, element: &Element) -> ElementStyle {
+    let mut style = element.style.clone();
+    match element.kind {
+        ElementKind::Button => {
+            set_default(
+                &mut style.display,
+                ElementDisplay::Flex,
+                element,
+                &["display"],
+            );
+            set_default(
+                &mut style.box_sizing,
+                BoxSizing::BorderBox,
+                element,
+                &["box-sizing"],
+            );
+            set_default(
+                &mut style.align_items,
+                Some(AlignItems::CENTER),
+                element,
+                &["align-items"],
+            );
+            set_default(
+                &mut style.justify_content,
+                Some(JustifyContent::CENTER),
+                element,
+                &["justify-content"],
+            );
+            native_control_box(&mut style, element, 8.0, 24.0);
+        }
+        ElementKind::Select => {
+            set_default(
+                &mut style.display,
+                ElementDisplay::Flex,
+                element,
+                &["display"],
+            );
+            set_default(
+                &mut style.box_sizing,
+                BoxSizing::BorderBox,
+                element,
+                &["box-sizing"],
+            );
+            set_default(
+                &mut style.align_items,
+                Some(AlignItems::CENTER),
+                element,
+                &["align-items"],
+            );
+            native_control_box(&mut style, element, 24.0, 28.0);
+            set_default(
+                &mut style.background_color,
+                Some([255, 255, 255, 255]),
+                element,
+                &["background-color"],
+            );
+        }
+        ElementKind::Option if !option_is_selected(document, element_id) => {
+            style.display = ElementDisplay::None;
+        }
+        _ => {}
+    }
+    style
+}
+
+fn native_control_box(
+    style: &mut ElementStyle,
+    element: &Element,
+    right_padding: f32,
+    min_height: f32,
+) {
+    set_default(
+        &mut style.min_height,
+        SizeValue::Px(min_height),
+        element,
+        &["min-height"],
+    );
+    set_default(
+        &mut style.padding_top,
+        LengthPercentageValue::Px(3.0),
+        element,
+        &["padding", "padding-top"],
+    );
+    set_default(
+        &mut style.padding_right,
+        LengthPercentageValue::Px(right_padding),
+        element,
+        &["padding", "padding-right"],
+    );
+    set_default(
+        &mut style.padding_bottom,
+        LengthPercentageValue::Px(3.0),
+        element,
+        &["padding", "padding-bottom"],
+    );
+    set_default(
+        &mut style.padding_left,
+        LengthPercentageValue::Px(8.0),
+        element,
+        &["padding", "padding-left"],
+    );
+    for (width, property) in [
+        (&mut style.border_top_width, "border-top-width"),
+        (&mut style.border_right_width, "border-right-width"),
+        (&mut style.border_bottom_width, "border-bottom-width"),
+        (&mut style.border_left_width, "border-left-width"),
+    ] {
+        set_default(
+            width,
+            LengthValue::Px(1.0),
+            element,
+            &["border-width", property],
+        );
+    }
+    set_default(
+        &mut style.background_color,
+        Some([239, 239, 239, 255]),
+        element,
+        &["background-color"],
+    );
+    set_default(&mut style.color, Some([0, 0, 0, 255]), element, &["color"]);
+    for (color, property) in [
+        (&mut style.border_top_color, "border-top-color"),
+        (&mut style.border_right_color, "border-right-color"),
+        (&mut style.border_bottom_color, "border-bottom-color"),
+        (&mut style.border_left_color, "border-left-color"),
+    ] {
+        set_default(
+            color,
+            Some([118, 118, 118, 255]),
+            element,
+            &["border-color", property],
+        );
+    }
+    for (border_style, property) in [
+        (&mut style.border_top_style, "border-top-style"),
+        (&mut style.border_right_style, "border-right-style"),
+        (&mut style.border_bottom_style, "border-bottom-style"),
+        (&mut style.border_left_style, "border-left-style"),
+    ] {
+        set_default(
+            border_style,
+            ElementBorderStyle::Solid,
+            element,
+            &["border-style", property],
+        );
+    }
+    for (radius, property) in [
+        (&mut style.border_top_left_radius, "border-top-left-radius"),
+        (
+            &mut style.border_top_right_radius,
+            "border-top-right-radius",
+        ),
+        (
+            &mut style.border_bottom_right_radius,
+            "border-bottom-right-radius",
+        ),
+        (
+            &mut style.border_bottom_left_radius,
+            "border-bottom-left-radius",
+        ),
+    ] {
+        set_default(
+            radius,
+            CornerRadiusValue::all(LengthPercentageValue::Px(3.0)),
+            element,
+            &["border-radius", property],
+        );
+    }
+}
+
+fn set_default<T>(field: &mut T, value: T, element: &Element, properties: &[&str]) {
+    if !properties
+        .iter()
+        .any(|property| element.specified_styles.contains(*property))
+    {
+        *field = value;
+    }
+}
+
+fn option_is_selected(document: &Document, option_id: u64) -> bool {
+    let option = document
+        .node(option_id)
+        .expect("layout nodes always refer to live document nodes");
+    let Some(select_id) = option.parent else {
+        return true;
+    };
+    let select = document
+        .node(select_id)
+        .expect("an attached node always has a live parent");
+    if !matches!(select.kind, ElementKind::Select) {
+        return true;
+    }
+
+    let mut options = select.children.iter().filter(|child| {
+        document
+            .node(**child)
+            .is_ok_and(|child| matches!(child.kind, ElementKind::Option))
+    });
+    let explicitly_selected = options.clone().find(|child| {
+        document
+            .node(**child)
+            .is_ok_and(|child| child.attributes.contains_key("selected"))
+    });
+    explicitly_selected.or_else(|| options.next()).copied() == Some(option_id)
 }
 
 fn padding_box(data: &LayoutNode, location: Point<f32>, width: f32, height: f32) -> RenderRect {
@@ -2452,5 +2670,69 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, second]
         );
+    }
+
+    #[test]
+    fn buttons_receive_native_defaults_without_overriding_author_styles() {
+        let mut document = Document::new();
+        let button = document.create_node(ElementKind::Button);
+        document
+            .set_style(button, "background-color", Some("#123456"))
+            .unwrap();
+        document
+            .set_style(button, "padding-left", Some("2px"))
+            .unwrap();
+
+        let element = document.node(button).unwrap();
+        let style = native_style(&document, button, element);
+        assert_eq!(style.display, ElementDisplay::Flex);
+        assert_eq!(style.min_height, SizeValue::Px(24.0));
+        assert_eq!(style.padding_left, LengthPercentageValue::Px(2.0));
+        assert_eq!(style.padding_right, LengthPercentageValue::Px(8.0));
+        assert_eq!(style.background_color, Some([0x12, 0x34, 0x56, 0xff]));
+        assert_eq!(style.border_top_width, LengthValue::Px(1.0));
+        assert_eq!(style.border_top_style, ElementBorderStyle::Solid);
+    }
+
+    #[test]
+    fn selects_project_only_the_selected_option_into_closed_layout() {
+        let mut document = Document::new();
+        let select = document.create_node(ElementKind::Select);
+        let first = document.create_node(ElementKind::Option);
+        let second = document.create_node(ElementKind::Option);
+        let first_text = document.create_node(ElementKind::Text("First".into()));
+        let second_text = document.create_node(ElementKind::Text("Second".into()));
+        document.insert(BODY_ID, select, None).unwrap();
+        document.insert(select, first, None).unwrap();
+        document.insert(select, second, None).unwrap();
+        document.insert(first, first_text, None).unwrap();
+        document.insert(second, second_text, None).unwrap();
+        document
+            .set_attribute(second, "selected", Some(""))
+            .unwrap();
+
+        assert_eq!(
+            native_style(&document, first, document.node(first).unwrap()).display,
+            ElementDisplay::None
+        );
+        assert_ne!(
+            native_style(&document, second, document.node(second).unwrap()).display,
+            ElementDisplay::None
+        );
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let select_layout = &layout.children()[0];
+        assert!(select_layout.height >= 28.0);
+        assert_eq!(
+            select_layout
+                .iter()
+                .filter(|layout| matches!(&layout.kind, LayoutKind::Text { text, .. } if text == "Second"))
+                .count(),
+            1
+        );
+        assert!(select_layout.iter().all(
+            |layout| !matches!(&layout.kind, LayoutKind::Text { text, .. } if text == "First")
+                || layout.width == 0.0
+        ));
     }
 }
