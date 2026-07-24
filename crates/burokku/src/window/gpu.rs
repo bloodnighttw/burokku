@@ -1,4 +1,8 @@
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    sync::Arc,
+};
 
 use render::{wgpu, RenderError, RenderTimings, Renderer, SurfaceSize, TextSystem};
 use winit::{dpi::PhysicalSize, window::Window};
@@ -83,6 +87,7 @@ impl GPU {
         );
         self.ui_version = ui_version;
         self.canvas_dirty = false;
+        prune_scroll_offsets(&mut self.scroll_offsets, &self.frame.layout);
     }
 
     pub fn sync_ui(&mut self, window: &Window) -> bool {
@@ -98,6 +103,7 @@ impl GPU {
         );
         self.ui_version = version;
         self.canvas_dirty = false;
+        prune_scroll_offsets(&mut self.scroll_offsets, &self.frame.layout);
         true
     }
 
@@ -259,6 +265,7 @@ impl GPU {
         );
         self.ui_version = version;
         self.canvas_dirty = false;
+        prune_scroll_offsets(&mut self.scroll_offsets, &self.frame.layout);
     }
 
     fn apply_scroll_offset(&mut self, window: &Window, element_id: u64, offset: ScrollOffset) {
@@ -268,6 +275,18 @@ impl GPU {
             self.rebuild(window);
         }
     }
+}
+
+fn prune_scroll_offsets(
+    scroll_offsets: &mut HashMap<u64, ScrollOffset>,
+    root: &ui::layouts::Layout,
+) {
+    let active_scroll_ids: HashSet<_> = root
+        .iter()
+        .filter(|layout| layout.scroll.is_some())
+        .map(|layout| layout.element_id)
+        .collect();
+    scroll_offsets.retain(|element_id, _| active_scroll_ids.contains(element_id));
 }
 
 fn axis_position(axis: ScrollbarAxis, x: f32, y: f32) -> f32 {
@@ -400,6 +419,38 @@ mod tests {
         assert_eq!(
             wheel_target(&layout, 200.0, 150.0, ScrollOffset::new(0.0, 40.0)),
             None
+        );
+    }
+
+    #[test]
+    fn full_rebuild_prunes_offsets_for_inactive_elements() {
+        let mut document = Document::new();
+        let active = document.create_node(ElementKind::Div);
+        document.set_style(active, "width", Some("100px")).unwrap();
+        document.set_style(active, "height", Some("60px")).unwrap();
+        document
+            .set_style(active, "overflow", Some("auto"))
+            .unwrap();
+        document.insert(0, active, None).unwrap();
+
+        let layout = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::new(),
+        );
+        let stale = active + 1;
+        let mut offsets = HashMap::from([
+            (active, ScrollOffset::new(0.0, 20.0)),
+            (stale, ScrollOffset::new(0.0, 40.0)),
+        ]);
+
+        prune_scroll_offsets(&mut offsets, &layout);
+
+        assert_eq!(
+            offsets,
+            HashMap::from([(active, ScrollOffset::new(0.0, 20.0))])
         );
     }
 }
