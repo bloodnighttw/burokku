@@ -1,4 +1,5 @@
 use super::{Color, CornerRadius};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -59,7 +60,30 @@ pub struct BoxShadow {
     pub color: Color,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RasterImage {
+    pub width: u32,
+    pub height: u32,
+    /// Tightly packed, top-to-bottom RGBA8 pixels.
+    pub pixels: Arc<[u8]>,
+}
+
+impl RasterImage {
+    pub fn new(width: u32, height: u32, pixels: impl Into<Arc<[u8]>>) -> Option<Self> {
+        let pixels = pixels.into();
+        let expected = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?
+            .checked_mul(4)?;
+        (width > 0 && height > 0 && pixels.len() == expected).then_some(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum BackgroundImage {
     LinearGradient {
         direction: [f32; 2],
@@ -70,6 +94,7 @@ pub enum BackgroundImage {
         start: Color,
         end: Color,
     },
+    Raster(RasterImage),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,7 +186,7 @@ impl Outline {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BoxStyle {
     pub background: Color,
     pub background_image: Option<BackgroundImage>,

@@ -11,7 +11,7 @@ pub use drawing::{
     BackgroundImage, Border, BorderSide, BorderStyle, BoxShadow, BoxStyle, Canvas, Clip, Color,
     CornerRadius, CornerSize, DrawCommand, FontFamily, FontStyle, Outline, Rect, TextAlign,
     TextDecorationLine, TextOverflowWrap, TextShadow, TextStyle, TextWhiteSpace, TextWordBreak,
-    TextWrap, Transform,
+    RasterImage, TextWrap, Transform,
 };
 pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};
 pub use text_system::{

@@ -111,10 +111,10 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
             .map(|clip| scaled_clip(clip, scale_factor));
         match &layout.kind {
             LayoutKind::Box { style, .. } => {
-                if *style != BoxStyle::default() {
+                if style != &BoxStyle::default() {
                     canvas.draw_box_with_clips(
                         bounds,
-                        scaled_box_style(*style, scale_factor),
+                        scaled_box_style(style.clone(), scale_factor),
                         clips,
                     );
                 }
@@ -171,7 +171,7 @@ fn paint_text_decorations(
                     run.width * scale_factor,
                     thickness * scale_factor,
                 ),
-                decoration_style,
+                decoration_style.clone(),
                 clips.clone(),
             );
         }
@@ -206,7 +206,7 @@ fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: 
             }
             canvas.draw_overlay_box_with_clips(
                 scaled_rect(scrollbar.track, scale_factor),
-                track_style,
+                track_style.clone(),
                 clips
                     .iter()
                     .copied()
@@ -214,7 +214,7 @@ fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: 
             );
             canvas.draw_overlay_box_with_clips(
                 scaled_rect(scrollbar.thumb, scale_factor),
-                thumb_style,
+                thumb_style.clone(),
                 clips
                     .iter()
                     .copied()
@@ -570,6 +570,28 @@ mod tests {
             style.background_image,
             Some(BackgroundImage::LinearGradient { .. })
         ));
+    }
+
+    #[test]
+    fn carries_decoded_raster_backgrounds_to_canvas_commands() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=";
+        let mut document = Document::new();
+        let card = document.create_node(ElementKind::Div);
+        document.set_style(card, "width", Some("20px")).unwrap();
+        document.set_style(card, "height", Some("10px")).unwrap();
+        document
+            .set_style(card, "background-image", Some(&format!("url({PNG})")))
+            .unwrap();
+        document.insert(BODY_ID, card, None).unwrap();
+
+        let canvas = build_canvas(&document, 100.0, 50.0, 1.0, &mut TextSystem::new());
+        let DrawCommand::Box { style, .. } = &canvas.commands()[0] else {
+            panic!("expected a box command");
+        };
+        let Some(BackgroundImage::Raster(image)) = &style.background_image else {
+            panic!("expected raster background");
+        };
+        assert_eq!((image.width, image.height), (2, 1));
     }
 
     #[test]

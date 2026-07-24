@@ -79,7 +79,7 @@ pub(crate) struct Shadow {
     pub(crate) color: [u8; 4],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BackgroundImage {
     LinearGradient {
         direction: [f32; 2],
@@ -90,6 +90,7 @@ pub(crate) enum BackgroundImage {
         start: [u8; 4],
         end: [u8; 4],
     },
+    Raster(render::RasterImage),
 }
 
 /// A CSS size that accepts `<length-percentage> | auto`.

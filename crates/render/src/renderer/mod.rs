@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::{
         BackgroundImage, Border, BorderSide, BorderStyle, BoxShadow, BoxStyle, Clip, Color,
-        CornerRadius, CornerSize, Outline, Rect, TextStyle, Transform,
+        CornerRadius, CornerSize, Outline, RasterImage, Rect, TextStyle, Transform,
     };
 
     #[tokio::test(flavor = "current_thread")]
@@ -564,6 +564,58 @@ mod tests {
         assert!(transformed[1] > transformed[0].saturating_add(80));
         let shadow = image.pixel(78, 25).unwrap();
         assert!(shadow[0] < 245 && shadow[1] < 245 && shadow[2] < 245);
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uploads_and_samples_raster_background_images() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 56),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let image = RasterImage::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 16.0),
+            BoxStyle {
+                background_image: Some(BackgroundImage::Raster(image)),
+                ..BoxStyle::default()
+            },
+        );
+        let second = RasterImage::new(1, 2, vec![0, 255, 0, 255, 255, 255, 0, 255]).unwrap();
+        canvas.draw_box(
+            Rect::new(8.0, 32.0, 48.0, 16.0),
+            BoxStyle {
+                background_image: Some(BackgroundImage::Raster(second)),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 56),
+            &mut text_system,
+        )
+        .expect("off-screen raster background render");
+        let left = image.pixel(12, 16).unwrap();
+        let right = image.pixel(52, 16).unwrap();
+        assert!(left[0] > 220 && left[2] < 40, "{left:?}");
+        assert!(right[2] > 220 && right[0] < 40, "{right:?}");
+        let second_top = image.pixel(32, 34).unwrap();
+        let second_bottom = image.pixel(32, 46).unwrap();
+        assert!(second_top[1] > 220 && second_top[0] < 40, "{second_top:?}");
+        assert!(
+            second_bottom[0] > 220 && second_bottom[1] > 220,
+            "{second_bottom:?}"
+        );
+        assert_eq!(image.pixel(2, 2), Some([255, 255, 255, 255]));
         drop(adapter);
     }
 }

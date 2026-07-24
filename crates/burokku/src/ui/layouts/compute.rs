@@ -1421,7 +1421,7 @@ fn box_style(
 
     BoxStyle {
         background: style.background_color.map_or(Color::TRANSPARENT, rgba),
-        background_image: style.background_image.map(|image| match image {
+        background_image: style.background_image.clone().map(|image| match image {
             crate::ui::elements::styles::BackgroundImage::LinearGradient {
                 direction,
                 start,
@@ -1436,6 +1436,9 @@ fn box_style(
                     start: rgba(start),
                     end: rgba(end),
                 }
+            }
+            crate::ui::elements::styles::BackgroundImage::Raster(image) => {
+                BackgroundImage::Raster(image)
             }
         }),
         corner_radius: CornerRadius::elliptical(
