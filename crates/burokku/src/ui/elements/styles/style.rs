@@ -1,7 +1,7 @@
 use super::{
-    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap, Isolation,
-    JustifyContent, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow,
-    Position, SizeValue, ZIndex,
+    AlignContent, AlignItems, AlignSelf, BackgroundImage, BoxSizing, Display, FlexDirection,
+    FlexWrap, Isolation, JustifyContent, LengthPercentageValue, LengthValue, LineHeightValue,
+    MaxSizeValue, Overflow, Position, Shadow, SizeValue, Transform, ZIndex,
 };
 
 pub(crate) type Color = [u8; 4];
@@ -60,7 +60,12 @@ pub(crate) struct Style {
 
     // Paint
     pub(crate) background_color: Option<Color>,
+    pub(crate) background_image: Option<BackgroundImage>,
     pub(crate) color: Option<Color>,
+    pub(crate) opacity: f32,
+    pub(crate) transform: Transform,
+    pub(crate) box_shadow: Option<Shadow>,
+    pub(crate) text_shadow: Option<Shadow>,
     pub(crate) border_color: Option<Color>,
     pub(crate) border_top_left_radius: LengthPercentageValue,
     pub(crate) border_top_right_radius: LengthPercentageValue,
@@ -122,7 +127,12 @@ impl Default for Style {
             flex_grow: 0.0,
             flex_shrink: 1.0,
             background_color: None,
+            background_image: None,
             color: None,
+            opacity: 1.0,
+            transform: Transform::default(),
+            box_shadow: None,
+            text_shadow: None,
             border_color: None,
             border_top_left_radius: LengthPercentageValue::ZERO,
             border_top_right_radius: LengthPercentageValue::ZERO,

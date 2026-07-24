@@ -27,6 +27,10 @@ struct Instance {
     @location(8) outline_offset: f32,
     @location(9) _padding: f32,
     @location(10) clip_range: vec2<u32>,
+    @location(11) gradient_color: vec4<f32>,
+    @location(12) gradient: vec4<f32>,
+    @location(13) transform_x: vec3<f32>,
+    @location(14) transform_y: vec3<f32>,
 }
 
 struct VertexOutput {
@@ -39,6 +43,9 @@ struct VertexOutput {
     @location(5) @interpolate(flat) outline_color: vec4<f32>,
     @location(6) @interpolate(flat) widths: vec3<f32>,
     @location(7) @interpolate(flat) clip_range: vec2<u32>,
+    @location(8) @interpolate(flat) gradient_color: vec4<f32>,
+    @location(9) @interpolate(flat) gradient: vec4<f32>,
+    @location(10) @interpolate(flat) effect_blur: f32,
 }
 
 @vertex
@@ -48,9 +55,12 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
         vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
     );
     let corner = corners[vertex_index];
-    let expansion = max(0.0, instance.outline_width + instance.outline_offset) + 1.5;
+    let expansion = max(0.0, instance.outline_width + instance.outline_offset) + instance._padding * 2.0 + 1.5;
     let local = corner * (instance.half_size + vec2(expansion));
-    let pixel = instance.center + local;
+    let pixel = instance.center + vec2(
+        dot(instance.transform_x.xy, local) + instance.transform_x.z,
+        dot(instance.transform_y.xy, local) + instance.transform_y.z,
+    );
     let clip = vec2(
         pixel.x / screen.size.x * 2.0 - 1.0,
         1.0 - pixel.y / screen.size.y * 2.0,
@@ -66,6 +76,9 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
     output.outline_color = instance.outline_color;
     output.widths = vec3(instance.border_width, instance.outline_width, instance.outline_offset);
     output.clip_range = instance.clip_range;
+    output.gradient_color = instance.gradient_color;
+    output.gradient = instance.gradient;
+    output.effect_blur = instance._padding;
     return output;
 }
 
@@ -120,15 +133,27 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let outline_offset = max(input.widths.z, 0.0);
     let base_distance = rounded_box_distance(input.local_position, input.half_size, input.radii);
     let antialias = max(fwidth(base_distance), 0.75);
-    let base_coverage = 1.0 - smoothstep(-antialias, antialias, base_distance);
+    let base_coverage = 1.0 - smoothstep(
+        -antialias - input.effect_blur,
+        antialias + input.effect_blur,
+        base_distance,
+    );
 
     let inner_half_size = max(input.half_size - vec2(border_width), vec2(0.0));
     let inner_radii = max(input.radii - vec4(border_width), vec4(0.0));
     let inner_distance = rounded_box_distance(input.local_position, inner_half_size, inner_radii);
     let inner_coverage = 1.0 - smoothstep(-antialias, antialias, inner_distance);
     var base_color = input.background;
+    if input.gradient.z == 1.0 {
+        let normalized = input.local_position / max(input.half_size, vec2(0.0001));
+        let gradient_position = clamp(dot(normalized, input.gradient.xy) * 0.5 + 0.5, 0.0, 1.0);
+        base_color = mix(input.background, input.gradient_color, gradient_position);
+    } else if input.gradient.z == 2.0 {
+        let gradient_position = clamp(length(input.local_position / max(input.half_size, vec2(0.0001))), 0.0, 1.0);
+        base_color = mix(input.background, input.gradient_color, gradient_position);
+    }
     if border_width > 0.0 {
-        base_color = mix(input.border_color, input.background, inner_coverage);
+        base_color = mix(input.border_color, base_color, inner_coverage);
     }
     base_color.a *= base_coverage;
 

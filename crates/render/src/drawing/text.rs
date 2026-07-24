@@ -1,5 +1,12 @@
 use super::Color;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextShadow {
+    pub offset: [f32; 2],
+    pub blur: f32,
+    pub color: Color,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FontFamily {
     #[default]
@@ -26,6 +33,9 @@ pub struct TextStyle {
     pub font_weight: u16,
     pub font_family: FontFamily,
     pub wrap: TextWrap,
+    pub opacity: f32,
+    pub transform: super::Transform,
+    pub shadow: Option<TextShadow>,
 }
 
 impl Default for TextStyle {
@@ -37,6 +47,9 @@ impl Default for TextStyle {
             font_weight: 400,
             font_family: FontFamily::SansSerif,
             wrap: TextWrap::Word,
+            opacity: 1.0,
+            transform: super::Transform::IDENTITY,
+            shadow: None,
         }
     }
 }

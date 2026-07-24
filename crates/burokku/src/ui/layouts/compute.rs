@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, Outline, Rect as RenderRect,
-    TextConstraints, TextStyle, TextSystem,
+    BackgroundImage, Border, BoxShadow, BoxStyle, Clip, Color, CornerRadius, FontFamily, Outline,
+    Rect as RenderRect, TextConstraints, TextShadow, TextStyle, TextSystem, Transform,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -317,7 +317,13 @@ impl ElementLayoutTree<'_> {
                 });
                 (
                     LayoutKind::Box {
-                        style: box_style(&data.paint_style, width, height),
+                        style: box_style(
+                            &data.paint_style,
+                            width,
+                            height,
+                            data.text_style.opacity,
+                            data.text_style.transform,
+                        ),
                         stacking_layer: StackingLayer::from_style(&data.paint_style),
                         children,
                     },
@@ -506,7 +512,8 @@ fn overflow_clip(
         },
     );
     let corner_radius = if clips_x && clips_y {
-        let outer = box_style(&data.paint_style, width, height).corner_radius;
+        let outer =
+            box_style(&data.paint_style, width, height, 1.0, Transform::IDENTITY).corner_radius;
         CornerRadius::new(
             (outer.top_left - border.left.max(border.top)).max(0.0),
             (outer.top_right - border.right.max(border.top)).max(0.0),
@@ -780,10 +787,28 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
     if let Some(font_family) = &style.font_family {
         merged.font_family = FontFamily::Named(font_family.clone());
     }
+    merged.opacity = (parent.opacity * style.opacity).clamp(0.0, 1.0);
+    merged.transform = multiply_transform(
+        parent.transform,
+        Transform {
+            matrix: style.transform.matrix,
+        },
+    );
+    merged.shadow = style.text_shadow.map(|shadow| TextShadow {
+        offset: [shadow.offset_x, shadow.offset_y],
+        blur: shadow.blur,
+        color: rgba(shadow.color),
+    });
     merged
 }
 
-fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
+fn box_style(
+    style: &ElementStyle,
+    width: f32,
+    height: f32,
+    opacity: f32,
+    transform: Transform,
+) -> BoxStyle {
     let border_width = [
         style.border_top_width.px(),
         style.border_right_width.px(),
@@ -796,6 +821,23 @@ fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
 
     BoxStyle {
         background: style.background_color.map_or(Color::TRANSPARENT, rgba),
+        background_image: style.background_image.map(|image| match image {
+            crate::ui::elements::styles::BackgroundImage::LinearGradient {
+                direction,
+                start,
+                end,
+            } => BackgroundImage::LinearGradient {
+                direction,
+                start: rgba(start),
+                end: rgba(end),
+            },
+            crate::ui::elements::styles::BackgroundImage::RadialGradient { start, end } => {
+                BackgroundImage::RadialGradient {
+                    start: rgba(start),
+                    end: rgba(end),
+                }
+            }
+        }),
         corner_radius: CornerRadius::new(
             radius(style.border_top_left_radius, width, height),
             radius(style.border_top_right_radius, width, height),
@@ -811,6 +853,29 @@ fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
                 style.outline_color.map_or(Color::BLACK, rgba),
             )
         }),
+        opacity,
+        transform,
+        shadow: style.box_shadow.map(|shadow| BoxShadow {
+            offset: [shadow.offset_x, shadow.offset_y],
+            blur: shadow.blur,
+            spread: shadow.spread,
+            color: rgba(shadow.color),
+        }),
+    }
+}
+
+fn multiply_transform(left: Transform, right: Transform) -> Transform {
+    let l = left.matrix;
+    let r = right.matrix;
+    Transform {
+        matrix: [
+            l[0] * r[0] + l[2] * r[1],
+            l[1] * r[0] + l[3] * r[1],
+            l[0] * r[2] + l[2] * r[3],
+            l[1] * r[2] + l[3] * r[3],
+            l[0] * r[4] + l[2] * r[5] + l[4],
+            l[1] * r[4] + l[3] * r[5] + l[5],
+        ],
     }
 }
 

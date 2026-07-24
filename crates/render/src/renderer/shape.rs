@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{BoxStyle, Canvas, Clip, Color, DrawCommand, Rect};
+use crate::{BackgroundImage, BoxStyle, Canvas, Clip, Color, DrawCommand, Rect, Transform};
 
 use super::SurfaceSize;
 
@@ -128,11 +128,39 @@ impl ShapeRenderer {
 
                 let clip_start = self.clips.len() as u32;
                 self.clips.extend(clips.iter().copied().map(GpuClip::new));
+                if let Some(shadow) = style.shadow {
+                    let spread = shadow.spread;
+                    let shadow_rect = Rect::new(
+                        rect.x + shadow.offset[0] - spread,
+                        rect.y + shadow.offset[1] - spread,
+                        rect.width + spread * 2.0,
+                        rect.height + spread * 2.0,
+                    );
+                    let mut shadow_style = BoxStyle {
+                        background: shadow.color,
+                        corner_radius: style.corner_radius,
+                        opacity: style.opacity,
+                        transform: style.transform,
+                        ..BoxStyle::default()
+                    };
+                    shadow_style.corner_radius.top_left += spread.max(0.0);
+                    shadow_style.corner_radius.top_right += spread.max(0.0);
+                    shadow_style.corner_radius.bottom_right += spread.max(0.0);
+                    shadow_style.corner_radius.bottom_left += spread.max(0.0);
+                    self.instances.push(ShapeInstance::new(
+                        shadow_rect,
+                        shadow_style,
+                        clip_start,
+                        clips.len() as u32,
+                        shadow.blur,
+                    ));
+                }
                 self.instances.push(ShapeInstance::new(
                     rect,
                     style,
                     clip_start,
                     clips.len() as u32,
+                    0.0,
                 ));
             }
         }
@@ -282,37 +310,80 @@ struct ShapeInstance {
     border_width: f32,
     outline_width: f32,
     outline_offset: f32,
-    _padding: f32,
+    effect_blur: f32,
     clip_range: [u32; 2],
+    gradient_color: [f32; 4],
+    gradient: [f32; 4],
+    transform_x: [f32; 3],
+    transform_y: [f32; 3],
 }
 
 impl ShapeInstance {
-    fn new(rect: Rect, style: BoxStyle, clip_start: u32, clip_count: u32) -> Self {
+    fn new(
+        rect: Rect,
+        style: BoxStyle,
+        clip_start: u32,
+        clip_count: u32,
+        effect_blur: f32,
+    ) -> Self {
         let border = style.border.filter(|border| border.width > 0.0);
         let outline = style.outline.filter(|outline| outline.width > 0.0);
+        let alpha = style.opacity.clamp(0.0, 1.0);
+        let with_opacity = |mut color: [f32; 4]| {
+            color[3] *= alpha;
+            color
+        };
+        let (gradient_color, gradient) = match style.background_image {
+            Some(BackgroundImage::LinearGradient {
+                direction,
+                start: _,
+                end,
+            }) => (
+                with_opacity(end.components()),
+                [direction[0], direction[1], 1.0, 0.0],
+            ),
+            Some(BackgroundImage::RadialGradient { start: _, end }) => {
+                (with_opacity(end.components()), [0.0, 0.0, 2.0, 0.0])
+            }
+            None => ([0.0; 4], [0.0; 4]),
+        };
+        let background = match style.background_image {
+            Some(BackgroundImage::LinearGradient { start, .. })
+            | Some(BackgroundImage::RadialGradient { start, .. }) => start,
+            None => style.background,
+        };
+        let Transform { matrix } = style.transform;
         Self {
             center: [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5],
             half_size: [rect.width * 0.5, rect.height * 0.5],
             radii: style.corner_radius.normalized(rect),
-            background: style.background.components(),
-            border_color: border
-                .map_or(Color::TRANSPARENT, |border| border.color)
-                .components(),
-            outline_color: outline
-                .map_or(Color::TRANSPARENT, |outline| outline.color)
-                .components(),
+            background: with_opacity(background.components()),
+            border_color: with_opacity(
+                border
+                    .map_or(Color::TRANSPARENT, |border| border.color)
+                    .components(),
+            ),
+            outline_color: with_opacity(
+                outline
+                    .map_or(Color::TRANSPARENT, |outline| outline.color)
+                    .components(),
+            ),
             border_width: border.map_or(0.0, |border| {
                 border.width.clamp(0.0, rect.width.min(rect.height) * 0.5)
             }),
             outline_width: outline.map_or(0.0, |outline| outline.width.max(0.0)),
             outline_offset: outline.map_or(0.0, |outline| outline.offset.max(0.0)),
-            _padding: 0.0,
+            effect_blur: effect_blur.max(0.0),
             clip_range: [clip_start, clip_count],
+            gradient_color,
+            gradient,
+            transform_x: [matrix[0], matrix[2], matrix[4]],
+            transform_y: [matrix[1], matrix[3], matrix[5]],
         }
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
+        const ATTRIBUTES: [wgpu::VertexAttribute; 15] = wgpu::vertex_attr_array![
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
@@ -323,7 +394,11 @@ impl ShapeInstance {
             7 => Float32,
             8 => Float32,
             9 => Float32,
-            10 => Uint32x2
+            10 => Uint32x2,
+            11 => Float32x4,
+            12 => Float32x4,
+            13 => Float32x3,
+            14 => Float32x3
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
