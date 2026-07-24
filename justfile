@@ -32,5 +32,16 @@ solid:
     pnpm --filter @burokku/example-solid build
     cargo run -p burokku -- example/solid/dist/app.js
 
+_build-profile:
+    env CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release -p burokku
+
+profile-react: _build-profile
+    pnpm --filter @burokku/example-react build
+    samply record --profile-name "burokku react" -- target/release/burokku example/react/dist/app.js
+
+profile-solid: _build-profile
+    pnpm --filter @burokku/example-solid build
+    samply record --profile-name "burokku solid" -- target/release/burokku example/solid/dist/app.js
+
 run *args:
     cargo run -p burokku -- {{args}}
