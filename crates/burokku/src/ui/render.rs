@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use render::{
     Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextDecorationLine,
-    TextStyle, TextSystem,
+    TextRunMetrics, TextStyle, TextSystem,
 };
 
 use super::{
@@ -120,13 +120,11 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
                 }
             }
             LayoutKind::Text {
-                text,
-                style,
-                line_count,
+                text, style, runs, ..
             } => {
                 let scaled_style = scaled_text_style(style, scale_factor);
                 canvas.draw_text_with_clips(bounds, text, scaled_style.clone(), clips.clone());
-                paint_text_decorations(bounds, &scaled_style, *line_count, clips, canvas);
+                paint_text_decorations(bounds, &scaled_style, runs, scale_factor, clips, canvas);
             }
         }
     }
@@ -135,40 +133,44 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
 fn paint_text_decorations(
     bounds: Rect,
     style: &TextStyle,
-    line_count: usize,
+    runs: &[TextRunMetrics],
+    scale_factor: f32,
     clips: impl IntoIterator<Item = Clip> + Clone,
     canvas: &mut Canvas,
 ) {
-    if style.text_decoration_line == TextDecorationLine::NONE || style.line_height <= 0.0 {
+    if style.text_decoration_line == TextDecorationLine::NONE {
         return;
     }
-    let thickness = (style.font_size / 16.0).max(1.0);
-    let line_count = line_count.max(1);
     let decoration_style = BoxStyle {
         background: style.text_decoration_color,
         ..BoxStyle::default()
     };
-    for line in 0..line_count {
-        let top = bounds.y + line as f32 * style.line_height;
-        for y in [
+    for run in runs {
+        for decoration in [
             style
                 .text_decoration_line
                 .contains(TextDecorationLine::OVERLINE)
-                .then_some(top),
+                .then_some((run.overline_y, run.overline_thickness)),
             style
                 .text_decoration_line
                 .contains(TextDecorationLine::LINE_THROUGH)
-                .then_some(top + style.font_size * 0.55),
+                .then_some((run.line_through_y, run.line_through_thickness)),
             style
                 .text_decoration_line
                 .contains(TextDecorationLine::UNDERLINE)
-                .then_some(top + style.font_size),
+                .then_some((run.underline_y, run.underline_thickness)),
         ]
         .into_iter()
         .flatten()
         {
+            let (y, thickness) = decoration;
             canvas.draw_overlay_box_with_clips(
-                Rect::new(bounds.x, y, bounds.width, thickness),
+                Rect::new(
+                    bounds.x + run.left * scale_factor,
+                    bounds.y + y * scale_factor,
+                    run.width * scale_factor,
+                    thickness * scale_factor,
+                ),
                 decoration_style,
                 clips.clone(),
             );
@@ -350,10 +352,14 @@ mod tests {
                 Some("underline line-through red"),
             )
             .unwrap();
+        document
+            .set_style(container, "text-align", Some("right"))
+            .unwrap();
         document.insert(BODY_ID, container, None).unwrap();
         document.insert(container, text, None).unwrap();
 
-        let canvas = build_canvas(&document, 200.0, 100.0, 1.0, &mut TextSystem::new());
+        let frame = build_frame(&document, 200.0, 100.0, 1.0, &mut TextSystem::new());
+        let canvas = &frame.canvas;
         assert!(matches!(
             canvas.commands()[0],
             render::DrawCommand::Text { .. }
@@ -364,6 +370,58 @@ mod tests {
             .filter(|command| matches!(command, render::DrawCommand::OverlayBox { .. }))
             .count();
         assert_eq!(decorations, 2);
+        let LayoutKind::Text { runs, .. } = &frame.layout.children()[0].children()[0].kind else {
+            panic!("child should be text");
+        };
+        let render::DrawCommand::OverlayBox { rect, .. } = &canvas.commands()[1] else {
+            panic!("decoration should be an overlay");
+        };
+        assert!((rect.x - runs[0].left).abs() < 0.01);
+        assert!((rect.width - runs[0].width).abs() < 0.01);
+        assert!(rect.x > 0.0);
+        assert!(rect.width < 200.0);
+    }
+
+    #[test]
+    fn wrapped_centered_decorations_follow_each_shaped_line() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let text =
+            document.create_node(ElementKind::Text("decorations follow wrapped lines".into()));
+        document
+            .set_style(container, "width", Some("90px"))
+            .unwrap();
+        document
+            .set_style(container, "text-align", Some("center"))
+            .unwrap();
+        document
+            .set_style(container, "text-decoration", Some("underline"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, text, None).unwrap();
+
+        let frame = build_frame(&document, 200.0, 150.0, 1.0, &mut TextSystem::new());
+        let text_layout = &frame.layout.children()[0].children()[0];
+        let LayoutKind::Text { runs, .. } = &text_layout.kind else {
+            panic!("child should be text");
+        };
+        let decorations: Vec<_> = frame
+            .canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                render::DrawCommand::OverlayBox { rect, .. } => Some(rect),
+                _ => None,
+            })
+            .collect();
+
+        assert!(runs.len() > 1);
+        assert_eq!(decorations.len(), runs.len());
+        for (rect, run) in decorations.into_iter().zip(runs) {
+            assert!((rect.x - (text_layout.x + run.left)).abs() < 0.01);
+            assert!((rect.width - run.width).abs() < 0.01);
+            assert!(rect.width < text_layout.width);
+        }
     }
 
     #[test]

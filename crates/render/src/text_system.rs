@@ -47,6 +47,28 @@ pub struct TextMetrics {
     pub line_count: usize,
 }
 
+/// Shaped geometry for a contiguous font run, used to paint text decorations.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextRunMetrics {
+    pub left: f32,
+    pub width: f32,
+    pub baseline: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub overline_y: f32,
+    pub underline_y: f32,
+    pub line_through_y: f32,
+    pub overline_thickness: f32,
+    pub underline_thickness: f32,
+    pub line_through_thickness: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextLayoutMetrics {
+    pub text: TextMetrics,
+    pub runs: Vec<TextRunMetrics>,
+}
+
 /// Font database and shaping state shared by layout measurement and rendering.
 pub struct TextSystem {
     font_system: FontSystem,
@@ -66,22 +88,68 @@ impl TextSystem {
         style: &TextStyle,
         constraints: TextConstraints,
     ) -> TextMetrics {
+        self.layout_metrics(text, style, constraints).text
+    }
+
+    /// Shapes text and returns aggregate dimensions plus per-font-run geometry.
+    pub fn layout_metrics(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        constraints: TextConstraints,
+    ) -> TextLayoutMetrics {
         let (width, wrap) = match constraints.width {
             TextWidth::Unconstrained => (None, Wrap::None),
             TextWidth::AtMost(width) => (Some(width.max(0.0)), wrap_mode(style.wrap)),
             TextWidth::MinContent => (Some(0.0), wrap_mode(style.wrap)),
         };
         let buffer = self.layout_buffer(text, style, width, None, Some(wrap));
-        let mut metrics = TextMetrics::default();
+        let mut result = TextLayoutMetrics::default();
         for run in buffer.layout_runs() {
-            if metrics.line_count == 0 {
-                metrics.first_baseline = run.line_y;
+            if result.text.line_count == 0 {
+                result.text.first_baseline = run.line_y;
             }
-            metrics.width = metrics.width.max(run.line_w);
-            metrics.height = metrics.height.max(run.line_top + run.line_height);
-            metrics.line_count += 1;
+            result.text.width = result.text.width.max(run.line_w);
+            result.text.height = result.text.height.max(run.line_top + run.line_height);
+            result.text.line_count += 1;
+
+            let mut start = 0;
+            while start < run.glyphs.len() {
+                let first = &run.glyphs[start];
+                let mut end = start + 1;
+                while end < run.glyphs.len() {
+                    let glyph = &run.glyphs[end];
+                    if glyph.font_id != first.font_id
+                        || glyph.font_weight != first.font_weight
+                        || glyph.font_size.to_bits() != first.font_size.to_bits()
+                        || glyph.level != first.level
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                let glyphs = &run.glyphs[start..end];
+                let left = glyphs
+                    .iter()
+                    .map(|glyph| glyph.x)
+                    .fold(f32::INFINITY, f32::min);
+                let right = glyphs
+                    .iter()
+                    .map(|glyph| glyph.x + glyph.w)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                if right > left {
+                    result.runs.extend(text_run_metrics(
+                        &mut self.font_system,
+                        first,
+                        run.line_y,
+                        left,
+                        right - left,
+                    ));
+                }
+                start = end;
+            }
         }
-        metrics
+        result
     }
 
     pub(crate) fn layout_buffer(
@@ -166,6 +234,63 @@ impl TextSystem {
 
     pub(crate) fn font_system_mut(&mut self) -> &mut FontSystem {
         &mut self.font_system
+    }
+}
+
+fn text_run_metrics(
+    font_system: &mut FontSystem,
+    glyph: &glyphon::LayoutGlyph,
+    baseline: f32,
+    left: f32,
+    width: f32,
+) -> Option<TextRunMetrics> {
+    let font = font_system.get_font(glyph.font_id, glyph.font_weight)?;
+    let metrics = font.metrics();
+    let scale = glyph.font_size / f32::from(metrics.units_per_em.max(1));
+    let ascent = (metrics.ascent * scale).max(0.0);
+    let descent = (-metrics.descent * scale).max(0.0);
+    let em_thickness = (glyph.font_size / 16.0).max(f32::EPSILON);
+    let underline = metrics.underline.map(|decoration| {
+        (
+            baseline - decoration.offset * scale,
+            nonzero_thickness(decoration.thickness * scale, em_thickness),
+        )
+    });
+    let strikeout = metrics.strikeout.map(|decoration| {
+        (
+            baseline - decoration.offset * scale,
+            nonzero_thickness(decoration.thickness * scale, em_thickness),
+        )
+    });
+    let (underline_y, underline_thickness) =
+        underline.unwrap_or((baseline + descent * 0.5, em_thickness));
+    let x_height = metrics.x_height.map(|height| height * scale);
+    let (line_through_y, line_through_thickness) = strikeout.unwrap_or((
+        baseline - x_height.unwrap_or(ascent * 0.5) * 0.5,
+        em_thickness,
+    ));
+
+    Some(TextRunMetrics {
+        left,
+        width,
+        baseline,
+        ascent,
+        descent,
+        overline_y: baseline - ascent,
+        underline_y,
+        line_through_y,
+        overline_thickness: underline_thickness,
+        underline_thickness,
+        line_through_thickness,
+    })
+}
+
+fn nonzero_thickness(value: f32, fallback: f32) -> f32 {
+    let value = value.abs();
+    if value > f32::EPSILON {
+        value
+    } else {
+        fallback
     }
 }
 
@@ -327,5 +452,54 @@ mod tests {
             .x;
 
         assert!(right_x > left_x + 50.0);
+    }
+
+    #[test]
+    fn decoration_runs_follow_aligned_and_wrapped_glyph_extents() {
+        let mut system = TextSystem::new();
+        let centered = system.layout_metrics(
+            "decorated",
+            &TextStyle {
+                text_align: TextAlign::Center,
+                ..TextStyle::default()
+            },
+            TextConstraints::at_most(200.0),
+        );
+        let right = system.layout_metrics(
+            "decorated",
+            &TextStyle {
+                text_align: TextAlign::Right,
+                ..TextStyle::default()
+            },
+            TextConstraints::at_most(200.0),
+        );
+        if centered.runs.is_empty() || right.runs.is_empty() {
+            return;
+        }
+
+        assert!(centered.runs[0].left > 0.0);
+        assert!(right.runs[0].left > centered.runs[0].left);
+        assert!(centered.runs[0].width < 200.0);
+        assert!(centered.runs[0].baseline > centered.runs[0].ascent);
+        assert!(centered.runs[0].underline_y >= centered.runs[0].baseline);
+
+        let wrapped = system.layout_metrics(
+            "decorations follow each wrapped shaped line",
+            &TextStyle {
+                text_align: TextAlign::Center,
+                ..TextStyle::default()
+            },
+            TextConstraints::at_most(90.0),
+        );
+        assert!(wrapped.text.line_count > 1);
+        assert!(wrapped.runs.len() >= wrapped.text.line_count);
+        assert!(wrapped
+            .runs
+            .windows(2)
+            .any(|runs| runs[0].baseline != runs[1].baseline));
+        assert!(wrapped
+            .runs
+            .iter()
+            .all(|run| run.left >= 0.0 && run.left + run.width <= 90.01));
     }
 }
