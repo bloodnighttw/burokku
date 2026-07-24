@@ -10,6 +10,6 @@ pub(crate) use taffy::style::{
     JustifyContent, Position,
 };
 pub(crate) use values::{
-    BackgroundImage, Isolation, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue,
-    Overflow, Shadow, SizeValue, Transform, ZIndex,
+    BackgroundImage, GradientStop, Isolation, LengthPercentageValue, LengthValue, LineHeightValue,
+    MaxSizeValue, Overflow, Shadow, SizeValue, Transform, ZIndex,
 };

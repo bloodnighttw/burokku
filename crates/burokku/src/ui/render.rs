@@ -185,7 +185,7 @@ fn visual_bounds(layout: &Layout) -> Rect {
                 let expansion = (outline.offset + outline.width).max(0.0);
                 bounds = expanded_rect(bounds, expansion);
             }
-            if let Some(shadow) = style.shadow {
+            for shadow in style.shadows.iter().filter(|shadow| !shadow.inset) {
                 let mut shadow_bounds =
                     expanded_rect(bounds, shadow.spread.max(0.0) + shadow.blur * 2.0);
                 shadow_bounds.x += shadow.offset[0];
@@ -195,7 +195,7 @@ fn visual_bounds(layout: &Layout) -> Rect {
             bounds = transformed_rect(bounds, style.transform.matrix);
         }
         LayoutKind::Text { style, .. } => {
-            if let Some(shadow) = style.shadow {
+            for shadow in &style.shadows {
                 let mut shadow_bounds = expanded_rect(bounds, shadow.blur);
                 shadow_bounds.x += shadow.offset[0];
                 shadow_bounds.y += shadow.offset[1];
@@ -264,7 +264,7 @@ fn transformed_rect(rect: Rect, matrix: [f32; 6]) -> Rect {
 fn intersects_visible_area(mut bounds: Rect, clips: &[Clip], viewport: Rect) -> bool {
     bounds = bounds.intersection(viewport);
     for clip in clips {
-        bounds = bounds.intersection(clip.rect);
+        bounds = bounds.intersection(clip.bounds());
     }
     bounds.width > 0.0 && bounds.height > 0.0
 }
@@ -279,7 +279,7 @@ fn scaled_rect(rect: Rect, scale_factor: f32) -> Rect {
 }
 
 fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
-    Clip::new(
+    let mut scaled = Clip::new(
         scaled_rect(clip.rect, scale_factor),
         CornerRadius::new(
             clip.corner_radius.top_left * scale_factor,
@@ -287,7 +287,16 @@ fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
             clip.corner_radius.bottom_right * scale_factor,
             clip.corner_radius.bottom_left * scale_factor,
         ),
-    )
+    );
+    scaled.transform = [
+        clip.transform[0],
+        clip.transform[1],
+        clip.transform[2],
+        clip.transform[3],
+        clip.transform[4] * scale_factor,
+        clip.transform[5] * scale_factor,
+    ];
+    scaled
 }
 
 fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
@@ -321,15 +330,20 @@ fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
                 style.transform.matrix[5] * scale_factor,
             ],
         },
-        shadow: style.shadow.map(|shadow| BoxShadow {
-            offset: [
-                shadow.offset[0] * scale_factor,
-                shadow.offset[1] * scale_factor,
-            ],
-            blur: shadow.blur * scale_factor,
-            spread: shadow.spread * scale_factor,
-            color: shadow.color,
-        }),
+        shadows: style
+            .shadows
+            .into_iter()
+            .map(|shadow| BoxShadow {
+                offset: [
+                    shadow.offset[0] * scale_factor,
+                    shadow.offset[1] * scale_factor,
+                ],
+                blur: shadow.blur * scale_factor,
+                spread: shadow.spread * scale_factor,
+                color: shadow.color,
+                inset: shadow.inset,
+            })
+            .collect(),
     }
 }
 
@@ -339,14 +353,18 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
     style.line_height *= scale_factor;
     style.transform.matrix[4] *= scale_factor;
     style.transform.matrix[5] *= scale_factor;
-    style.shadow = style.shadow.map(|shadow| TextShadow {
-        offset: [
-            shadow.offset[0] * scale_factor,
-            shadow.offset[1] * scale_factor,
-        ],
-        blur: shadow.blur * scale_factor,
-        color: shadow.color,
-    });
+    style.shadows = style
+        .shadows
+        .into_iter()
+        .map(|shadow| TextShadow {
+            offset: [
+                shadow.offset[0] * scale_factor,
+                shadow.offset[1] * scale_factor,
+            ],
+            blur: shadow.blur * scale_factor,
+            color: shadow.color,
+        })
+        .collect();
     style
 }
 
@@ -419,7 +437,7 @@ mod tests {
         };
         assert_eq!(style.opacity, 0.5);
         assert_eq!(style.transform.matrix[4..], [6.0, 8.0]);
-        assert_eq!(style.shadow.unwrap().offset, [2.0, 4.0]);
+        assert_eq!(style.shadows[0].offset, [2.0, 4.0]);
         assert!(matches!(
             style.background_image,
             Some(BackgroundImage::LinearGradient { .. })

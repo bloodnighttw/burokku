@@ -9,6 +9,7 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
         y,
         width: 80.0,
         height: 20.0,
+        transform: render::Transform::IDENTITY,
         clips: Vec::new(),
         scroll: None,
         kind: LayoutKind::Text {
@@ -25,6 +26,7 @@ fn box_layout(element_id: u64, stacking_layer: StackingLayer, children: Vec<Layo
         y: 0.0,
         width: 100.0,
         height: 100.0,
+        transform: render::Transform::IDENTITY,
         clips: Vec::new(),
         scroll: None,
         kind: LayoutKind::Box {
@@ -57,6 +59,7 @@ fn hit_testing_returns_the_topmost_child() {
         y: 0.0,
         width: 200.0,
         height: 200.0,
+        transform: render::Transform::IDENTITY,
         clips: Vec::new(),
         scroll: None,
         kind: LayoutKind::Box {

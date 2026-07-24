@@ -54,6 +54,8 @@ pub struct Layout {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Cumulative affine transform around this layout's center.
+    pub transform: render::Transform,
     /// Ancestor overflow clips in viewport coordinates, outermost first.
     pub clips: Vec<Clip>,
     /// Scroll geometry when this box establishes a scroll container.
@@ -130,13 +132,24 @@ impl Layout {
     }
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
+        let center = [self.x + self.width * 0.5, self.y + self.height * 0.5];
+        let [a, b, c, d, tx, ty] = self.transform.matrix;
+        let determinant = a * d - b * c;
+        if determinant.abs() <= f32::EPSILON {
+            return false;
+        }
+        let relative = [x - center[0] - tx, y - center[1] - ty];
+        let local = [
+            (d * relative[0] - c * relative[1]) / determinant + center[0],
+            (-b * relative[0] + a * relative[1]) / determinant + center[1],
+        ];
         self.clips.iter().all(|clip| clip.contains(x, y))
             && self.width > 0.0
             && self.height > 0.0
-            && x >= self.x
-            && x < self.x + self.width
-            && y >= self.y
-            && y < self.y + self.height
+            && local[0] >= self.x
+            && local[0] < self.x + self.width
+            && local[1] >= self.y
+            && local[1] < self.y + self.height
     }
 
     /// Iterates over this layout and its descendants in render order.

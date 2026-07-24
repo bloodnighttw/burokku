@@ -207,8 +207,8 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::{
-        BackgroundImage, Border, BoxShadow, BoxStyle, Clip, Color, CornerRadius, Outline,
-        RasterImage, Rect, TextStyle, Transform,
+        BackgroundImage, Border, BoxShadow, BoxStyle, Clip, Color, CornerRadius, GradientStop,
+        Outline, RasterImage, Rect, TextStyle, Transform,
     };
 
     #[tokio::test(flavor = "current_thread")]
@@ -344,6 +344,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn clips_shape_pixels_with_an_affine_transformed_clip() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        let angle = 45.0_f32.to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let mut clip = Clip::rectangular(Rect::new(24.0, 16.0, 16.0, 32.0));
+        clip.transform = [cos, sin, -sin, cos, 0.0, 0.0];
+        canvas.draw_box_clipped(
+            Rect::new(4.0, 4.0, 56.0, 56.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                ..BoxStyle::default()
+            },
+            clip,
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen transformed clip render");
+        let center = image.pixel(32, 32).unwrap();
+        assert!(center[0] > 180 && center[1] < 80);
+        assert_eq!(image.pixel(20, 20), Some([255, 255, 255, 255]));
+        assert_eq!(image.pixel(12, 32), Some([255, 255, 255, 255]));
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn renders_gradient_opacity_transform_and_shadow_pixels() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
@@ -361,8 +401,20 @@ mod tests {
             BoxStyle {
                 background_image: Some(BackgroundImage::LinearGradient {
                     direction: [1.0, 0.0],
-                    start: Color::from_rgba8(255, 0, 0, 255),
-                    end: Color::from_rgba8(0, 0, 255, 255),
+                    stops: vec![
+                        GradientStop {
+                            color: Color::from_rgba8(255, 0, 0, 255),
+                            position: 0.0,
+                        },
+                        GradientStop {
+                            color: Color::from_rgba8(0, 255, 0, 255),
+                            position: 0.5,
+                        },
+                        GradientStop {
+                            color: Color::from_rgba8(0, 0, 255, 255),
+                            position: 1.0,
+                        },
+                    ],
                 }),
                 opacity: 0.5,
                 ..BoxStyle::default()
@@ -382,12 +434,13 @@ mod tests {
             Rect::new(64.0, 10.0, 12.0, 12.0),
             BoxStyle {
                 background: Color::from_rgba8(240, 180, 0, 255),
-                shadow: Some(BoxShadow {
+                shadows: vec![BoxShadow {
                     offset: [5.0, 6.0],
                     blur: 2.0,
                     spread: 1.0,
                     color: Color::from_rgba8(0, 0, 0, 180),
-                }),
+                    inset: false,
+                }],
                 ..BoxStyle::default()
             },
         );
@@ -401,8 +454,10 @@ mod tests {
         .expect("off-screen paint effects render");
 
         let gradient_left = image.pixel(10, 18).unwrap();
+        let gradient_middle = image.pixel(28, 18).unwrap();
         let gradient_right = image.pixel(45, 18).unwrap();
         assert!(gradient_left[0] > gradient_left[2]);
+        assert!(gradient_middle[1] > gradient_middle[0] && gradient_middle[1] > gradient_middle[2]);
         assert!(gradient_right[2] > gradient_right[0]);
         assert!(gradient_left[1] > 120, "opacity must reveal white below");
         assert_eq!(image.pixel(12, 44), Some([255, 255, 255, 255]));
@@ -462,6 +517,59 @@ mod tests {
             "{second_bottom:?}"
         );
         assert_eq!(image.pixel(2, 2), Some([255, 255, 255, 255]));
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn renders_multiple_outer_and_inset_box_shadows() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(16.0, 16.0, 32.0, 32.0),
+            BoxStyle {
+                background: Color::from_rgba8(250, 220, 40, 255),
+                shadows: vec![
+                    BoxShadow {
+                        offset: [5.0, 5.0],
+                        blur: 2.0,
+                        spread: 1.0,
+                        color: Color::from_rgba8(0, 0, 0, 180),
+                        inset: false,
+                    },
+                    BoxShadow {
+                        offset: [0.0, 0.0],
+                        blur: 3.0,
+                        spread: 2.0,
+                        color: Color::from_rgba8(180, 0, 0, 220),
+                        inset: true,
+                    },
+                ],
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen multiple shadow render");
+        let center = image.pixel(32, 32).unwrap();
+        let inset_edge = image.pixel(18, 32).unwrap();
+        let outer = image.pixel(51, 51).unwrap();
+        assert!(center[0] > 200 && center[1] > 170);
+        assert!(inset_edge[0] > inset_edge[1].saturating_add(40));
+        assert!(outer[0] < 245 && outer[1] < 245 && outer[2] < 245);
         drop(adapter);
     }
 }

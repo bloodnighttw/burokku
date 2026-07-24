@@ -9,7 +9,8 @@ mod text_system;
 
 pub use drawing::{
     BackgroundImage, Border, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, DrawCommand,
-    FontFamily, Outline, RasterImage, Rect, TextShadow, TextStyle, TextWrap, Transform,
+    FontFamily, GradientStop, Outline, RasterImage, Rect, TextShadow, TextStyle, TextWrap,
+    Transform,
 };
 pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};
 pub use text_system::{TextConstraints, TextMetrics, TextSystem, TextWidth};

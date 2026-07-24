@@ -178,7 +178,7 @@ fn push_text_placements(
     style: &TextStyle,
 ) {
     let bounds = transformed_text_bounds(bounds, style);
-    if let Some(shadow) = style.shadow {
+    for shadow in &style.shadows {
         let blur = shadow.blur.max(0.0);
         let samples: &[[f32; 2]] = if blur > 0.0 {
             &[

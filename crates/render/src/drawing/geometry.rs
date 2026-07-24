@@ -81,6 +81,8 @@ impl CornerRadius {
 pub struct Clip {
     pub rect: Rect,
     pub corner_radius: CornerRadius,
+    /// Affine transform around the clip rectangle's center.
+    pub transform: [f32; 6],
 }
 
 impl Clip {
@@ -88,6 +90,7 @@ impl Clip {
         Self {
             rect,
             corner_radius,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         }
     }
 
@@ -96,15 +99,22 @@ impl Clip {
     }
 
     pub fn contains(self, x: f32, y: f32) -> bool {
-        if !self.rect.contains(x, y) {
+        let center = [
+            self.rect.x + self.rect.width * 0.5,
+            self.rect.y + self.rect.height * 0.5,
+        ];
+        let [a, b, c, d, tx, ty] = self.transform;
+        let determinant = a * d - b * c;
+        if determinant.abs() <= f32::EPSILON {
             return false;
         }
+        let relative = [x - center[0] - tx, y - center[1] - ty];
+        let position = [
+            (d * relative[0] - c * relative[1]) / determinant,
+            (-b * relative[0] + a * relative[1]) / determinant,
+        ];
 
         let half_size = [self.rect.width * 0.5, self.rect.height * 0.5];
-        let position = [
-            x - (self.rect.x + half_size[0]),
-            y - (self.rect.y + half_size[1]),
-        ];
         let radii = self.corner_radius.normalized(self.rect);
         let radius = if position[1] < 0.0 {
             if position[0] < 0.0 {
@@ -122,5 +132,24 @@ impl Clip {
             position[1].abs() - half_size[1] + radius,
         ];
         q[0].max(q[1]).min(0.0) + q[0].max(0.0).hypot(q[1].max(0.0)) <= 0.0
+    }
+
+    pub fn bounds(self) -> Rect {
+        let center = [
+            self.rect.x + self.rect.width * 0.5,
+            self.rect.y + self.rect.height * 0.5,
+        ];
+        let [a, b, c, d, tx, ty] = self.transform;
+        let half = [self.rect.width * 0.5, self.rect.height * 0.5];
+        let transformed_half = [
+            a.abs() * half[0] + c.abs() * half[1],
+            b.abs() * half[0] + d.abs() * half[1],
+        ];
+        Rect::new(
+            center[0] + tx - transformed_half[0],
+            center[1] + ty - transformed_half[1],
+            transformed_half[0] * 2.0,
+            transformed_half[1] * 2.0,
+        )
     }
 }

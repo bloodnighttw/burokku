@@ -25,6 +25,7 @@ pub struct BoxShadow {
     pub blur: f32,
     pub spread: f32,
     pub color: Color,
+    pub inset: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,15 +52,20 @@ impl RasterImage {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct GradientStop {
+    pub color: Color,
+    /// Normalized position along the gradient axis.
+    pub position: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum BackgroundImage {
     LinearGradient {
         direction: [f32; 2],
-        start: Color,
-        end: Color,
+        stops: Vec<GradientStop>,
     },
     RadialGradient {
-        start: Color,
-        end: Color,
+        stops: Vec<GradientStop>,
     },
     Raster(RasterImage),
 }
@@ -105,7 +111,7 @@ pub struct BoxStyle {
     pub outline: Option<Outline>,
     pub opacity: f32,
     pub transform: Transform,
-    pub shadow: Option<BoxShadow>,
+    pub shadows: Vec<BoxShadow>,
 }
 
 impl Default for BoxStyle {
@@ -118,7 +124,7 @@ impl Default for BoxStyle {
             outline: None,
             opacity: 1.0,
             transform: Transform::IDENTITY,
-            shadow: None,
+            shadows: Vec::new(),
         }
     }
 }
