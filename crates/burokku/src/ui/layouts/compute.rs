@@ -23,8 +23,8 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        AlignItems, BoxSizing, Color as ElementColor, Display as ElementDisplay, JustifyContent,
-        LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue,
+        AlignItems, BoxSizing, Color as ElementColor, Display as ElementDisplay, FlexDirection,
+        JustifyContent, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue,
         Overflow as ElementOverflow, SizeValue, Style as ElementStyle,
     },
     Document, Element, ElementKind, BODY_ID,
@@ -102,6 +102,7 @@ fn add_element(
         .expect("element child IDs are validated when inserted");
     let style = native_style(document, element_id, element);
     let text_style = merge_text_style(inherited_text_style, &style);
+    let native_appearance = native_appearance(element, &style, &text_style);
     let node_id = nodes.len();
     nodes.push(LayoutNode {
         element_id,
@@ -109,6 +110,7 @@ fn add_element(
         style: to_taffy_style(&element.kind, &style),
         paint_style: style,
         text_style: text_style.clone(),
+        native_appearance,
         children: Vec::with_capacity(element.children.len()),
         cache: Cache::new(),
         layout: TaffyLayout::new(),
@@ -129,6 +131,7 @@ struct LayoutNode {
     style: TaffyStyle,
     paint_style: ElementStyle,
     text_style: TextStyle,
+    native_appearance: Option<NativeAppearance>,
     children: Vec<usize>,
     cache: Cache,
     layout: TaffyLayout,
@@ -323,13 +326,7 @@ impl ElementLayoutTree<'_> {
                     LayoutKind::Box {
                         style: box_style(&data.paint_style, width, height),
                         stacking_layer: StackingLayer::from_style(&data.paint_style),
-                        native_appearance: match data.kind {
-                            ElementKind::Button => Some(NativeAppearance::Button),
-                            ElementKind::Select => Some(NativeAppearance::Select {
-                                color: data.text_style.color,
-                            }),
-                            _ => None,
-                        },
+                        native_appearance: data.native_appearance,
                         children,
                     },
                     scroll,
@@ -379,6 +376,7 @@ fn native_style(document: &Document, element_id: u64, element: &Element) -> Elem
                 &["justify-content"],
             );
             native_control_box(&mut style, element, 8.0, 24.0);
+            apply_control_state_colors(&mut style, element, false);
         }
         ElementKind::Select => {
             set_default(
@@ -399,20 +397,217 @@ fn native_style(document: &Document, element_id: u64, element: &Element) -> Elem
                 element,
                 &["align-items"],
             );
-            native_control_box(&mut style, element, 24.0, 28.0);
+            let multiple = element.attributes.contains_key("multiple");
+            native_control_box(&mut style, element, if multiple { 8.0 } else { 24.0 }, 28.0);
+            if multiple {
+                set_default(
+                    &mut style.flex_direction,
+                    FlexDirection::Column,
+                    element,
+                    &["flex-direction"],
+                );
+                set_default(
+                    &mut style.align_items,
+                    Some(AlignItems::STRETCH),
+                    element,
+                    &["align-items"],
+                );
+            }
             set_default(
                 &mut style.background_color,
                 Some([255, 255, 255, 255]),
                 element,
                 &["background-color"],
             );
+            apply_control_state_colors(&mut style, element, true);
         }
-        ElementKind::Option if !option_is_selected(document, element_id) => {
-            style.display = ElementDisplay::None;
+        ElementKind::Option => {
+            let multiple = option_select(document, element_id)
+                .is_some_and(|select| select.attributes.contains_key("multiple"));
+            if !multiple && !option_is_selected(document, element_id) {
+                style.display = ElementDisplay::None;
+            } else {
+                if multiple {
+                    set_default(
+                        &mut style.padding_top,
+                        LengthPercentageValue::Px(2.0),
+                        element,
+                        &["padding", "padding-top"],
+                    );
+                    set_default(
+                        &mut style.padding_right,
+                        LengthPercentageValue::Px(6.0),
+                        element,
+                        &["padding", "padding-right"],
+                    );
+                    set_default(
+                        &mut style.padding_bottom,
+                        LengthPercentageValue::Px(2.0),
+                        element,
+                        &["padding", "padding-bottom"],
+                    );
+                    set_default(
+                        &mut style.padding_left,
+                        LengthPercentageValue::Px(6.0),
+                        element,
+                        &["padding", "padding-left"],
+                    );
+                }
+                apply_option_state_colors(
+                    &mut style,
+                    element,
+                    option_is_selected(document, element_id),
+                );
+            }
         }
         _ => {}
     }
     style
+}
+
+fn native_appearance(
+    element: &Element,
+    style: &ElementStyle,
+    text_style: &TextStyle,
+) -> Option<NativeAppearance> {
+    let disabled = element.attributes.contains_key("disabled");
+    let focused = element.attributes.contains_key("data-burokku-focused");
+    let active = !disabled
+        && (element.attributes.contains_key("data-burokku-active")
+            || element
+                .attributes
+                .get("aria-pressed")
+                .is_some_and(|value| value == "true"));
+    let border_color = style
+        .border_color
+        .map_or(Color::from_rgba8(118, 118, 118, 255), rgba);
+    let default_borders = native_default_borders(element);
+    let border_widths = [
+        style.border_top_width.px(),
+        style.border_right_width.px(),
+        style.border_bottom_width.px(),
+        style.border_left_width.px(),
+    ];
+    match element.kind {
+        ElementKind::Button => Some(NativeAppearance::Button {
+            disabled,
+            focused,
+            active,
+            default_borders,
+            border_widths,
+            border_color,
+        }),
+        ElementKind::Select => Some(NativeAppearance::Select {
+            color: text_style.color,
+            disabled,
+            focused,
+            multiple: element.attributes.contains_key("multiple"),
+            default_borders,
+            border_widths,
+            border_color,
+        }),
+        _ => None,
+    }
+}
+
+fn native_default_borders(element: &Element) -> [bool; 4] {
+    if !matches!(element.kind, ElementKind::Button | ElementKind::Select) {
+        return [false; 4];
+    }
+    ["top", "right", "bottom", "left"].map(|side| {
+        !element.specified_styles.contains("border-style")
+            && !element
+                .specified_styles
+                .contains(&format!("border-{side}-style"))
+    })
+}
+
+fn apply_control_state_colors(style: &mut ElementStyle, element: &Element, select: bool) {
+    let disabled = element.attributes.contains_key("disabled");
+    let focused = element.attributes.contains_key("data-burokku-focused");
+    let active = !disabled
+        && (element.attributes.contains_key("data-burokku-active")
+            || element
+                .attributes
+                .get("aria-pressed")
+                .is_some_and(|value| value == "true"));
+
+    if disabled {
+        set_default(
+            &mut style.background_color,
+            Some(if select {
+                [245, 245, 245, 255]
+            } else {
+                [232, 232, 232, 255]
+            }),
+            element,
+            &["background-color"],
+        );
+        set_default(
+            &mut style.color,
+            Some([112, 112, 112, 255]),
+            element,
+            &["color"],
+        );
+        set_default(
+            &mut style.border_color,
+            Some([180, 180, 180, 255]),
+            element,
+            &["border-color"],
+        );
+    } else if active && !select {
+        set_default(
+            &mut style.background_color,
+            Some([214, 214, 214, 255]),
+            element,
+            &["background-color"],
+        );
+    }
+
+    if focused {
+        set_default(
+            &mut style.outline_color,
+            Some([38, 132, 255, 255]),
+            element,
+            &["outline-color"],
+        );
+        set_default(
+            &mut style.outline_width,
+            LengthValue::Px(2.0),
+            element,
+            &["outline-width"],
+        );
+        set_default(
+            &mut style.outline_offset,
+            LengthValue::Px(1.0),
+            element,
+            &["outline-offset"],
+        );
+    }
+}
+
+fn apply_option_state_colors(style: &mut ElementStyle, element: &Element, selected: bool) {
+    if element.attributes.contains_key("disabled") {
+        set_default(
+            &mut style.color,
+            Some([128, 128, 128, 255]),
+            element,
+            &["color"],
+        );
+    } else if selected {
+        set_default(
+            &mut style.background_color,
+            Some([38, 132, 255, 255]),
+            element,
+            &["background-color"],
+        );
+        set_default(
+            &mut style.color,
+            Some([255, 255, 255, 255]),
+            element,
+            &["color"],
+        );
+    }
 }
 
 fn native_control_box(
@@ -514,27 +709,77 @@ fn option_is_selected(document: &Document, option_id: u64) -> bool {
     let option = document
         .node(option_id)
         .expect("layout nodes always refer to live document nodes");
-    let Some(select_id) = option.parent else {
+    let Some(select) = option_select(document, option_id) else {
         return true;
     };
-    let select = document
-        .node(select_id)
-        .expect("an attached node always has a live parent");
-    if !matches!(select.kind, ElementKind::Select) {
-        return true;
-    }
 
-    let mut options = select.children.iter().filter(|child| {
+    let options = select.children.iter().filter(|child| {
         document
             .node(**child)
             .is_ok_and(|child| matches!(child.kind, ElementKind::Option))
     });
-    let explicitly_selected = options.clone().find(|child| {
+    if select
+        .attributes
+        .contains_key("data-burokku-selection-explicit")
+    {
+        let is_dynamic_selection = |child: &&u64| {
+            document
+                .node(**child)
+                .is_ok_and(|child| child.attributes.contains_key("data-burokku-selected"))
+        };
+        if select.attributes.contains_key("multiple") {
+            return options
+                .clone()
+                .any(|child| child == &option_id && is_dynamic_selection(&child));
+        }
+        return options
+            .clone()
+            .rfind(is_dynamic_selection)
+            .is_some_and(|child| *child == option_id);
+    }
+
+    if select.attributes.contains_key("multiple") {
+        let has_selected = options.clone().any(|child| {
+            document
+                .node(*child)
+                .is_ok_and(option_is_initially_selected)
+        });
+        if has_selected {
+            return option_is_initially_selected(option);
+        }
+        return false;
+    }
+
+    let selected = options.clone().rfind(|child| {
         document
             .node(**child)
-            .is_ok_and(|child| child.attributes.contains_key("selected"))
+            .is_ok_and(option_is_initially_selected)
     });
-    explicitly_selected.or_else(|| options.next()).copied() == Some(option_id)
+    selected
+        .or_else(|| {
+            options.clone().find(|child| {
+                document
+                    .node(**child)
+                    .is_ok_and(|child| !child.attributes.contains_key("disabled"))
+            })
+        })
+        .or_else(|| options.clone().next())
+        .copied()
+        == Some(option_id)
+}
+
+fn option_is_initially_selected(option: &Element) -> bool {
+    option.attributes.contains_key("data-burokku-selected")
+        || (!option
+            .attributes
+            .contains_key("data-burokku-option-explicit")
+            && option.attributes.contains_key("selected"))
+}
+
+fn option_select(document: &Document, option_id: u64) -> Option<&Element> {
+    let option = document.node(option_id).ok()?;
+    let select = document.node(option.parent?).ok()?;
+    matches!(select.kind, ElementKind::Select).then_some(select)
 }
 
 fn padding_box(data: &LayoutNode, location: Point<f32>, width: f32, height: f32) -> RenderRect {
@@ -1184,5 +1429,103 @@ mod tests {
             |layout| !matches!(&layout.kind, LayoutKind::Text { text, .. } if text == "First")
                 || layout.width == 0.0
         ));
+    }
+
+    #[test]
+    fn explicit_empty_selection_does_not_restore_the_first_option() {
+        let mut document = Document::new();
+        let select = document.create_node(ElementKind::Select);
+        let first = document.create_node(ElementKind::Option);
+        let second = document.create_node(ElementKind::Option);
+        document.insert(BODY_ID, select, None).unwrap();
+        document.insert(select, first, None).unwrap();
+        document.insert(select, second, None).unwrap();
+        document
+            .set_attribute(select, "data-burokku-selection-explicit", Some(""))
+            .unwrap();
+
+        assert!(!option_is_selected(&document, first));
+        assert!(!option_is_selected(&document, second));
+        assert_eq!(
+            native_style(&document, first, document.node(first).unwrap()).display,
+            ElementDisplay::None
+        );
+        assert_eq!(
+            native_style(&document, second, document.node(second).unwrap()).display,
+            ElementDisplay::None
+        );
+    }
+
+    #[test]
+    fn multiple_selects_show_all_options_and_style_selected_and_disabled_rows() {
+        let mut document = Document::new();
+        let select = document.create_node(ElementKind::Select);
+        let selected = document.create_node(ElementKind::Option);
+        let disabled = document.create_node(ElementKind::Option);
+        document.insert(BODY_ID, select, None).unwrap();
+        document.insert(select, selected, None).unwrap();
+        document.insert(select, disabled, None).unwrap();
+        document
+            .set_attribute(select, "multiple", Some(""))
+            .unwrap();
+        document
+            .set_attribute(select, "data-burokku-selection-explicit", Some(""))
+            .unwrap();
+        document
+            .set_attribute(selected, "data-burokku-selected", Some(""))
+            .unwrap();
+        document
+            .set_attribute(disabled, "disabled", Some(""))
+            .unwrap();
+
+        let selected_style = native_style(&document, selected, document.node(selected).unwrap());
+        let disabled_style = native_style(&document, disabled, document.node(disabled).unwrap());
+        assert_ne!(selected_style.display, ElementDisplay::None);
+        assert_ne!(disabled_style.display, ElementDisplay::None);
+        assert_eq!(selected_style.background_color, Some([38, 132, 255, 255]));
+        assert_eq!(selected_style.color, Some([255, 255, 255, 255]));
+        assert_eq!(disabled_style.color, Some([128, 128, 128, 255]));
+    }
+
+    #[test]
+    fn native_border_defaults_are_per_side_and_yield_to_author_properties() {
+        let mut element = Element {
+            kind: ElementKind::Button,
+            parent: None,
+            children: Vec::new(),
+            style: ElementStyle::default(),
+            attributes: HashMap::new(),
+            specified_styles: Default::default(),
+        };
+        element.specified_styles.insert("border-top-style".into());
+        element.specified_styles.insert("border-left-width".into());
+
+        assert_eq!(native_default_borders(&element), [false, true, true, true]);
+    }
+
+    #[test]
+    fn disabled_focused_and_pressed_controls_receive_distinct_native_states() {
+        let mut document = Document::new();
+        let disabled = document.create_node(ElementKind::Button);
+        let active = document.create_node(ElementKind::Button);
+        let focused = document.create_node(ElementKind::Select);
+        document
+            .set_attribute(disabled, "disabled", Some(""))
+            .unwrap();
+        document
+            .set_attribute(active, "aria-pressed", Some("true"))
+            .unwrap();
+        document
+            .set_attribute(focused, "data-burokku-focused", Some(""))
+            .unwrap();
+
+        let disabled_style = native_style(&document, disabled, document.node(disabled).unwrap());
+        let active_style = native_style(&document, active, document.node(active).unwrap());
+        let focused_style = native_style(&document, focused, document.node(focused).unwrap());
+        assert_eq!(disabled_style.color, Some([112, 112, 112, 255]));
+        assert_eq!(disabled_style.background_color, Some([232, 232, 232, 255]));
+        assert_eq!(active_style.background_color, Some([214, 214, 214, 255]));
+        assert_eq!(focused_style.outline_color, Some([38, 132, 255, 255]));
+        assert_eq!(focused_style.outline_width, LengthValue::Px(2.0));
     }
 }

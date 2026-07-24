@@ -127,8 +127,23 @@ pub enum LayoutKind {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NativeAppearance {
-    Button,
-    Select { color: Color },
+    Button {
+        disabled: bool,
+        focused: bool,
+        active: bool,
+        default_borders: [bool; 4],
+        border_widths: [f32; 4],
+        border_color: Color,
+    },
+    Select {
+        color: Color,
+        disabled: bool,
+        focused: bool,
+        multiple: bool,
+        default_borders: [bool; 4],
+        border_widths: [f32; 4],
+        border_color: Color,
+    },
 }
 
 impl Layout {
