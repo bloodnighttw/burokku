@@ -27,7 +27,7 @@ use crate::ui::elements::{
     Document, ElementKind, BODY_ID,
 };
 
-use super::{Layout, LayoutKind};
+use super::{Layout, LayoutKind, StackingLayer};
 
 /// Computes a renderable layout tree from an element document.
 ///
@@ -203,6 +203,7 @@ impl ElementLayoutTree<'_> {
             | ElementKind::Body
             | ElementKind::Other(_) => LayoutKind::Box {
                 style: box_style(&data.paint_style, width, height),
+                stacking_layer: StackingLayer::from_style(&data.paint_style),
                 children: data
                     .children
                     .iter()
@@ -549,6 +550,7 @@ mod tests {
         let LayoutKind::Box {
             style,
             children: row_children,
+            ..
         } = &children[0].kind
         else {
             panic!("div should produce a box layout");
@@ -594,5 +596,27 @@ mod tests {
         assert_eq!(outer.x, 30.0);
         assert_eq!(inner.x, 42.0);
         assert_eq!((inner.width, inner.height), (50.0, 20.0));
+    }
+
+    #[test]
+    fn carries_z_index_and_isolation_into_layout_layers() {
+        let mut document = Document::new();
+        let indexed = document.create_node(ElementKind::Div);
+        let isolated = document.create_node(ElementKind::Div);
+        document.set_style(indexed, "z-index", Some("-7")).unwrap();
+        document
+            .set_style(isolated, "isolation", Some("isolate"))
+            .unwrap();
+        document.insert(BODY_ID, indexed, None).unwrap();
+        document.insert(BODY_ID, isolated, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let children = layout.children();
+
+        assert_eq!(
+            children[0].stacking_layer(),
+            StackingLayer::new(Some(-7), false)
+        );
+        assert_eq!(children[1].stacking_layer(), StackingLayer::new(None, true));
     }
 }

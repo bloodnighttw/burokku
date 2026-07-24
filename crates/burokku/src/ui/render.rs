@@ -51,27 +51,26 @@ pub fn build_canvas(
 }
 
 fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
-    if layout.width <= 0.0 && layout.height <= 0.0 {
-        return;
-    }
-
-    let bounds = Rect::new(
-        layout.x * scale_factor,
-        layout.y * scale_factor,
-        layout.width * scale_factor,
-        layout.height * scale_factor,
-    );
-    match &layout.kind {
-        LayoutKind::Box { style, children } => {
-            if *style != BoxStyle::default() {
-                canvas.draw_box(bounds, scaled_box_style(*style, scale_factor));
-            }
-            for child in children {
-                paint_layout(child, scale_factor, canvas);
-            }
+    for layout in layout {
+        if layout.width <= 0.0 && layout.height <= 0.0 {
+            continue;
         }
-        LayoutKind::Text { text, style } => {
-            canvas.draw_text(bounds, text, scaled_text_style(style, scale_factor));
+
+        let bounds = Rect::new(
+            layout.x * scale_factor,
+            layout.y * scale_factor,
+            layout.width * scale_factor,
+            layout.height * scale_factor,
+        );
+        match &layout.kind {
+            LayoutKind::Box { style, .. } => {
+                if *style != BoxStyle::default() {
+                    canvas.draw_box(bounds, scaled_box_style(*style, scale_factor));
+                }
+            }
+            LayoutKind::Text { text, style } => {
+                canvas.draw_text(bounds, text, scaled_text_style(style, scale_factor));
+            }
         }
     }
 }
@@ -167,5 +166,57 @@ mod tests {
         assert_eq!((rect.width, rect.height), (208.0, 108.0));
         assert_eq!(style.border.expect("border").width, 4.0);
         assert_eq!(style.corner_radius.top_left, 8.0);
+    }
+
+    #[test]
+    fn canvas_commands_follow_stacking_layer_order() {
+        let mut document = Document::new();
+        let ordinary = document.create_node(ElementKind::Div);
+        let high_descendant = document.create_node(ElementKind::Div);
+        let middle = document.create_node(ElementKind::Div);
+        let negative = document.create_node(ElementKind::Div);
+
+        for (element, color) in [
+            (ordinary, "#ff0000"),
+            (high_descendant, "#00ff00"),
+            (middle, "#0000ff"),
+            (negative, "#000000"),
+        ] {
+            document
+                .set_style(element, "background-color", Some(color))
+                .unwrap();
+            document.set_style(element, "width", Some("20px")).unwrap();
+            document.set_style(element, "height", Some("20px")).unwrap();
+        }
+        document
+            .set_style(high_descendant, "z-index", Some("10"))
+            .unwrap();
+        document.set_style(middle, "z-index", Some("5")).unwrap();
+        document.set_style(negative, "z-index", Some("-1")).unwrap();
+
+        document.insert(BODY_ID, ordinary, None).unwrap();
+        document.insert(ordinary, high_descendant, None).unwrap();
+        document.insert(BODY_ID, middle, None).unwrap();
+        document.insert(BODY_ID, negative, None).unwrap();
+
+        let canvas = build_canvas(&document, 100.0, 100.0, 1.0, &mut TextSystem::new());
+        let backgrounds: Vec<_> = canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                render::DrawCommand::Box { style, .. } => Some(style.background),
+                render::DrawCommand::Text { .. } => None,
+            })
+            .collect();
+
+        assert_eq!(
+            backgrounds,
+            [
+                Color::BLACK,
+                Color::from_rgba8(0xff, 0, 0, 0xff),
+                Color::from_rgba8(0, 0, 0xff, 0xff),
+                Color::from_rgba8(0, 0xff, 0, 0xff),
+            ]
+        );
     }
 }

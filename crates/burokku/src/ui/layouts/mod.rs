@@ -2,10 +2,17 @@
 //! This should be used inside main threads.
 
 mod compute;
+mod iter;
+mod stacking;
+#[cfg(test)]
+mod tests;
 
 use render::{BoxStyle, TextStyle, TextSystem};
 
 use crate::ui::elements::Document;
+
+pub use iter::{LayoutIter, ReverseLayoutIter};
+pub use stacking::StackingLayer;
 
 /// Computes a renderable layout tree from an element document.
 pub fn compute_layout(
@@ -39,6 +46,7 @@ pub struct Layout {
 pub enum LayoutKind {
     Box {
         style: BoxStyle,
+        stacking_layer: StackingLayer,
         children: Vec<Layout>,
     },
     Text {
@@ -61,24 +69,45 @@ impl Layout {
             && y < self.y + self.height
     }
 
+    /// Iterates over this layout and its descendants in render order.
+    pub fn iter(&self) -> LayoutIter<'_> {
+        LayoutIter::new(self)
+    }
+
+    /// Iterates over this layout and its descendants in reverse render order.
+    ///
+    /// This order is suitable for hit testing or event targeting because the
+    /// visually topmost layout is visited first.
+    pub fn iter_rev(&self) -> ReverseLayoutIter<'_> {
+        ReverseLayoutIter::new(self)
+    }
+
+    pub fn stacking_layer(&self) -> StackingLayer {
+        match &self.kind {
+            LayoutKind::Box { stacking_layer, .. } => *stacking_layer,
+            LayoutKind::Text { .. } => StackingLayer::default(),
+        }
+    }
+
+    pub fn children(&self) -> &[Layout] {
+        self.kind.children()
+    }
+
     /// Returns the topmost layout containing the point.
     ///
-    /// Children are stored in paint order, so hit testing visits them in
-    /// reverse order.
+    /// Hit testing follows reverse render order, including z-index and
+    /// stacking-context boundaries.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<&Layout> {
-        if !self.contains(x, y) {
-            return None;
-        }
+        self.iter_rev().find(|layout| layout.contains(x, y))
+    }
+}
 
-        if let LayoutKind::Box { children, .. } = &self.kind {
-            for child in children.iter().rev() {
-                if let Some(hit) = child.hit_test(x, y) {
-                    return Some(hit);
-                }
-            }
-        }
+impl<'a> IntoIterator for &'a Layout {
+    type Item = &'a Layout;
+    type IntoIter = LayoutIter<'a>;
 
-        Some(self)
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -88,52 +117,5 @@ impl LayoutKind {
             Self::Box { children, .. } => children,
             Self::Text { .. } => &[],
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
-        Layout {
-            element_id,
-            x,
-            y,
-            width: 80.0,
-            height: 20.0,
-            kind: LayoutKind::Text {
-                text: "Burokku".into(),
-                style: TextStyle::default(),
-            },
-        }
-    }
-
-    #[test]
-    fn layout_can_be_transferred_through_a_channel() {
-        let layout = text_layout(7, 10.0, 20.0);
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        sender.send(layout).unwrap();
-
-        assert_eq!(receiver.recv().unwrap().element_id(), 7);
-    }
-
-    #[test]
-    fn hit_testing_returns_the_topmost_child() {
-        let layout = Layout {
-            element_id: 1,
-            x: 0.0,
-            y: 0.0,
-            width: 200.0,
-            height: 200.0,
-            kind: LayoutKind::Box {
-                style: BoxStyle::default(),
-                children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
-            },
-        };
-
-        assert_eq!(layout.hit_test(30.0, 30.0).unwrap().element_id(), 3);
-        assert!(layout.hit_test(300.0, 300.0).is_none());
     }
 }

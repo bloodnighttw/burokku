@@ -2,8 +2,8 @@
 
 ## Style correctness
 
-- [ ] Apply `z-index` when ordering children for painting and hit testing.
-- [ ] Implement stacking contexts, including `isolation: isolate`.
+- [x] Apply `z-index` when ordering children for painting and hit testing.
+- [x] Implement stacking contexts, including `isolation: isolate`.
 - [ ] Clip descendants for `overflow: hidden` and `overflow: clip`.
 - [ ] Implement scroll containers and scrollbars for `overflow: auto` and `overflow: scroll`.
 - [ ] Preserve and paint per-side border widths instead of using the largest width for every side.

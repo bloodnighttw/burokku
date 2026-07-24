@@ -1,0 +1,89 @@
+use std::iter::FusedIterator;
+
+use super::super::{stacking::descendant_contexts, Layout};
+
+/// An iterator over layouts from back to front in paint order.
+///
+/// The iterator walks stacking contexts lazily. It only keeps pending
+/// traversal work and the stacking contexts for the layer currently being
+/// entered; it does not flatten the layout tree into a second collection.
+#[derive(Debug)]
+pub struct LayoutIter<'a> {
+    pending: Vec<Task<'a>>,
+}
+
+#[derive(Debug)]
+enum Task<'a> {
+    Context(&'a Layout),
+    Middle(&'a Layout),
+    MiddleChildren(std::slice::Iter<'a, Layout>),
+}
+
+impl<'a> LayoutIter<'a> {
+    pub(in crate::ui::layouts) fn new(root: &'a Layout) -> Self {
+        Self {
+            pending: vec![Task::Context(root)],
+        }
+    }
+}
+
+impl<'a> Iterator for LayoutIter<'a> {
+    type Item = &'a Layout;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(task) = self.pending.pop() {
+            match task {
+                Task::Context(layout) => {
+                    self.schedule_context(layout);
+                    return Some(layout);
+                }
+                Task::Middle(layout) => {
+                    let layer = layout.stacking_layer();
+                    if layer.establishes_context() {
+                        if layer.index() == 0 {
+                            self.pending.push(Task::Context(layout));
+                        }
+                        continue;
+                    }
+
+                    self.pending
+                        .push(Task::MiddleChildren(layout.children().iter()));
+                    return Some(layout);
+                }
+                Task::MiddleChildren(mut children) => {
+                    if let Some(child) = children.next() {
+                        self.pending.push(Task::MiddleChildren(children));
+                        self.pending.push(Task::Middle(child));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+impl FusedIterator for LayoutIter<'_> {}
+
+impl<'a> LayoutIter<'a> {
+    fn schedule_context(&mut self, context_root: &'a Layout) {
+        let contexts = descendant_contexts(context_root);
+
+        self.pending.extend(
+            contexts
+                .iter()
+                .rev()
+                .filter(|layout| layout.stacking_layer().index() > 0)
+                .map(|layout| Task::Context(layout)),
+        );
+        self.pending
+            .push(Task::MiddleChildren(context_root.children().iter()));
+        self.pending.extend(
+            contexts
+                .iter()
+                .rev()
+                .filter(|layout| layout.stacking_layer().index() < 0)
+                .map(|layout| Task::Context(layout)),
+        );
+    }
+}
