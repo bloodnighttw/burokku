@@ -8,6 +8,10 @@ use crate::{
 
 use super::SurfaceSize;
 
+const MAX_BACKGROUND_ATLAS_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_GRADIENT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INSET_SHADOW_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
 pub(super) struct ShapeRenderer {
     pipeline: wgpu::RenderPipeline,
     screen_buffer: wgpu::Buffer,
@@ -17,6 +21,10 @@ pub(super) struct ShapeRenderer {
     instance_capacity: u64,
     clip_buffer: wgpu::Buffer,
     clip_capacity: u64,
+    gradient_buffer: wgpu::Buffer,
+    gradient_capacity: u64,
+    inset_shadow_buffer: wgpu::Buffer,
+    inset_shadow_capacity: u64,
     image_texture: wgpu::Texture,
     image_view: wgpu::TextureView,
     image_sampler: wgpu::Sampler,
@@ -24,6 +32,8 @@ pub(super) struct ShapeRenderer {
     images: Vec<RasterImage>,
     instances: Vec<ShapeInstance>,
     clips: Vec<GpuClip>,
+    gradient_stops: Vec<GpuGradientStop>,
+    inset_shadows: Vec<GpuInsetShadow>,
     overlay_start: usize,
 }
 
@@ -42,6 +52,16 @@ impl ShapeRenderer {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -73,12 +93,36 @@ impl ShapeRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let clip_capacity = std::mem::size_of::<GpuClip>() as u64;
         let clip_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("render shape clips"),
             size: clip_capacity,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let gradient_capacity = std::mem::size_of::<GpuGradientStop>() as u64;
+        let gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render gradient stops"),
+            size: gradient_capacity,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let inset_shadow_capacity = std::mem::size_of::<GpuInsetShadow>() as u64;
+        let inset_shadow_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render inset shadows"),
+            size: inset_shadow_capacity,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -98,6 +142,8 @@ impl ShapeRenderer {
             &clip_buffer,
             &image_view,
             &image_sampler,
+            &gradient_buffer,
+            &inset_shadow_buffer,
         );
         let pipeline = create_pipeline(device, &bind_group_layout, target_format);
         let instance_capacity = std::mem::size_of::<ShapeInstance>() as u64;
@@ -116,6 +162,10 @@ impl ShapeRenderer {
             instance_capacity,
             clip_buffer,
             clip_capacity,
+            gradient_buffer,
+            gradient_capacity,
+            inset_shadow_buffer,
+            inset_shadow_capacity,
             image_texture,
             image_view,
             image_sampler,
@@ -123,6 +173,8 @@ impl ShapeRenderer {
             images: Vec::new(),
             instances: Vec::new(),
             clips: Vec::new(),
+            gradient_stops: Vec::new(),
+            inset_shadows: Vec::new(),
             overlay_start: 0,
         }
     }
@@ -145,6 +197,16 @@ impl ShapeRenderer {
         );
         self.instances.clear();
         self.clips.clear();
+        self.gradient_stops.clear();
+        self.inset_shadows.clear();
+        let storage_limit = device.limits().max_storage_buffer_binding_size as usize;
+        let gradient_stop_limit =
+            storage_limit.min(MAX_GRADIENT_BUFFER_BYTES) / std::mem::size_of::<GpuGradientStop>();
+        let inset_shadow_limit = storage_limit.min(MAX_INSET_SHADOW_BUFFER_BYTES)
+            / std::mem::size_of::<GpuInsetShadow>();
+        let clip_limit = storage_limit / std::mem::size_of::<GpuClip>();
+        let instance_limit =
+            device.limits().max_buffer_size as usize / std::mem::size_of::<ShapeInstance>();
         for overlay in [false, true] {
             if overlay {
                 self.overlay_start = self.instances.len();
@@ -170,6 +232,11 @@ impl ShapeRenderer {
                 {
                     continue;
                 }
+                if self.clips.len().saturating_add(clips.len()) > clip_limit
+                    || self.instances.len() >= instance_limit
+                {
+                    continue;
+                }
 
                 let clip_start = self.clips.len() as u32;
                 self.clips.extend(clips.iter().copied().map(GpuClip::new));
@@ -189,7 +256,39 @@ impl ShapeRenderer {
                         }),
                     _ => None,
                 };
-                if let Some(shadow) = style.shadow {
+                let gradient_range = match &style.background_image {
+                    Some(BackgroundImage::LinearGradient { stops, .. })
+                    | Some(BackgroundImage::RadialGradient { stops }) => {
+                        if self.gradient_stops.len().saturating_add(stops.len())
+                            > gradient_stop_limit
+                        {
+                            None
+                        } else {
+                            let start = self.gradient_stops.len() as u32;
+                            self.gradient_stops
+                                .extend(stops.iter().map(GpuGradientStop::new));
+                            Some((start, stops.len() as u32))
+                        }
+                    }
+                    _ => None,
+                };
+                let inset_shadow_range = {
+                    let start = self.inset_shadows.len() as u32;
+                    self.inset_shadows.extend(
+                        style
+                            .shadows
+                            .iter()
+                            .filter(|shadow| shadow.inset)
+                            .take(inset_shadow_limit.saturating_sub(self.inset_shadows.len()))
+                            .map(GpuInsetShadow::new),
+                    );
+                    let count = self.inset_shadows.len() as u32 - start;
+                    (count > 0).then_some((start, count))
+                };
+                for shadow in style.shadows.iter().filter(|shadow| !shadow.inset) {
+                    if self.instances.len() >= instance_limit {
+                        break;
+                    }
                     let spread = shadow.spread;
                     let shadow_rect = Rect::new(
                         rect.x + shadow.offset[0] - spread,
@@ -221,16 +320,22 @@ impl ShapeRenderer {
                         clips.len() as u32,
                         shadow.blur,
                         None,
+                        None,
+                        None,
                     ));
                 }
-                self.instances.push(ShapeInstance::new(
-                    rect,
-                    style,
-                    clip_start,
-                    clips.len() as u32,
-                    0.0,
-                    image_layer,
-                ));
+                if self.instances.len() < instance_limit {
+                    self.instances.push(ShapeInstance::new(
+                        rect,
+                        style,
+                        clip_start,
+                        clips.len() as u32,
+                        0.0,
+                        image_layer,
+                        gradient_range,
+                        inset_shadow_range,
+                    ));
+                }
             }
         }
         if self.instances.is_empty() {
@@ -240,7 +345,7 @@ impl ShapeRenderer {
         let bytes = bytemuck::cast_slice(&self.instances);
         let required_capacity = bytes.len() as u64;
         if required_capacity > self.instance_capacity {
-            self.instance_capacity = required_capacity.next_power_of_two();
+            self.instance_capacity = required_capacity;
             self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("render shape instances"),
                 size: self.instance_capacity,
@@ -254,7 +359,7 @@ impl ShapeRenderer {
             let clip_bytes = bytemuck::cast_slice(&self.clips);
             let required_clip_capacity = clip_bytes.len() as u64;
             if required_clip_capacity > self.clip_capacity {
-                self.clip_capacity = required_clip_capacity.next_power_of_two();
+                self.clip_capacity = required_clip_capacity;
                 self.clip_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("render shape clips"),
                     size: self.clip_capacity,
@@ -268,14 +373,64 @@ impl ShapeRenderer {
                     &self.clip_buffer,
                     &self.image_view,
                     &self.image_sampler,
+                    &self.gradient_buffer,
+                    &self.inset_shadow_buffer,
                 );
             }
             queue.write_buffer(&self.clip_buffer, 0, clip_bytes);
         }
+        if !self.gradient_stops.is_empty() {
+            let bytes = bytemuck::cast_slice(&self.gradient_stops);
+            let required = bytes.len() as u64;
+            if required > self.gradient_capacity {
+                self.gradient_capacity = required;
+                self.gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("render gradient stops"),
+                    size: self.gradient_capacity,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.screen_bind_group = create_bind_group(
+                    device,
+                    &self.bind_group_layout,
+                    &self.screen_buffer,
+                    &self.clip_buffer,
+                    &self.image_view,
+                    &self.image_sampler,
+                    &self.gradient_buffer,
+                    &self.inset_shadow_buffer,
+                );
+            }
+            queue.write_buffer(&self.gradient_buffer, 0, bytes);
+        }
+        if !self.inset_shadows.is_empty() {
+            let bytes = bytemuck::cast_slice(&self.inset_shadows);
+            let required = bytes.len() as u64;
+            if required > self.inset_shadow_capacity {
+                self.inset_shadow_capacity = required;
+                self.inset_shadow_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("render inset shadows"),
+                    size: self.inset_shadow_capacity,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.screen_bind_group = create_bind_group(
+                    device,
+                    &self.bind_group_layout,
+                    &self.screen_buffer,
+                    &self.clip_buffer,
+                    &self.image_view,
+                    &self.image_sampler,
+                    &self.gradient_buffer,
+                    &self.inset_shadow_buffer,
+                );
+            }
+            queue.write_buffer(&self.inset_shadow_buffer, 0, bytes);
+        }
     }
 
     fn prepare_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: &Canvas) {
-        self.images.clear();
+        let mut requested = Vec::new();
         for image in canvas.commands().iter().filter_map(|command| {
             let style = match command {
                 DrawCommand::Box { style, .. } | DrawCommand::OverlayBox { style, .. } => style,
@@ -286,10 +441,17 @@ impl ShapeRenderer {
                 _ => None,
             }
         }) {
-            if !self.images.iter().any(|candidate| candidate == image) {
-                self.images.push(image.clone());
+            if !requested.iter().any(|candidate| candidate == image) {
+                requested.push(image.clone());
             }
         }
+        let limits = device.limits();
+        self.images = bounded_image_atlas(
+            requested,
+            limits.max_texture_dimension_2d,
+            limits.max_texture_array_layers,
+            MAX_BACKGROUND_ATLAS_BYTES,
+        );
         let extent = [
             self.images
                 .iter()
@@ -313,6 +475,8 @@ impl ShapeRenderer {
                 &self.clip_buffer,
                 &self.image_view,
                 &self.image_sampler,
+                &self.gradient_buffer,
+                &self.inset_shadow_buffer,
             );
         }
         for (layer, image) in self.images.iter().enumerate() {
@@ -366,6 +530,46 @@ impl ShapeRenderer {
     }
 }
 
+fn bounded_image_atlas(
+    requested: Vec<RasterImage>,
+    max_dimension: u32,
+    max_layers: u32,
+    max_bytes: u64,
+) -> Vec<RasterImage> {
+    let mut selected = Vec::new();
+    let mut width = 1_u32;
+    let mut height = 1_u32;
+    for image in requested {
+        if image.width > max_dimension
+            || image.height > max_dimension
+            || selected.len() >= max_layers as usize
+        {
+            continue;
+        }
+        let candidate_width = width.max(image.width);
+        let candidate_height = height.max(image.height);
+        let candidate_layers = selected.len() as u64 + 1;
+        let Some(bytes) = u64::from(candidate_width)
+            .checked_mul(u64::from(candidate_height))
+            .and_then(|pixels| pixels.checked_mul(candidate_layers))
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            continue;
+        };
+        if bytes > max_bytes {
+            continue;
+        }
+        width = candidate_width;
+        height = candidate_height;
+        selected.push(image);
+    }
+    selected
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the bind group intentionally mirrors six independently resized GPU resources"
+)]
 fn create_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -373,6 +577,8 @@ fn create_bind_group(
     clip_buffer: &wgpu::Buffer,
     image_view: &wgpu::TextureView,
     image_sampler: &wgpu::Sampler,
+    gradient_buffer: &wgpu::Buffer,
+    inset_shadow_buffer: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("render screen and clips bind group"),
@@ -393,6 +599,14 @@ fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(image_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: gradient_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: inset_shadow_buffer.as_entire_binding(),
             },
         ],
     })
@@ -487,14 +701,18 @@ struct ShapeInstance {
     border_styles: [u32; 4],
     effect_params: [f32; 4],
     clip_range: [u32; 2],
-    gradient_color: [f32; 4],
     gradient: [f32; 4],
     transform_x: [f32; 3],
     transform_y: [f32; 3],
     image: [f32; 4],
+    inset_shadow_range: [u32; 2],
 }
 
 impl ShapeInstance {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "instance construction receives the independently allocated resource ranges"
+    )]
     fn new(
         rect: Rect,
         style: BoxStyle,
@@ -502,6 +720,8 @@ impl ShapeInstance {
         clip_count: u32,
         effect_blur: f32,
         image_layer: Option<(u32, [f32; 2])>,
+        gradient_range: Option<(u32, u32)>,
+        inset_shadow_range: Option<(u32, u32)>,
     ) -> Self {
         let border = style
             .border
@@ -510,43 +730,26 @@ impl ShapeInstance {
         let (radii_x, radii_y) = style.corner_radius.normalized(rect);
         let border_colors = border.map_or([Color::TRANSPARENT; 4], Border::colors);
         let alpha = style.opacity.clamp(0.0, 1.0);
-        let with_opacity = |mut color: [f32; 4]| {
-            color[3] *= alpha;
-            color
-        };
-        let (gradient_color, gradient) = match style.background_image.as_ref() {
-            Some(BackgroundImage::LinearGradient {
-                direction,
-                start: _,
-                end,
-            }) => (
-                with_opacity(end.components()),
-                [direction[0], direction[1], 1.0, 0.0],
-            ),
-            Some(BackgroundImage::RadialGradient { start: _, end }) => {
-                (with_opacity(end.components()), [0.0, 0.0, 2.0, 0.0])
+        let gradient = match style.background_image.as_ref() {
+            Some(BackgroundImage::LinearGradient { direction, .. }) => {
+                [direction[0], direction[1], 1.0, alpha]
             }
-            Some(BackgroundImage::Raster(_)) => ([0.0; 4], [0.0, 0.0, 3.0, 0.0]),
-            None => ([0.0; 4], [0.0; 4]),
+            Some(BackgroundImage::RadialGradient { .. }) => [0.0, 0.0, 2.0, alpha],
+            Some(BackgroundImage::Raster(_)) if image_layer.is_some() => [0.0, 0.0, 3.0, alpha],
+            Some(BackgroundImage::Raster(_)) | None => [0.0, 0.0, 0.0, alpha],
         };
-        let background = match style.background_image.as_ref() {
-            Some(BackgroundImage::LinearGradient { start, .. })
-            | Some(BackgroundImage::RadialGradient { start, .. }) => start,
-            Some(BackgroundImage::Raster(_)) | None => &style.background,
-        };
+        let background = style.background;
         let Transform { matrix } = style.transform;
         Self {
             center: [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5],
             half_size: [rect.width * 0.5, rect.height * 0.5],
             radii_x,
             radii_y,
-            background: with_opacity(background.components()),
-            border_colors: border_colors.map(|color| packed_color(color, alpha)),
-            outline_color: with_opacity(
-                outline
-                    .map_or(Color::TRANSPARENT, |outline| outline.color)
-                    .components(),
-            ),
+            background: background.components(),
+            border_colors: border_colors.map(|color| packed_color(color, 1.0)),
+            outline_color: outline
+                .map_or(Color::TRANSPARENT, |outline| outline.color)
+                .components(),
             border_widths: border.map_or([0.0; 4], |border| {
                 let [top, right, bottom, left] = border.widths();
                 [
@@ -565,13 +768,15 @@ impl ShapeInstance {
                 0.0,
             ],
             clip_range: [clip_start, clip_count],
-            gradient_color,
             gradient,
             transform_x: [matrix[0], matrix[2], matrix[4]],
             transform_y: [matrix[1], matrix[3], matrix[5]],
-            image: image_layer.map_or([0.0; 4], |(layer, scale)| {
-                [scale[0], scale[1], layer as f32, alpha]
-            }),
+            image: match (image_layer, gradient_range) {
+                (Some((layer, scale)), _) => [scale[0], scale[1], layer as f32, 1.0],
+                (_, Some((start, count))) => [start as f32, count as f32, 0.0, 0.0],
+                _ => [0.0; 4],
+            },
+            inset_shadow_range: inset_shadow_range.map_or([0, 0], |(start, count)| [start, count]),
         }
     }
 
@@ -589,10 +794,10 @@ impl ShapeInstance {
             9 => Float32x4,
             10 => Uint32x2,
             11 => Float32x4,
-            12 => Float32x4,
+            12 => Float32x3,
             13 => Float32x3,
-            14 => Float32x3,
-            15 => Float32x4
+            14 => Float32x4,
+            15 => Uint32x2
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -615,11 +820,70 @@ struct GpuClip {
     half_size: [f32; 2],
     radii_x: [f32; 4],
     radii_y: [f32; 4],
+    inverse_x: [f32; 3],
+    _padding_x: f32,
+    inverse_y: [f32; 3],
+    _padding_y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct GpuGradientStop {
+    color: [f32; 4],
+    position: f32,
+    _padding: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct GpuInsetShadow {
+    geometry: [f32; 4],
+    color: [f32; 4],
+}
+
+impl GpuInsetShadow {
+    fn new(shadow: &crate::BoxShadow) -> Self {
+        Self {
+            geometry: [
+                shadow.offset[0],
+                shadow.offset[1],
+                shadow.blur.max(0.0),
+                shadow.spread,
+            ],
+            color: shadow.color.components(),
+        }
+    }
+}
+
+impl GpuGradientStop {
+    fn new(stop: &crate::GradientStop) -> Self {
+        Self {
+            color: stop.color.components(),
+            position: stop.position,
+            _padding: [0.0; 3],
+        }
+    }
 }
 
 impl GpuClip {
     fn new(clip: Clip) -> Self {
         let (radii_x, radii_y) = clip.corner_radius.normalized(clip.rect);
+        let [a, b, c, d, tx, ty] = clip.transform;
+        let determinant = a * d - b * c;
+        let (inverse_x, inverse_y) = if determinant.abs() > f32::EPSILON {
+            let inverse = [
+                d / determinant,
+                -b / determinant,
+                -c / determinant,
+                a / determinant,
+            ];
+            (
+                [inverse[0], inverse[2], -inverse[0] * tx - inverse[2] * ty],
+                [inverse[1], inverse[3], -inverse[1] * tx - inverse[3] * ty],
+            )
+        } else {
+            ([0.0; 3], [0.0; 3])
+        };
         Self {
             center: [
                 clip.rect.x + clip.rect.width * 0.5,
@@ -628,6 +892,10 @@ impl GpuClip {
             half_size: [clip.rect.width * 0.5, clip.rect.height * 0.5],
             radii_x,
             radii_y,
+            inverse_x,
+            _padding_x: 0.0,
+            inverse_y,
+            _padding_y: 0.0,
         }
     }
 }
@@ -635,7 +903,7 @@ impl GpuClip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Border, BorderSide, BorderStyle, CornerRadius, CornerSize};
+    use crate::{Border, BorderSide, BorderStyle, CornerRadius, CornerSize, GradientStop};
 
     #[test]
     fn shape_instance_preserves_and_clamps_each_border_width() {
@@ -648,6 +916,8 @@ mod tests {
             3,
             2,
             0.0,
+            None,
+            None,
             None,
         );
 
@@ -662,8 +932,16 @@ mod tests {
             BoxStyle {
                 background_image: Some(BackgroundImage::LinearGradient {
                     direction: [1.0, 0.0],
-                    start: Color::WHITE,
-                    end: Color::BLACK,
+                    stops: vec![
+                        GradientStop {
+                            color: Color::WHITE,
+                            position: 0.0,
+                        },
+                        GradientStop {
+                            color: Color::BLACK,
+                            position: 1.0,
+                        },
+                    ],
                 }),
                 corner_radius: CornerRadius::elliptical(
                     CornerSize::new(20.0, 8.0),
@@ -687,6 +965,8 @@ mod tests {
             0,
             0.0,
             None,
+            Some((0, 2)),
+            None,
         );
 
         assert_eq!(instance.border_widths, [1.0, 2.0, 3.0, 4.0]);
@@ -699,12 +979,42 @@ mod tests {
                 BorderStyle::Double as u32,
             ]
         );
-        assert_eq!(instance.border_colors[0], 0x8000_00ff);
-        assert_eq!(instance.border_colors[1], 0x4000_ff00);
-        assert_eq!(instance.gradient, [1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(instance.border_colors[0], 0xff00_00ff);
+        assert_eq!(instance.border_colors[1], 0x8000_ff00);
+        assert_eq!(instance.gradient, [1.0, 0.0, 1.0, 0.5]);
         assert_eq!(instance.transform_x, [1.0, 0.0, 5.0]);
         assert_eq!(instance.transform_y, [0.0, 1.0, 7.0]);
         assert_eq!(instance.radii_x[0], 20.0);
         assert_eq!(instance.radii_y[0], 8.0);
+    }
+
+    fn image(width: u32, height: u32) -> RasterImage {
+        RasterImage::new(width, height, vec![0; width as usize * height as usize * 4]).unwrap()
+    }
+
+    #[test]
+    fn atlas_selection_enforces_dimension_layer_and_aggregate_limits() {
+        let requested = vec![
+            image(8, 8),
+            image(9, 8),
+            image(65, 1),
+            image(8, 8),
+            image(8, 8),
+        ];
+        let selected = bounded_image_atlas(requested, 64, 3, 9 * 8 * 3 * 4);
+
+        assert_eq!(selected.len(), 3);
+        assert!(selected.iter().all(|image| image.width <= 64));
+        let atlas_bytes = selected.iter().map(|image| image.width).max().unwrap() as u64
+            * selected.iter().map(|image| image.height).max().unwrap() as u64
+            * selected.len() as u64
+            * 4;
+        assert!(atlas_bytes <= 9 * 8 * 3 * 4);
+    }
+
+    #[test]
+    fn atlas_selection_rejects_overflowing_or_excessive_allocations() {
+        let selected = bounded_image_atlas(vec![image(64, 64), image(64, 64)], 64, u32::MAX, 1);
+        assert!(selected.is_empty());
     }
 }

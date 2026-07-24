@@ -11,6 +11,8 @@ struct Clip {
     half_size: vec2<f32>,
     radii_x: vec4<f32>,
     radii_y: vec4<f32>,
+    inverse_x: vec3<f32>,
+    inverse_y: vec3<f32>,
 }
 
 @group(0) @binding(1)
@@ -21,6 +23,23 @@ var background_images: texture_2d_array<f32>;
 
 @group(0) @binding(3)
 var background_image_sampler: sampler;
+
+struct GradientStop {
+    color: vec4<f32>,
+    position: f32,
+    _padding: vec3<f32>,
+}
+
+@group(0) @binding(4)
+var<storage, read> gradient_stops: array<GradientStop>;
+
+struct InsetShadow {
+    geometry: vec4<f32>,
+    color: vec4<f32>,
+}
+
+@group(0) @binding(5)
+var<storage, read> inset_shadows: array<InsetShadow>;
 
 struct Instance {
     @location(0) center: vec2<f32>,
@@ -34,11 +53,11 @@ struct Instance {
     @location(8) border_styles: vec4<u32>,
     @location(9) effect_params: vec4<f32>,
     @location(10) clip_range: vec2<u32>,
-    @location(11) gradient_color: vec4<f32>,
-    @location(12) gradient: vec4<f32>,
-    @location(13) transform_x: vec3<f32>,
-    @location(14) transform_y: vec3<f32>,
-    @location(15) image: vec4<f32>,
+    @location(11) gradient: vec4<f32>,
+    @location(12) transform_x: vec3<f32>,
+    @location(13) transform_y: vec3<f32>,
+    @location(14) image: vec4<f32>,
+    @location(15) inset_shadow_range: vec2<u32>,
 }
 
 struct VertexOutput {
@@ -54,9 +73,9 @@ struct VertexOutput {
     @location(8) @interpolate(flat) border_styles: vec4<u32>,
     @location(9) @interpolate(flat) effect_params: vec4<f32>,
     @location(10) @interpolate(flat) clip_range: vec2<u32>,
-    @location(11) @interpolate(flat) gradient_color: vec4<f32>,
-    @location(12) @interpolate(flat) gradient: vec4<f32>,
-    @location(13) @interpolate(flat) image: vec4<f32>,
+    @location(11) @interpolate(flat) gradient: vec4<f32>,
+    @location(12) @interpolate(flat) image: vec4<f32>,
+    @location(13) @interpolate(flat) inset_shadow_range: vec2<u32>,
 }
 
 @vertex
@@ -91,9 +110,9 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
     output.border_styles = instance.border_styles;
     output.effect_params = instance.effect_params;
     output.clip_range = instance.clip_range;
-    output.gradient_color = instance.gradient_color;
     output.gradient = instance.gradient;
     output.image = instance.image;
+    output.inset_shadow_range = instance.inset_shadow_range;
     return output;
 }
 
@@ -257,16 +276,36 @@ fn linear_color(color: vec4<f32>) -> vec4<f32> {
     );
 }
 
-fn composite_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
-    let alpha = foreground.a + background.a * (1.0 - foreground.a);
+fn composite(over: vec4<f32>, under: vec4<f32>) -> vec4<f32> {
+    let alpha = over.a + under.a * (1.0 - over.a);
     if alpha <= 0.0001 {
         return vec4(0.0);
     }
-    let rgb = (
-        foreground.rgb * foreground.a
-        + background.rgb * background.a * (1.0 - foreground.a)
-    ) / alpha;
-    return vec4(rgb, alpha);
+    return vec4(
+        (over.rgb * over.a + under.rgb * under.a * (1.0 - over.a)) / alpha,
+        alpha,
+    );
+}
+
+fn sample_gradient(position: f32, range: vec2<f32>) -> vec4<f32> {
+    let start = u32(range.x);
+    let count = u32(range.y);
+    if count == 0u {
+        return vec4(0.0);
+    }
+    var previous = gradient_stops[start];
+    if position <= previous.position || count == 1u {
+        return previous.color;
+    }
+    for (var index = 1u; index < count; index += 1u) {
+        let current = gradient_stops[start + index];
+        if position <= current.position {
+            let span = max(current.position - previous.position, 0.0001);
+            return mix(previous.color, current.color, clamp((position - previous.position) / span, 0.0, 1.0));
+        }
+        previous = current;
+    }
+    return previous.color;
 }
 
 @fragment
@@ -275,8 +314,13 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var clip_coverage = 1.0;
     for (var index = 0u; index < input.clip_range.y; index += 1u) {
         let clip = clips[input.clip_range.x + index];
+        let relative = pixel - clip.center;
+        let local = vec2(
+            dot(clip.inverse_x.xy, relative) + clip.inverse_x.z,
+            dot(clip.inverse_y.xy, relative) + clip.inverse_y.z,
+        );
         let distance = rounded_box_distance(
-            pixel - clip.center,
+            local,
             clip.half_size,
             clip.radii_x,
             clip.radii_y,
@@ -339,14 +383,14 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if input.gradient.z == 1.0 {
         let normalized = input.local_position / max(input.half_size, vec2(0.0001));
         let gradient_position = clamp(dot(normalized, input.gradient.xy) * 0.5 + 0.5, 0.0, 1.0);
-        base_color = mix(input.background, input.gradient_color, gradient_position);
+        base_color = composite(sample_gradient(gradient_position, input.image.xy), base_color);
     } else if input.gradient.z == 2.0 {
         let gradient_position = clamp(
             length(input.local_position / max(input.half_size, vec2(0.0001))),
             0.0,
             1.0,
         );
-        base_color = mix(input.background, input.gradient_color, gradient_position);
+        base_color = composite(sample_gradient(gradient_position, input.image.xy), base_color);
     } else if input.gradient.z == 3.0 {
         let box_uv = clamp(input.local_position / max(input.half_size, vec2(0.0001)) * 0.5 + 0.5, vec2(0.0), vec2(1.0));
         var image_color = textureSample(
@@ -356,14 +400,26 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
             i32(input.image.z),
         );
         image_color.a *= input.image.w;
-        let combined_alpha = image_color.a + base_color.a * (1.0 - image_color.a);
-        if combined_alpha > 0.0001 {
-            let combined_rgb = (
-                image_color.rgb * image_color.a
-                + base_color.rgb * base_color.a * (1.0 - image_color.a)
-            ) / combined_alpha;
-            base_color = vec4(combined_rgb, combined_alpha);
-        }
+        base_color = composite(image_color, base_color);
+    }
+    for (var shadow_index = 0u; shadow_index < input.inset_shadow_range.y; shadow_index += 1u) {
+        let shadow = inset_shadows[input.inset_shadow_range.x + shadow_index];
+        let shifted = input.local_position - shadow.geometry.xy;
+        let width = max(shadow.geometry.z * 1.5 + shadow.geometry.w, 0.5);
+        let inset_half_size = max(input.half_size - vec2(width), vec2(0.0));
+        let inset_radii_x = max(input.radii_x - vec4(width), vec4(0.0));
+        let inset_radii_y = max(input.radii_y - vec4(width), vec4(0.0));
+        let inset_distance = rounded_box_distance(
+            shifted,
+            inset_half_size,
+            inset_radii_x,
+            inset_radii_y,
+        );
+        let inset_antialias = max(fwidth(inset_distance), max(shadow.geometry.z, 0.75));
+        let inner_coverage = 1.0 - smoothstep(-inset_antialias, inset_antialias, inset_distance);
+        var shadow_color = shadow.color;
+        shadow_color.a *= (1.0 - inner_coverage) * base_coverage;
+        base_color = composite(shadow_color, base_color);
     }
     if any(border_widths > vec4(0.0)) {
         let side = border_side_index(input.local_position, input.half_size, border_widths);
@@ -373,9 +429,9 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let pattern = border_pattern(style, side, input.local_position, width, depth);
         var color = styled_border_color(side_color(input, side), style, side, depth, width);
         color.a *= (1.0 - inner_coverage) * pattern;
-        base_color = composite_over(color, base_color);
+        base_color = composite(color, base_color);
     }
-    base_color.a *= base_coverage;
+    base_color.a *= base_coverage * input.gradient.w;
 
     let outline_inner_expansion = outline_offset;
     let outline_outer_expansion = outline_offset + outline_width;
@@ -395,7 +451,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let outline_outer_coverage = 1.0 - smoothstep(-antialias, antialias, outline_outer_distance);
     let outline_coverage = outline_outer_coverage * (1.0 - outline_inner_coverage);
     var outline_color = input.outline_color;
-    outline_color.a *= outline_coverage;
+    outline_color.a *= outline_coverage * input.gradient.w;
 
     let unclipped_alpha = base_color.a + outline_color.a * (1.0 - base_color.a);
     let combined_alpha = unclipped_alpha * clip_coverage;

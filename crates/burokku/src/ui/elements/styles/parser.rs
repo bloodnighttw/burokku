@@ -7,10 +7,10 @@ use std::{
 
 use super::{
     AlignContent, AlignItems, BackgroundImage, BorderStyle, BoxSizing, Color, CornerRadiusValue,
-    Display, FlexDirection, FlexWrap, FontStyleValue, Isolation, LengthPercentageValue,
-    LengthValue, LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue, Position, Shadow,
-    SizeValue, Style, TextAlignValue, TextDecorationLineValue, Transform, WhiteSpaceValue,
-    WordBreakValue, ZIndex,
+    Display, FlexDirection, FlexWrap, FontStyleValue, GradientStop, Isolation,
+    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue,
+    Position, Shadow, SizeValue, Style, TextAlignValue, TextDecorationLineValue, Transform,
+    WhiteSpaceValue, WordBreakValue, ZIndex,
 };
 use taffy::style::{
     GridAutoTracks, GridPlacement, GridTemplateArea, GridTemplateComponent, GridTemplateTracks,
@@ -265,7 +265,11 @@ pub(crate) fn set_style(
         "background-image" => style.background_image = parse_background_image(name, value)?,
         "color" => color!(color),
         "opacity" => {
-            style.opacity = parse_number(name, value)?;
+            style.opacity = if let Some(percent) = value.strip_suffix('%') {
+                parse_number(name, percent.trim())? / 100.0
+            } else {
+                parse_number(name, value)?
+            };
             if !(0.0..=1.0).contains(&style.opacity) {
                 return invalid(name, value);
             }
@@ -1402,16 +1406,26 @@ fn parse_angle(name: &str, value: &str) -> Result<f32, StyleError> {
     invalid(name, value)
 }
 
-fn parse_shadow(name: &str, value: &str, allow_spread: bool) -> Result<Option<Shadow>, StyleError> {
+fn parse_shadow(name: &str, value: &str, allow_spread: bool) -> Result<Vec<Shadow>, StyleError> {
     if value.eq_ignore_ascii_case("none") {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    if split_top_level(value, ',').len() != 1
-        || value.split_ascii_whitespace().any(|v| v == "inset")
-    {
+    let shadows = split_top_level(value, ',');
+    if shadows.len() > 32 {
         return invalid(name, value);
     }
+    shadows
+        .into_iter()
+        .map(|shadow| parse_shadow_item(name, shadow, allow_spread))
+        .collect()
+}
+
+fn parse_shadow_item(name: &str, value: &str, allow_spread: bool) -> Result<Shadow, StyleError> {
     let parts = split_whitespace_preserving_functions(value);
+    let inset = parts.iter().any(|part| part.eq_ignore_ascii_case("inset"));
+    if inset && !allow_spread {
+        return invalid(name, value);
+    }
     let color_index = parts
         .iter()
         .position(|part| parse_color(name, part).is_ok());
@@ -1422,14 +1436,14 @@ fn parse_shadow(name: &str, value: &str, allow_spread: bool) -> Result<Option<Sh
     let lengths = parts
         .iter()
         .enumerate()
-        .filter(|(index, _)| Some(*index) != color_index)
+        .filter(|(index, part)| Some(*index) != color_index && !part.eq_ignore_ascii_case("inset"))
         .map(|(_, part)| parse_length(name, part))
         .collect::<Result<Vec<_>, _>>()?;
     let valid = if allow_spread { 2..=4 } else { 2..=3 };
     if !valid.contains(&lengths.len()) || lengths.get(2).is_some_and(|value| *value < 0.0) {
         return invalid(name, value);
     }
-    Ok(Some(Shadow {
+    Ok(Shadow {
         offset_x: lengths[0],
         offset_y: lengths[1],
         blur: lengths.get(2).copied().unwrap_or(0.0),
@@ -1439,7 +1453,8 @@ fn parse_shadow(name: &str, value: &str, allow_spread: bool) -> Result<Option<Sh
             0.0
         },
         color,
-    }))
+        inset,
+    })
 }
 
 fn parse_background_image(name: &str, value: &str) -> Result<Option<BackgroundImage>, StyleError> {
@@ -1465,9 +1480,9 @@ fn parse_background_image(name: &str, value: &str) -> Result<Option<BackgroundIm
         return invalid(name, value);
     }
     if function == "radial" {
-        let start = parse_color_stop(name, parts[parts.len() - 2])?;
-        let end = parse_color_stop(name, parts[parts.len() - 1])?;
-        return Ok(Some(BackgroundImage::RadialGradient { start, end }));
+        let color_start = usize::from(parse_color_stop(name, parts[0]).is_err());
+        let stops = resolve_gradient_stops(name, &parts[color_start..])?;
+        return Ok(Some(BackgroundImage::RadialGradient { stops }));
     }
     let (direction, color_start) = if parse_color_stop(name, parts[0]).is_ok() {
         ([0.0, 1.0], 0)
@@ -1479,15 +1494,15 @@ fn parse_background_image(name: &str, value: &str) -> Result<Option<BackgroundIm
     }
     Ok(Some(BackgroundImage::LinearGradient {
         direction,
-        start: parse_color_stop(name, parts[color_start])?,
-        end: parse_color_stop(name, parts.last().expect("at least two stops"))?,
+        stops: resolve_gradient_stops(name, &parts[color_start..])?,
     }))
 }
 
 fn parse_raster_data_url(name: &str, source: &str) -> Result<render::RasterImage, StyleError> {
     static CACHE: OnceLock<Mutex<VecDeque<(String, render::RasterImage)>>> = OnceLock::new();
     const CACHE_CAPACITY: usize = 64;
-    const MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 
     let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
     if let Some(image) = cache
@@ -1507,7 +1522,20 @@ fn parse_raster_data_url(name: &str, source: &str) -> Result<render::RasterImage
     let image =
         decode_png(&bytes).ok_or_else(|| StyleError::InvalidValue(name.into(), source.into()))?;
     let mut cache = cache.lock().expect("background image cache lock");
-    if cache.len() == CACHE_CAPACITY {
+    if let Some(existing) = cache
+        .iter()
+        .find_map(|(cached_source, image)| (cached_source == source).then(|| image.clone()))
+    {
+        return Ok(existing);
+    }
+    while cache.len() >= CACHE_CAPACITY
+        || cache
+            .iter()
+            .map(|(_, image)| image.pixels.len())
+            .sum::<usize>()
+            .saturating_add(image.pixels.len())
+            > MAX_CACHE_BYTES
+    {
         cache.pop_front();
     }
     cache.push_back((source.to_owned(), image.clone()));
@@ -1542,11 +1570,15 @@ fn decode_base64(value: &str) -> Option<Vec<u8>> {
 }
 
 fn decode_png(bytes: &[u8]) -> Option<render::RasterImage> {
-    const MAX_PIXELS: usize = 16 * 1024 * 1024;
+    const MAX_DIMENSION: u32 = 4096;
+    const MAX_PIXELS: usize = 4 * 1024 * 1024;
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
     let dimensions = reader.info();
+    if dimensions.width > MAX_DIMENSION || dimensions.height > MAX_DIMENSION {
+        return None;
+    }
     let pixel_count = usize::try_from(dimensions.width)
         .ok()?
         .checked_mul(usize::try_from(dimensions.height).ok()?)?;
@@ -1605,12 +1637,68 @@ fn parse_gradient_direction(name: &str, value: &str) -> Result<[f32; 2], StyleEr
     Ok([angle.sin(), -angle.cos()])
 }
 
-fn parse_color_stop(name: &str, value: &str) -> Result<Color, StyleError> {
+fn parse_color_stop(name: &str, value: &str) -> Result<(Color, Option<f32>), StyleError> {
     let parts = split_whitespace_preserving_functions(value);
-    parts
+    let color = parts
         .first()
         .and_then(|part| parse_color(name, part).ok())
-        .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))
+        .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))?;
+    let position = parts
+        .get(1)
+        .map(|position| {
+            if *position == "0" {
+                Ok(0.0)
+            } else {
+                position
+                    .strip_suffix('%')
+                    .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))
+                    .and_then(|position| parse_number(name, position.trim()))
+                    .map(|position| position / 100.0)
+            }
+        })
+        .transpose()?;
+    if parts.len() > 2 {
+        return invalid(name, value);
+    }
+    Ok((color, position))
+}
+
+fn resolve_gradient_stops(name: &str, values: &[&str]) -> Result<Vec<GradientStop>, StyleError> {
+    if values.len() < 2 || values.len() > 32 {
+        return invalid(name, &values.join(", "));
+    }
+    let mut parsed = values
+        .iter()
+        .map(|value| parse_color_stop(name, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed[0].1.is_none() {
+        parsed[0].1 = Some(0.0);
+    }
+    let last = parsed.len() - 1;
+    if parsed[last].1.is_none() {
+        parsed[last].1 = Some(1.0);
+    }
+    let mut previous = 0;
+    while previous < last {
+        let next = (previous + 1..=last)
+            .find(|index| parsed[*index].1.is_some())
+            .expect("last stop has a position");
+        let start = parsed[previous].1.unwrap();
+        let end = parsed[next].1.unwrap().max(start);
+        parsed[next].1 = Some(end);
+        let span = (next - previous) as f32;
+        for (offset, stop) in parsed[previous + 1..next].iter_mut().enumerate() {
+            stop.1 = Some(start + (end - start) * (offset as f32 + 1.0) / span);
+        }
+        previous = next;
+    }
+    Ok(parsed
+        .into_iter()
+        .map(|(color, position)| GradientStop {
+            color,
+            position: position.expect("positions were resolved"),
+        })
+        .collect())
 }
 
 fn argument<'a>(
@@ -2465,11 +2553,30 @@ mod tests {
 
         assert_eq!(style.opacity, 0.35);
         assert_eq!(style.transform.matrix, [2.0, 0.0, 0.0, 2.0, 10.0, 20.0]);
-        assert_eq!(style.box_shadow.unwrap().spread, 2.0);
-        assert_eq!(style.box_shadow.unwrap().color, [0, 0, 0, 128]);
-        assert_eq!(style.text_shadow.unwrap().color, [0, 0, 128, 255]);
+        assert_eq!(style.box_shadow[0].spread, 2.0);
+        assert_eq!(style.box_shadow[0].color, [0, 0, 0, 128]);
+        assert_eq!(style.text_shadow[0].color, [0, 0, 128, 255]);
         assert!(set_style(&mut style, "opacity", Some("1.1")).is_err());
         assert!(set_style(&mut style, "text-shadow", Some("1px 2px 3px 4px red")).is_err());
+
+        set_style(&mut style, "opacity", Some("35%")).unwrap();
+        set_style(
+            &mut style,
+            "box-shadow",
+            Some("inset 1px 2px 3px red, 4px 5px blue"),
+        )
+        .unwrap();
+        set_style(
+            &mut style,
+            "text-shadow",
+            Some("1px 2px red, 3px 4px 5px blue"),
+        )
+        .unwrap();
+        assert_eq!(style.opacity, 0.35);
+        assert_eq!(style.box_shadow.len(), 2);
+        assert!(style.box_shadow[0].inset);
+        assert!(!style.box_shadow[1].inset);
+        assert_eq!(style.text_shadow.len(), 2);
     }
 
     #[test]
@@ -2485,8 +2592,16 @@ mod tests {
             style.background_image,
             Some(BackgroundImage::LinearGradient {
                 direction: [1.0, 0.0],
-                start: [255, 0, 0, 255],
-                end: [0, 0, 255, 255],
+                stops: vec![
+                    GradientStop {
+                        color: [255, 0, 0, 255],
+                        position: 0.0,
+                    },
+                    GradientStop {
+                        color: [0, 0, 255, 255],
+                        position: 1.0,
+                    },
+                ],
             })
         );
 
@@ -2499,10 +2614,36 @@ mod tests {
         assert_eq!(
             style.background_image,
             Some(BackgroundImage::RadialGradient {
-                start: [255, 255, 255, 255],
-                end: [0, 0, 0, 0],
+                stops: vec![
+                    GradientStop {
+                        color: [255, 255, 255, 255],
+                        position: 0.0,
+                    },
+                    GradientStop {
+                        color: [0, 0, 0, 0],
+                        position: 1.0,
+                    },
+                ],
             })
         );
+
+        set_style(
+            &mut style,
+            "background-image",
+            Some("linear-gradient(red 10%, yellow, lime 70%, blue)"),
+        )
+        .unwrap();
+        let Some(BackgroundImage::LinearGradient { stops, .. }) = style.background_image else {
+            panic!("expected linear gradient");
+        };
+        assert_eq!(stops.len(), 4);
+        for (actual, expected) in stops
+            .iter()
+            .map(|stop| stop.position)
+            .zip([0.1, 0.4, 0.7, 1.0])
+        {
+            assert!((actual - expected).abs() < 0.0001);
+        }
     }
 
     #[test]
@@ -2538,5 +2679,18 @@ mod tests {
             Some("url(https://example.com/image.png)")
         )
         .is_err());
+    }
+
+    #[test]
+    fn rejects_pngs_exceeding_decoded_dimension_limits_before_pixel_allocation() {
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, 4097, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&vec![0; 4097 * 4]).unwrap();
+        }
+        assert!(decode_png(&encoded).is_none());
     }
 }

@@ -77,18 +77,23 @@ pub(crate) struct Shadow {
     pub(crate) blur: f32,
     pub(crate) spread: f32,
     pub(crate) color: [u8; 4],
+    pub(crate) inset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GradientStop {
+    pub(crate) color: [u8; 4],
+    pub(crate) position: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BackgroundImage {
     LinearGradient {
         direction: [f32; 2],
-        start: [u8; 4],
-        end: [u8; 4],
+        stops: Vec<GradientStop>,
     },
     RadialGradient {
-        start: [u8; 4],
-        end: [u8; 4],
+        stops: Vec<GradientStop>,
     },
     Raster(render::RasterImage),
 }

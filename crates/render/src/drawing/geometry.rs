@@ -140,6 +140,8 @@ impl CornerRadius {
 pub struct Clip {
     pub rect: Rect,
     pub corner_radius: CornerRadius,
+    /// Affine transform around the clip rectangle's center.
+    pub transform: [f32; 6],
 }
 
 impl Clip {
@@ -147,6 +149,7 @@ impl Clip {
         Self {
             rect,
             corner_radius,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         }
     }
 
@@ -155,15 +158,22 @@ impl Clip {
     }
 
     pub fn contains(self, x: f32, y: f32) -> bool {
-        if !self.rect.contains(x, y) {
+        let center = [
+            self.rect.x + self.rect.width * 0.5,
+            self.rect.y + self.rect.height * 0.5,
+        ];
+        let [a, b, c, d, tx, ty] = self.transform;
+        let determinant = a * d - b * c;
+        if determinant.abs() <= f32::EPSILON {
             return false;
         }
+        let relative = [x - center[0] - tx, y - center[1] - ty];
+        let position = [
+            (d * relative[0] - c * relative[1]) / determinant,
+            (-b * relative[0] + a * relative[1]) / determinant,
+        ];
 
         let half_size = [self.rect.width * 0.5, self.rect.height * 0.5];
-        let position = [
-            x - (self.rect.x + half_size[0]),
-            y - (self.rect.y + half_size[1]),
-        ];
         let (radii_x, radii_y) = self.corner_radius.normalized(self.rect);
         let radius = if position[1] < 0.0 {
             if position[0] < 0.0 {
@@ -176,15 +186,42 @@ impl Clip {
         } else {
             [radii_x[2], radii_y[2]]
         };
-        let q = [
-            position[0].abs() - half_size[0] + radius[0],
-            position[1].abs() - half_size[1] + radius[1],
+        let rectangle_distance = [
+            position[0].abs() - half_size[0],
+            position[1].abs() - half_size[1],
         ];
-        if q[0] <= 0.0 || q[1] <= 0.0 || radius[0] <= 0.0 || radius[1] <= 0.0 {
-            true
+        if radius[0] <= 0.0 || radius[1] <= 0.0 {
+            rectangle_distance[0] <= 0.0 && rectangle_distance[1] <= 0.0
         } else {
-            (q[0] / radius[0]).powi(2) + (q[1] / radius[1]).powi(2) <= 1.0
+            let q = [
+                rectangle_distance[0] + radius[0],
+                rectangle_distance[1] + radius[1],
+            ];
+            if q[0] > 0.0 && q[1] > 0.0 {
+                (q[0] / radius[0]).powi(2) + (q[1] / radius[1]).powi(2) <= 1.0
+            } else {
+                rectangle_distance[0].max(rectangle_distance[1]) <= 0.0
+            }
         }
+    }
+
+    pub fn bounds(self) -> Rect {
+        let center = [
+            self.rect.x + self.rect.width * 0.5,
+            self.rect.y + self.rect.height * 0.5,
+        ];
+        let [a, b, c, d, tx, ty] = self.transform;
+        let half = [self.rect.width * 0.5, self.rect.height * 0.5];
+        let transformed_half = [
+            a.abs() * half[0] + c.abs() * half[1],
+            b.abs() * half[0] + d.abs() * half[1],
+        ];
+        Rect::new(
+            center[0] + tx - transformed_half[0],
+            center[1] + ty - transformed_half[1],
+            transformed_half[0] * 2.0,
+            transformed_half[1] * 2.0,
+        )
     }
 }
 

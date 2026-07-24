@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use render::{
     BackgroundImage, Border, BorderSide, BorderStyle as RenderBorderStyle, BoxShadow, BoxStyle,
-    Clip, Color, CornerRadius, CornerSize, FontFamily, FontStyle, Outline, Rect as RenderRect,
-    TextAlign, TextConstraints, TextDecorationLine, TextOverflowWrap, TextRunMetrics, TextShadow,
-    TextStyle, TextSystem, TextWhiteSpace, TextWordBreak, TextWrap, Transform,
+    Clip, Color, CornerRadius, CornerSize, FontFamily, FontStyle, GradientStop, Outline,
+    Rect as RenderRect, TextAlign, TextConstraints, TextDecorationLine, TextOverflowWrap,
+    TextRunMetrics, TextShadow, TextStyle, TextSystem, TextWhiteSpace, TextWordBreak, TextWrap,
+    Transform,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -114,6 +115,7 @@ pub(super) fn compute_layout_with_scroll(
         &[],
         RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
         RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
+        Transform::IDENTITY,
     )
 }
 
@@ -325,6 +327,7 @@ impl ElementLayoutTree<'_> {
         ancestor_clips: &[Clip],
         viewport: RenderRect,
         positioned_ancestor: RenderRect,
+        parent_transform: Transform,
     ) -> Layout {
         let data = &self.nodes[node];
         let taffy_location = Point {
@@ -350,21 +353,48 @@ impl ElementLayoutTree<'_> {
         } else {
             ancestor_clips
         };
+        let inherited_transform = if data.paint_style.position == ElementPosition::Fixed {
+            Transform::IDENTITY
+        } else {
+            parent_transform
+        };
+        let center = [location.x + width * 0.5, location.y + height * 0.5];
+        let world_transform = multiply_transform(
+            inherited_transform,
+            anchored_transform(
+                Transform {
+                    matrix: data.paint_style.transform.matrix,
+                },
+                center,
+            ),
+        );
+        let relative_transform = relative_transform(world_transform, center);
         let mut descendant_clips = own_ancestor_clips.to_vec();
-        let own_clip = overflow_clip(data, location, width, height, viewport);
+        let mut own_clip = overflow_clip(data, location, width, height, viewport);
+        if let Some(clip) = &mut own_clip {
+            let clip_center = [
+                clip.rect.x + clip.rect.width * 0.5,
+                clip.rect.y + clip.rect.height * 0.5,
+            ];
+            clip.transform = relative_transform_matrix(world_transform, clip_center);
+        }
         if let Some(clip) = own_clip {
             descendant_clips.push(clip);
         }
         let (kind, scroll) = match &data.kind {
-            ElementKind::Text(text) => (
-                LayoutKind::Text {
-                    text: normalize_white_space(text, data.text_style.white_space),
-                    style: data.text_style.clone(),
-                    line_count: data.text_line_count,
-                    runs: data.text_runs.clone(),
-                },
-                None,
-            ),
+            ElementKind::Text(text) => {
+                let mut style = data.text_style.clone();
+                style.transform = relative_transform;
+                (
+                    LayoutKind::Text {
+                        text: normalize_white_space(text, data.text_style.white_space),
+                        style,
+                        line_count: data.text_line_count,
+                        runs: data.text_runs.clone(),
+                    },
+                    None,
+                )
+            }
             ElementKind::Comment(_)
             | ElementKind::Button
             | ElementKind::Div
@@ -413,6 +443,7 @@ impl ElementLayoutTree<'_> {
                             &descendant_clips,
                             viewport,
                             child_positioned_ancestor,
+                            world_transform,
                         )
                     })
                     .collect();
@@ -455,6 +486,7 @@ impl ElementLayoutTree<'_> {
                                 &descendant_clips,
                                 viewport,
                                 child_positioned_ancestor,
+                                world_transform,
                             )
                         })
                         .collect();
@@ -478,7 +510,7 @@ impl ElementLayoutTree<'_> {
                             width,
                             height,
                             data.text_style.opacity,
-                            data.text_style.transform,
+                            relative_transform,
                         ),
                         stacking_layer: StackingLayer::from_style(&data.paint_style),
                         native_appearance: data.native_appearance,
@@ -495,6 +527,7 @@ impl ElementLayoutTree<'_> {
             y: location.y,
             width,
             height,
+            transform: relative_transform,
             clips: own_ancestor_clips.to_vec(),
             scroll,
             is_fixed: data.paint_style.position == ElementPosition::Fixed,
@@ -1775,17 +1808,16 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
         };
     }
     merged.opacity = (parent.opacity * style.opacity).clamp(0.0, 1.0);
-    merged.transform = multiply_transform(
-        parent.transform,
-        Transform {
-            matrix: style.transform.matrix,
-        },
-    );
-    merged.shadow = style.text_shadow.map(|shadow| TextShadow {
-        offset: [shadow.offset_x, shadow.offset_y],
-        blur: shadow.blur,
-        color: rgba(shadow.color),
-    });
+    merged.transform = Transform::IDENTITY;
+    merged.shadows = style
+        .text_shadow
+        .iter()
+        .map(|shadow| TextShadow {
+            offset: [shadow.offset_x, shadow.offset_y],
+            blur: shadow.blur,
+            color: rgba(shadow.color),
+        })
+        .collect();
     merged.wrap = resolve_text_wrap(&merged);
     merged
 }
@@ -1896,19 +1928,27 @@ fn box_style(
     BoxStyle {
         background: style.background_color.map_or(Color::TRANSPARENT, rgba),
         background_image: style.background_image.clone().map(|image| match image {
-            crate::ui::elements::styles::BackgroundImage::LinearGradient {
-                direction,
-                start,
-                end,
-            } => BackgroundImage::LinearGradient {
-                direction,
-                start: rgba(start),
-                end: rgba(end),
-            },
-            crate::ui::elements::styles::BackgroundImage::RadialGradient { start, end } => {
+            crate::ui::elements::styles::BackgroundImage::LinearGradient { direction, stops } => {
+                BackgroundImage::LinearGradient {
+                    direction,
+                    stops: stops
+                        .into_iter()
+                        .map(|stop| GradientStop {
+                            color: rgba(stop.color),
+                            position: stop.position,
+                        })
+                        .collect(),
+                }
+            }
+            crate::ui::elements::styles::BackgroundImage::RadialGradient { stops } => {
                 BackgroundImage::RadialGradient {
-                    start: rgba(start),
-                    end: rgba(end),
+                    stops: stops
+                        .into_iter()
+                        .map(|stop| GradientStop {
+                            color: rgba(stop.color),
+                            position: stop.position,
+                        })
+                        .collect(),
                 }
             }
             crate::ui::elements::styles::BackgroundImage::Raster(image) => {
@@ -1954,12 +1994,17 @@ fn box_style(
         }),
         opacity,
         transform,
-        shadow: style.box_shadow.map(|shadow| BoxShadow {
-            offset: [shadow.offset_x, shadow.offset_y],
-            blur: shadow.blur,
-            spread: shadow.spread,
-            color: rgba(shadow.color),
-        }),
+        shadows: style
+            .box_shadow
+            .iter()
+            .map(|shadow| BoxShadow {
+                offset: [shadow.offset_x, shadow.offset_y],
+                blur: shadow.blur,
+                spread: shadow.spread,
+                color: rgba(shadow.color),
+                inset: shadow.inset,
+            })
+            .collect(),
     }
 }
 
@@ -1976,6 +2021,38 @@ fn multiply_transform(left: Transform, right: Transform) -> Transform {
             l[1] * r[4] + l[3] * r[5] + l[5],
         ],
     }
+}
+
+fn anchored_transform(transform: Transform, center: [f32; 2]) -> Transform {
+    let [a, b, c, d, tx, ty] = transform.matrix;
+    Transform {
+        matrix: [
+            a,
+            b,
+            c,
+            d,
+            tx + center[0] - a * center[0] - c * center[1],
+            ty + center[1] - b * center[0] - d * center[1],
+        ],
+    }
+}
+
+fn relative_transform(transform: Transform, center: [f32; 2]) -> Transform {
+    Transform {
+        matrix: relative_transform_matrix(transform, center),
+    }
+}
+
+fn relative_transform_matrix(transform: Transform, center: [f32; 2]) -> [f32; 6] {
+    let [a, b, c, d, tx, ty] = transform.matrix;
+    [
+        a,
+        b,
+        c,
+        d,
+        a * center[0] + c * center[1] + tx - center[0],
+        b * center[0] + d * center[1] + ty - center[1],
+    ]
 }
 
 fn radius(value: CornerRadiusValue, width: f32, height: f32) -> CornerSize {
@@ -3117,5 +3194,34 @@ mod tests {
         assert_eq!(active_style.background_color, Some([214, 214, 214, 255]));
         assert_eq!(focused_style.outline_color, Some([38, 132, 255, 255]));
         assert_eq!(focused_style.outline_width, LengthValue::Px(2.0));
+    }
+
+    #[test]
+    fn parent_transform_moves_descendants_clips_and_hit_testing_around_parent_center() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Div);
+        document.set_style(parent, "width", Some("100px")).unwrap();
+        document.set_style(parent, "height", Some("100px")).unwrap();
+        document
+            .set_style(parent, "transform", Some("rotate(90deg)"))
+            .unwrap();
+        document
+            .set_style(parent, "overflow", Some("hidden"))
+            .unwrap();
+        document.set_style(child, "width", Some("20px")).unwrap();
+        document.set_style(child, "height", Some("10px")).unwrap();
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, child, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 200.0, &mut TextSystem::new());
+        let parent = &layout.children()[0];
+        let child = &parent.children()[0];
+
+        assert!(child.contains(95.0, 10.0));
+        assert!(!child.contains(10.0, 5.0));
+        assert_eq!(child.clips.len(), 1);
+        assert!(child.clips[0].contains(95.0, 10.0));
+        assert!(!child.clips[0].contains(10.0, 120.0));
     }
 }

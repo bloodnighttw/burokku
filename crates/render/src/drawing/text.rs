@@ -114,7 +114,7 @@ pub struct TextStyle {
     pub wrap: TextWrap,
     pub opacity: f32,
     pub transform: super::Transform,
-    pub shadow: Option<TextShadow>,
+    pub shadows: Vec<TextShadow>,
 }
 
 impl Default for TextStyle {
@@ -139,7 +139,7 @@ impl Default for TextStyle {
             wrap: TextWrap::Word,
             opacity: 1.0,
             transform: super::Transform::IDENTITY,
-            shadow: None,
+            shadows: Vec::new(),
         }
     }
 }
