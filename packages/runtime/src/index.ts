@@ -1,5 +1,8 @@
 export type BurokkuStyle = Partial<{
   display: "block" | "flex" | "none";
+  overflow: "visible" | "hidden" | "clip" | "auto" | "scroll";
+  overflowX: "visible" | "hidden" | "clip" | "auto" | "scroll";
+  overflowY: "visible" | "hidden" | "clip" | "auto" | "scroll";
   flexDirection: "row" | "column";
   width: number | string;
   height: number | string;

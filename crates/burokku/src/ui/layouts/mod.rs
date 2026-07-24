@@ -7,7 +7,7 @@ mod stacking;
 #[cfg(test)]
 mod tests;
 
-use render::{BoxStyle, TextStyle, TextSystem};
+use render::{BoxStyle, Clip, TextStyle, TextSystem};
 
 use crate::ui::elements::Document;
 
@@ -37,6 +37,8 @@ pub struct Layout {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Ancestor overflow clips in viewport coordinates, outermost first.
+    pub clips: Vec<Clip>,
     pub kind: LayoutKind,
 }
 
@@ -61,7 +63,8 @@ impl Layout {
     }
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        self.width > 0.0
+        self.clips.iter().all(|clip| clip.contains(x, y))
+            && self.width > 0.0
             && self.height > 0.0
             && x >= self.x
             && x < self.x + self.width

@@ -1,6 +1,6 @@
 use render::{
-    Border, BoxStyle, Color, CornerRadius, FontFamily, Outline, TextConstraints, TextStyle,
-    TextSystem,
+    Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, Outline, Rect as RenderRect,
+    TextConstraints, TextStyle, TextSystem,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -57,7 +57,12 @@ pub(super) fn compute_layout(
         NodeId::from(root),
         viewport.map(AvailableSpace::Definite),
     );
-    tree.to_layout(root, Point::ZERO)
+    tree.to_layout(
+        root,
+        Point::ZERO,
+        &[],
+        RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
+    )
 }
 
 fn add_element(
@@ -180,7 +185,13 @@ impl ElementLayoutTree<'_> {
         )
     }
 
-    fn to_layout(&self, node: usize, parent_location: Point<f32>) -> Layout {
+    fn to_layout(
+        &self,
+        node: usize,
+        parent_location: Point<f32>,
+        ancestor_clips: &[Clip],
+        viewport: RenderRect,
+    ) -> Layout {
         let data = &self.nodes[node];
         let location = Point {
             x: parent_location.x + data.layout.location.x,
@@ -188,6 +199,10 @@ impl ElementLayoutTree<'_> {
         };
         let width = data.layout.size.width;
         let height = data.layout.size.height;
+        let mut descendant_clips = ancestor_clips.to_vec();
+        if let Some(clip) = overflow_clip(data, location, width, height, viewport) {
+            descendant_clips.push(clip);
+        }
         let kind = match &data.kind {
             ElementKind::Text(text) => LayoutKind::Text {
                 text: text.clone(),
@@ -207,7 +222,7 @@ impl ElementLayoutTree<'_> {
                 children: data
                     .children
                     .iter()
-                    .map(|child| self.to_layout(*child, location))
+                    .map(|child| self.to_layout(*child, location, &descendant_clips, viewport))
                     .collect(),
             },
         };
@@ -218,9 +233,64 @@ impl ElementLayoutTree<'_> {
             y: location.y,
             width,
             height,
+            clips: ancestor_clips.to_vec(),
             kind,
         }
     }
+}
+
+fn overflow_clip(
+    data: &LayoutNode,
+    location: Point<f32>,
+    width: f32,
+    height: f32,
+    viewport: RenderRect,
+) -> Option<Clip> {
+    let clips_x = matches!(
+        data.paint_style.overflow_x,
+        taffy::style::Overflow::Hidden | taffy::style::Overflow::Clip
+    );
+    let clips_y = matches!(
+        data.paint_style.overflow_y,
+        taffy::style::Overflow::Hidden | taffy::style::Overflow::Clip
+    );
+    if !clips_x && !clips_y {
+        return None;
+    }
+
+    let border = data.layout.border;
+    let padding_box = RenderRect::new(
+        location.x + border.left,
+        location.y + border.top,
+        (width - border.left - border.right).max(0.0),
+        (height - border.top - border.bottom).max(0.0),
+    );
+    let rect = RenderRect::new(
+        if clips_x { padding_box.x } else { viewport.x },
+        if clips_y { padding_box.y } else { viewport.y },
+        if clips_x {
+            padding_box.width
+        } else {
+            viewport.width
+        },
+        if clips_y {
+            padding_box.height
+        } else {
+            viewport.height
+        },
+    );
+    let corner_radius = if clips_x && clips_y {
+        let outer = box_style(&data.paint_style, width, height).corner_radius;
+        CornerRadius::new(
+            (outer.top_left - border.left.max(border.top)).max(0.0),
+            (outer.top_right - border.right.max(border.top)).max(0.0),
+            (outer.bottom_right - border.right.max(border.bottom)).max(0.0),
+            (outer.bottom_left - border.left.max(border.bottom)).max(0.0),
+        )
+    } else {
+        CornerRadius::ZERO
+    };
+    Some(Clip::new(rect, corner_radius))
 }
 
 struct ChildIter<'a>(std::slice::Iter<'a, usize>);

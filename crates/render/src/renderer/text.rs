@@ -1,6 +1,6 @@
 use glyphon::{Buffer, Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, Viewport};
 
-use crate::{Canvas, Color, DrawCommand, Rect, TextStyle, TextSystem};
+use crate::{Canvas, Clip, Color, DrawCommand, Rect, TextStyle, TextSystem};
 
 use super::{RenderError, SurfaceSize};
 
@@ -14,6 +14,7 @@ pub(super) struct TextRenderer {
 
 struct CachedText {
     bounds: Rect,
+    clips: Vec<Clip>,
     text: String,
     style: TextStyle,
     buffer: Buffer,
@@ -63,26 +64,30 @@ impl TextRenderer {
                     bounds,
                     text,
                     style,
+                    clips,
                 } if bounds.width > 0.0 && bounds.height > 0.0 && !text.is_empty() => {
-                    Some((*bounds, text.as_str(), style))
+                    Some((*bounds, clips.as_slice(), text.as_str(), style))
                 }
                 _ => None,
             })
             .collect();
-        let buffers_match = self.buffers.len() == commands.len()
-            && self
-                .buffers
-                .iter()
-                .zip(&commands)
-                .all(|(cached, (bounds, text, style))| {
-                    cached.bounds == *bounds && cached.text == *text && cached.style == **style
-                });
+        let buffers_match =
+            self.buffers.len() == commands.len()
+                && self.buffers.iter().zip(&commands).all(
+                    |(cached, (bounds, clips, text, style))| {
+                        cached.bounds == *bounds
+                            && cached.clips == *clips
+                            && cached.text == *text
+                            && cached.style == **style
+                    },
+                );
         if !buffers_match {
             self.buffers.clear();
             self.buffers.reserve(commands.len());
-            for (bounds, text, style) in &commands {
+            for (bounds, clips, text, style) in &commands {
                 self.buffers.push(CachedText {
                     bounds: *bounds,
+                    clips: clips.to_vec(),
                     text: (*text).to_owned(),
                     style: (*style).clone(),
                     buffer: text_system.layout_buffer(
@@ -101,7 +106,7 @@ impl TextRenderer {
             left: cached.bounds.x,
             top: cached.bounds.y,
             scale: 1.0,
-            bounds: clipped_bounds(cached.bounds, size),
+            bounds: clipped_bounds(cached.bounds, &cached.clips, size),
             default_color: glyphon_color(cached.style.color),
             custom_glyphs: &[],
         });
@@ -127,7 +132,10 @@ impl TextRenderer {
     }
 }
 
-fn clipped_bounds(bounds: Rect, size: SurfaceSize) -> TextBounds {
+fn clipped_bounds(mut bounds: Rect, clips: &[Clip], size: SurfaceSize) -> TextBounds {
+    for clip in clips {
+        bounds = bounds.intersection(clip.rect);
+    }
     TextBounds {
         left: bounds.x.floor().max(0.0) as i32,
         top: bounds.y.floor().max(0.0) as i32,

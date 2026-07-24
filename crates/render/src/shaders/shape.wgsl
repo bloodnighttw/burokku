@@ -6,6 +6,15 @@ struct Screen {
 @group(0) @binding(0)
 var<uniform> screen: Screen;
 
+struct Clip {
+    center: vec2<f32>,
+    half_size: vec2<f32>,
+    radii: vec4<f32>,
+}
+
+@group(0) @binding(1)
+var<storage, read> clips: array<Clip>;
+
 struct Instance {
     @location(0) center: vec2<f32>,
     @location(1) half_size: vec2<f32>,
@@ -16,6 +25,8 @@ struct Instance {
     @location(6) border_width: f32,
     @location(7) outline_width: f32,
     @location(8) outline_offset: f32,
+    @location(9) _padding: f32,
+    @location(10) clip_range: vec2<u32>,
 }
 
 struct VertexOutput {
@@ -27,6 +38,7 @@ struct VertexOutput {
     @location(4) @interpolate(flat) border_color: vec4<f32>,
     @location(5) @interpolate(flat) outline_color: vec4<f32>,
     @location(6) @interpolate(flat) widths: vec3<f32>,
+    @location(7) @interpolate(flat) clip_range: vec2<u32>,
 }
 
 @vertex
@@ -53,6 +65,7 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
     output.border_color = instance.border_color;
     output.outline_color = instance.outline_color;
     output.widths = vec3(instance.border_width, instance.outline_width, instance.outline_offset);
+    output.clip_range = instance.clip_range;
     return output;
 }
 
@@ -87,6 +100,21 @@ fn linear_color(color: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let pixel = input.clip_position.xy;
+    var clip_coverage = 1.0;
+    for (var index = 0u; index < input.clip_range.y; index += 1u) {
+        let clip = clips[input.clip_range.x + index];
+        let distance = rounded_box_distance(pixel - clip.center, clip.half_size, clip.radii);
+        let antialias = max(fwidth(distance), 0.75);
+        clip_coverage = min(
+            clip_coverage,
+            1.0 - smoothstep(-antialias, antialias, distance),
+        );
+    }
+    if clip_coverage <= 0.0001 {
+        discard;
+    }
+
     let border_width = max(input.widths.x, 0.0);
     let outline_width = max(input.widths.y, 0.0);
     let outline_offset = max(input.widths.z, 0.0);
@@ -122,10 +150,11 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var outline_color = input.outline_color;
     outline_color.a *= outline_coverage;
 
-    let combined_alpha = base_color.a + outline_color.a * (1.0 - base_color.a);
+    let unclipped_alpha = base_color.a + outline_color.a * (1.0 - base_color.a);
+    let combined_alpha = unclipped_alpha * clip_coverage;
     if combined_alpha <= 0.0001 {
         discard;
     }
-    let combined_rgb = (base_color.rgb * base_color.a + outline_color.rgb * outline_color.a * (1.0 - base_color.a)) / combined_alpha;
+    let combined_rgb = (base_color.rgb * base_color.a + outline_color.rgb * outline_color.a * (1.0 - base_color.a)) / unclipped_alpha;
     return linear_color(vec4(combined_rgb, combined_alpha));
 }

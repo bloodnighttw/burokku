@@ -1,4 +1,6 @@
-use render::{Border, BoxStyle, Canvas, Color, CornerRadius, Outline, Rect, TextStyle, TextSystem};
+use render::{
+    Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextStyle, TextSystem,
+};
 
 use super::{
     elements::Document,
@@ -62,17 +64,52 @@ fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
             layout.width * scale_factor,
             layout.height * scale_factor,
         );
+        let clips = layout
+            .clips
+            .iter()
+            .copied()
+            .map(|clip| scaled_clip(clip, scale_factor));
         match &layout.kind {
             LayoutKind::Box { style, .. } => {
                 if *style != BoxStyle::default() {
-                    canvas.draw_box(bounds, scaled_box_style(*style, scale_factor));
+                    canvas.draw_box_with_clips(
+                        bounds,
+                        scaled_box_style(*style, scale_factor),
+                        clips,
+                    );
                 }
             }
             LayoutKind::Text { text, style } => {
-                canvas.draw_text(bounds, text, scaled_text_style(style, scale_factor));
+                canvas.draw_text_with_clips(
+                    bounds,
+                    text,
+                    scaled_text_style(style, scale_factor),
+                    clips,
+                );
             }
         }
     }
+}
+
+fn scaled_rect(rect: Rect, scale_factor: f32) -> Rect {
+    Rect::new(
+        rect.x * scale_factor,
+        rect.y * scale_factor,
+        rect.width * scale_factor,
+        rect.height * scale_factor,
+    )
+}
+
+fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
+    Clip::new(
+        scaled_rect(clip.rect, scale_factor),
+        CornerRadius::new(
+            clip.corner_radius.top_left * scale_factor,
+            clip.corner_radius.top_right * scale_factor,
+            clip.corner_radius.bottom_right * scale_factor,
+            clip.corner_radius.bottom_left * scale_factor,
+        ),
+    )
 }
 
 fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
@@ -159,7 +196,7 @@ mod tests {
         document.insert(BODY_ID, card, None).unwrap();
 
         let canvas = build_canvas(&document, 800.0, 600.0, 2.0, &mut TextSystem::new());
-        let render::DrawCommand::Box { rect, style } = &canvas.commands()[0] else {
+        let render::DrawCommand::Box { rect, style, .. } = &canvas.commands()[0] else {
             panic!("card should produce a box command");
         };
 
@@ -218,5 +255,124 @@ mod tests {
                 Color::from_rgba8(0, 0xff, 0, 0xff),
             ]
         );
+    }
+
+    #[test]
+    fn hidden_and_clip_overflow_clip_descendants_to_the_padding_box() {
+        for overflow in ["hidden", "clip"] {
+            let mut document = Document::new();
+            let container = document.create_node(ElementKind::Div);
+            let overflowing = document.create_node(ElementKind::Div);
+            document
+                .set_style(container, "width", Some("100px"))
+                .unwrap();
+            document
+                .set_style(container, "height", Some("40px"))
+                .unwrap();
+            document
+                .set_style(container, "border-width", Some("2px"))
+                .unwrap();
+            document
+                .set_style(container, "border-radius", Some("12px"))
+                .unwrap();
+            document
+                .set_style(container, "overflow", Some(overflow))
+                .unwrap();
+            document
+                .set_style(overflowing, "width", Some("180px"))
+                .unwrap();
+            document
+                .set_style(overflowing, "height", Some("80px"))
+                .unwrap();
+            document
+                .set_style(overflowing, "background-color", Some("#ff0000"))
+                .unwrap();
+            document
+                .set_style(overflowing, "z-index", Some("10"))
+                .unwrap();
+            document.insert(BODY_ID, container, None).unwrap();
+            document.insert(container, overflowing, None).unwrap();
+
+            let frame = build_frame(&document, 300.0, 200.0, 2.0, &mut TextSystem::new());
+            let container_layout = &frame.layout.children()[0];
+            let overflowing_layout = &container_layout.children()[0];
+            let expected_clip = Rect::new(
+                container_layout.x + 2.0,
+                container_layout.y + 2.0,
+                container_layout.width - 4.0,
+                container_layout.height - 4.0,
+            );
+
+            let expected_clip = Clip::new(expected_clip, CornerRadius::all(10.0));
+            assert_eq!(overflowing_layout.clips, [expected_clip]);
+            let overflowing_command = frame
+                .canvas
+                .commands()
+                .iter()
+                .find(|command| {
+                    matches!(
+                        command,
+                        render::DrawCommand::Box { style, .. }
+                            if style.background == Color::from_rgba8(0xff, 0, 0, 0xff)
+                    )
+                })
+                .expect("overflowing child box");
+            let render::DrawCommand::Box { clips, .. } = overflowing_command else {
+                unreachable!()
+            };
+            assert_eq!(*clips, [scaled_clip(expected_clip, 2.0)]);
+
+            let outside_container = (
+                container_layout.x + container_layout.width + 10.0,
+                container_layout.y + 10.0,
+            );
+            assert_ne!(
+                frame
+                    .layout
+                    .hit_test(outside_container.0, outside_container.1)
+                    .map(Layout::element_id),
+                Some(overflowing)
+            );
+            let rounded_corner = (expected_clip.rect.x + 1.0, expected_clip.rect.y + 1.0);
+            assert_ne!(
+                frame
+                    .layout
+                    .hit_test(rounded_corner.0, rounded_corner.1)
+                    .map(Layout::element_id),
+                Some(overflowing)
+            );
+        }
+    }
+
+    #[test]
+    fn overflow_axis_only_clips_that_axis() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let overflowing = document.create_node(ElementKind::Div);
+        document
+            .set_style(container, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(container, "height", Some("40px"))
+            .unwrap();
+        document
+            .set_style(container, "overflow-x", Some("hidden"))
+            .unwrap();
+        document
+            .set_style(overflowing, "width", Some("180px"))
+            .unwrap();
+        document
+            .set_style(overflowing, "height", Some("80px"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, overflowing, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let container_layout = &layout.children()[0];
+        let clip = container_layout.children()[0].clips[0].rect;
+
+        assert_eq!(clip.x, container_layout.x);
+        assert_eq!(clip.width, container_layout.width);
+        assert_eq!((clip.y, clip.height), (0.0, 200.0));
     }
 }

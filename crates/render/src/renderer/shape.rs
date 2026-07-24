@@ -1,17 +1,21 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{BoxStyle, Canvas, Color, DrawCommand, Rect};
+use crate::{BoxStyle, Canvas, Clip, Color, DrawCommand, Rect};
 
 use super::SurfaceSize;
 
 pub(super) struct ShapeRenderer {
     pipeline: wgpu::RenderPipeline,
     screen_buffer: wgpu::Buffer,
+    bind_group_layout: wgpu::BindGroupLayout,
     screen_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
+    clip_buffer: wgpu::Buffer,
+    clip_capacity: u64,
     instances: Vec<ShapeInstance>,
+    clips: Vec<GpuClip>,
 }
 
 impl ShapeRenderer {
@@ -21,28 +25,41 @@ impl ShapeRenderer {
             contents: bytemuck::bytes_of(&ScreenUniform::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let screen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("render screen bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
-        let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render screen bind group"),
-            layout: &screen_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: screen_buffer.as_entire_binding(),
-            }],
+        let clip_capacity = std::mem::size_of::<GpuClip>() as u64;
+        let clip_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render shape clips"),
+            size: clip_capacity,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        let pipeline = create_pipeline(device, &screen_layout, target_format);
+        let screen_bind_group =
+            create_bind_group(device, &bind_group_layout, &screen_buffer, &clip_buffer);
+        let pipeline = create_pipeline(device, &bind_group_layout, target_format);
         let instance_capacity = std::mem::size_of::<ShapeInstance>() as u64;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("render shape instances"),
@@ -53,10 +70,14 @@ impl ShapeRenderer {
         Self {
             pipeline,
             screen_buffer,
+            bind_group_layout,
             screen_bind_group,
             instance_buffer,
             instance_capacity,
+            clip_buffer,
+            clip_capacity,
             instances: Vec::new(),
+            clips: Vec::new(),
         }
     }
 
@@ -76,17 +97,29 @@ impl ShapeRenderer {
             }),
         );
         self.instances.clear();
-        self.instances.extend(
-            canvas
-                .commands()
-                .iter()
-                .filter_map(|command| match command {
-                    DrawCommand::Box { rect, style } if rect.width > 0.0 && rect.height > 0.0 => {
-                        Some(ShapeInstance::new(*rect, *style))
-                    }
-                    _ => None,
-                }),
-        );
+        self.clips.clear();
+        for command in canvas.commands() {
+            let DrawCommand::Box { rect, style, clips } = command else {
+                continue;
+            };
+            if rect.width <= 0.0
+                || rect.height <= 0.0
+                || clips
+                    .iter()
+                    .any(|clip| clip.rect.width <= 0.0 || clip.rect.height <= 0.0)
+            {
+                continue;
+            }
+
+            let clip_start = self.clips.len() as u32;
+            self.clips.extend(clips.iter().copied().map(GpuClip::new));
+            self.instances.push(ShapeInstance::new(
+                *rect,
+                *style,
+                clip_start,
+                clips.len() as u32,
+            ));
+        }
         if self.instances.is_empty() {
             return;
         }
@@ -103,6 +136,27 @@ impl ShapeRenderer {
             });
         }
         queue.write_buffer(&self.instance_buffer, 0, bytes);
+
+        if !self.clips.is_empty() {
+            let clip_bytes = bytemuck::cast_slice(&self.clips);
+            let required_clip_capacity = clip_bytes.len() as u64;
+            if required_clip_capacity > self.clip_capacity {
+                self.clip_capacity = required_clip_capacity.next_power_of_two();
+                self.clip_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("render shape clips"),
+                    size: self.clip_capacity,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.screen_bind_group = create_bind_group(
+                    device,
+                    &self.bind_group_layout,
+                    &self.screen_buffer,
+                    &self.clip_buffer,
+                );
+            }
+            queue.write_buffer(&self.clip_buffer, 0, clip_bytes);
+        }
     }
 
     pub fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
@@ -114,6 +168,28 @@ impl ShapeRenderer {
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..6, 0..self.instances.len() as u32);
     }
+}
+
+fn create_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    screen_buffer: &wgpu::Buffer,
+    clip_buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("render screen and clips bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: clip_buffer.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn create_pipeline(
@@ -178,10 +254,11 @@ struct ShapeInstance {
     outline_width: f32,
     outline_offset: f32,
     _padding: f32,
+    clip_range: [u32; 2],
 }
 
 impl ShapeInstance {
-    fn new(rect: Rect, style: BoxStyle) -> Self {
+    fn new(rect: Rect, style: BoxStyle, clip_start: u32, clip_count: u32) -> Self {
         let border = style.border.filter(|border| border.width > 0.0);
         let outline = style.outline.filter(|outline| outline.width > 0.0);
         Self {
@@ -201,11 +278,12 @@ impl ShapeInstance {
             outline_width: outline.map_or(0.0, |outline| outline.width.max(0.0)),
             outline_offset: outline.map_or(0.0, |outline| outline.offset.max(0.0)),
             _padding: 0.0,
+            clip_range: [clip_start, clip_count],
         }
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+        const ATTRIBUTES: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
@@ -214,12 +292,35 @@ impl ShapeInstance {
             5 => Float32x4,
             6 => Float32,
             7 => Float32,
-            8 => Float32
+            8 => Float32,
+            9 => Float32,
+            10 => Uint32x2
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &ATTRIBUTES,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct GpuClip {
+    center: [f32; 2],
+    half_size: [f32; 2],
+    radii: [f32; 4],
+}
+
+impl GpuClip {
+    fn new(clip: Clip) -> Self {
+        Self {
+            center: [
+                clip.rect.x + clip.rect.width * 0.5,
+                clip.rect.y + clip.rect.height * 0.5,
+            ],
+            half_size: [clip.rect.width * 0.5, clip.rect.height * 0.5],
+            radii: clip.corner_radius.normalized(clip.rect),
         }
     }
 }

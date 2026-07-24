@@ -1,15 +1,17 @@
-use super::{BoxStyle, Color, Rect, TextStyle};
+use super::{BoxStyle, Clip, Color, Rect, TextStyle};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawCommand {
     Box {
         rect: Rect,
         style: BoxStyle,
+        clips: Vec<Clip>,
     },
     Text {
         bounds: Rect,
         text: String,
         style: TextStyle,
+        clips: Vec<Clip>,
     },
 }
 
@@ -34,8 +36,25 @@ impl Canvas {
     }
 
     pub fn draw_box(&mut self, rect: Rect, style: BoxStyle) -> &mut Self {
-        self.commands.push(DrawCommand::Box { rect, style });
+        self.draw_box_with_clips(rect, style, [])
+    }
+
+    pub fn draw_box_with_clips(
+        &mut self,
+        rect: Rect,
+        style: BoxStyle,
+        clips: impl IntoIterator<Item = Clip>,
+    ) -> &mut Self {
+        self.commands.push(DrawCommand::Box {
+            rect,
+            style,
+            clips: clips.into_iter().collect(),
+        });
         self
+    }
+
+    pub fn draw_box_clipped(&mut self, rect: Rect, style: BoxStyle, clip: Clip) -> &mut Self {
+        self.draw_box_with_clips(rect, style, [clip])
     }
 
     pub fn draw_text(
@@ -44,12 +63,33 @@ impl Canvas {
         text: impl Into<String>,
         style: TextStyle,
     ) -> &mut Self {
+        self.draw_text_with_clips(bounds, text, style, [])
+    }
+
+    pub fn draw_text_with_clips(
+        &mut self,
+        bounds: Rect,
+        text: impl Into<String>,
+        style: TextStyle,
+        clips: impl IntoIterator<Item = Clip>,
+    ) -> &mut Self {
         self.commands.push(DrawCommand::Text {
             bounds,
             text: text.into(),
             style,
+            clips: clips.into_iter().collect(),
         });
         self
+    }
+
+    pub fn draw_text_clipped(
+        &mut self,
+        bounds: Rect,
+        text: impl Into<String>,
+        style: TextStyle,
+        clip: Clip,
+    ) -> &mut Self {
+        self.draw_text_with_clips(bounds, text, style, [clip])
     }
 
     pub fn commands(&self) -> &[DrawCommand] {
