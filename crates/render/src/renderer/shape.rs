@@ -635,7 +635,7 @@ impl GpuClip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Border;
+    use crate::{Border, BorderSide, BorderStyle, CornerRadius, CornerSize};
 
     #[test]
     fn shape_instance_preserves_and_clamps_each_border_width() {
@@ -648,9 +648,63 @@ mod tests {
             3,
             2,
             0.0,
+            None,
         );
 
         assert_eq!(instance.border_widths, [0.0, 30.0, 8.0, 12.0]);
         assert_eq!(instance.clip_range, [3, 2]);
+    }
+
+    #[test]
+    fn shape_instance_combines_per_side_borders_with_paint_effects() {
+        let instance = ShapeInstance::new(
+            Rect::new(0.0, 0.0, 80.0, 40.0),
+            BoxStyle {
+                background_image: Some(BackgroundImage::LinearGradient {
+                    direction: [1.0, 0.0],
+                    start: Color::WHITE,
+                    end: Color::BLACK,
+                }),
+                corner_radius: CornerRadius::elliptical(
+                    CornerSize::new(20.0, 8.0),
+                    CornerSize::all(4.0),
+                    CornerSize::ZERO,
+                    CornerSize::ZERO,
+                ),
+                border: Some(Border::sides(
+                    BorderSide::new(1.0, Color::from_rgba8(255, 0, 0, 255), BorderStyle::Solid),
+                    BorderSide::new(2.0, Color::from_rgba8(0, 255, 0, 128), BorderStyle::Dashed),
+                    BorderSide::new(3.0, Color::from_rgba8(0, 0, 255, 255), BorderStyle::Dotted),
+                    BorderSide::new(4.0, Color::BLACK, BorderStyle::Double),
+                )),
+                opacity: 0.5,
+                transform: Transform {
+                    matrix: [1.0, 0.0, 0.0, 1.0, 5.0, 7.0],
+                },
+                ..BoxStyle::default()
+            },
+            0,
+            0,
+            0.0,
+            None,
+        );
+
+        assert_eq!(instance.border_widths, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            instance.border_styles,
+            [
+                BorderStyle::Solid as u32,
+                BorderStyle::Dashed as u32,
+                BorderStyle::Dotted as u32,
+                BorderStyle::Double as u32,
+            ]
+        );
+        assert_eq!(instance.border_colors[0], 0x8000_00ff);
+        assert_eq!(instance.border_colors[1], 0x4000_ff00);
+        assert_eq!(instance.gradient, [1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(instance.transform_x, [1.0, 0.0, 5.0]);
+        assert_eq!(instance.transform_y, [0.0, 1.0, 7.0]);
+        assert_eq!(instance.radii_x[0], 20.0);
+        assert_eq!(instance.radii_y[0], 8.0);
     }
 }

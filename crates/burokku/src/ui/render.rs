@@ -197,39 +197,39 @@ fn paint_native_control(
     clips: &[Clip],
     canvas: &mut Canvas,
 ) {
-    let (disabled, focused, active, default_borders, border_widths, border_colors) = match appearance
-    {
-        NativeAppearance::Button {
-            disabled,
-            focused,
-            active,
-            default_borders,
-            border_widths,
-            border_colors,
-        } => (
-            disabled,
-            focused,
-            active,
-            default_borders,
-            border_widths,
-            border_colors,
-        ),
-        NativeAppearance::Select {
-            disabled,
-            focused,
-            default_borders,
-            border_widths,
-            border_colors,
-            ..
-        } => (
-            disabled,
-            focused,
-            false,
-            default_borders,
-            border_widths,
-            border_colors,
-        ),
-    };
+    let (disabled, focused, active, default_borders, border_widths, border_colors) =
+        match appearance {
+            NativeAppearance::Button {
+                disabled,
+                focused,
+                active,
+                default_borders,
+                border_widths,
+                border_colors,
+            } => (
+                disabled,
+                focused,
+                active,
+                default_borders,
+                border_widths,
+                border_colors,
+            ),
+            NativeAppearance::Select {
+                disabled,
+                focused,
+                default_borders,
+                border_widths,
+                border_colors,
+                ..
+            } => (
+                disabled,
+                focused,
+                false,
+                default_borders,
+                border_widths,
+                border_colors,
+            ),
+        };
 
     paint_native_border(
         bounds,

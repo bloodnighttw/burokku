@@ -2951,6 +2951,35 @@ mod tests {
     }
 
     #[test]
+    fn native_control_borders_remain_solid_except_on_author_overridden_sides() {
+        let mut document = Document::new();
+        let button = document.create_node(ElementKind::Button);
+        document
+            .set_style(button, "border-top-style", Some("none"))
+            .unwrap();
+        document.insert(BODY_ID, button, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let LayoutKind::Box { style, .. } = &layout.children()[0].kind else {
+            panic!("button should be a box");
+        };
+        let border = style
+            .border
+            .expect("native button should keep visible borders");
+
+        assert_eq!(border.widths(), [0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            border.styles(),
+            [
+                RenderBorderStyle::None,
+                RenderBorderStyle::Solid,
+                RenderBorderStyle::Solid,
+                RenderBorderStyle::Solid,
+            ]
+        );
+    }
+
+    #[test]
     fn selects_project_only_the_selected_option_into_closed_layout() {
         let mut document = Document::new();
         let select = document.create_node(ElementKind::Select);
