@@ -15,6 +15,12 @@ struct Clip {
 @group(0) @binding(1)
 var<storage, read> clips: array<Clip>;
 
+@group(0) @binding(2)
+var background_images: texture_2d_array<f32>;
+
+@group(0) @binding(3)
+var background_image_sampler: sampler;
+
 struct Instance {
     @location(0) center: vec2<f32>,
     @location(1) half_size: vec2<f32>,
@@ -31,6 +37,7 @@ struct Instance {
     @location(12) gradient: vec4<f32>,
     @location(13) transform_x: vec3<f32>,
     @location(14) transform_y: vec3<f32>,
+    @location(15) image: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -46,6 +53,7 @@ struct VertexOutput {
     @location(8) @interpolate(flat) gradient_color: vec4<f32>,
     @location(9) @interpolate(flat) gradient: vec4<f32>,
     @location(10) @interpolate(flat) effect_blur: f32,
+    @location(11) @interpolate(flat) image: vec4<f32>,
 }
 
 @vertex
@@ -79,6 +87,7 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
     output.gradient_color = instance.gradient_color;
     output.gradient = instance.gradient;
     output.effect_blur = instance._padding;
+    output.image = instance.image;
     return output;
 }
 
@@ -151,6 +160,23 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     } else if input.gradient.z == 2.0 {
         let gradient_position = clamp(length(input.local_position / max(input.half_size, vec2(0.0001))), 0.0, 1.0);
         base_color = mix(input.background, input.gradient_color, gradient_position);
+    } else if input.gradient.z == 3.0 {
+        let box_uv = clamp(input.local_position / max(input.half_size, vec2(0.0001)) * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+        var image_color = textureSample(
+            background_images,
+            background_image_sampler,
+            box_uv * input.image.xy,
+            i32(input.image.z),
+        );
+        image_color.a *= input.image.w;
+        let combined_alpha = image_color.a + base_color.a * (1.0 - image_color.a);
+        if combined_alpha > 0.0001 {
+            let combined_rgb = (
+                image_color.rgb * image_color.a
+                + base_color.rgb * base_color.a * (1.0 - image_color.a)
+            ) / combined_alpha;
+            base_color = vec4(combined_rgb, combined_alpha);
+        }
     }
     if border_width > 0.0 {
         base_color = mix(input.border_color, base_color, inner_coverage);

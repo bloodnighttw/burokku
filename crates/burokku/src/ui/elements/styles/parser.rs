@@ -1,4 +1,9 @@
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    collections::VecDeque,
+    io::Cursor,
+    sync::{Mutex, OnceLock},
+};
 
 use super::{
     AlignContent, AlignItems, BackgroundImage, BoxSizing, Color, Display, FlexDirection, FlexWrap,
@@ -734,6 +739,12 @@ fn parse_background_image(name: &str, value: &str) -> Result<Option<BackgroundIm
         return Ok(None);
     }
     let lower = value.to_ascii_lowercase();
+    if lower.starts_with("url(") && value.ends_with(')') {
+        let source = value[4..value.len() - 1].trim().trim_matches(['\'', '"']);
+        return Ok(Some(BackgroundImage::Raster(parse_raster_data_url(
+            name, source,
+        )?)));
+    }
     let (function, inner) = if lower.starts_with("linear-gradient(") && value.ends_with(')') {
         ("linear", &value[16..value.len() - 1])
     } else if lower.starts_with("radial-gradient(") && value.ends_with(')') {
@@ -763,6 +774,101 @@ fn parse_background_image(name: &str, value: &str) -> Result<Option<BackgroundIm
         start: parse_color_stop(name, parts[color_start])?,
         end: parse_color_stop(name, parts.last().expect("at least two stops"))?,
     }))
+}
+
+fn parse_raster_data_url(name: &str, source: &str) -> Result<render::RasterImage, StyleError> {
+    static CACHE: OnceLock<Mutex<VecDeque<(String, render::RasterImage)>>> = OnceLock::new();
+    const CACHE_CAPACITY: usize = 64;
+    const MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
+
+    let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Some(image) = cache
+        .lock()
+        .expect("background image cache lock")
+        .iter()
+        .find_map(|(cached_source, image)| (cached_source == source).then(|| image.clone()))
+    {
+        return Ok(image);
+    }
+    let encoded = source
+        .strip_prefix("data:image/png;base64,")
+        .filter(|encoded| encoded.len() <= MAX_ENCODED_BYTES)
+        .ok_or_else(|| StyleError::InvalidValue(name.into(), source.into()))?;
+    let bytes = decode_base64(encoded)
+        .ok_or_else(|| StyleError::InvalidValue(name.into(), source.into()))?;
+    let image =
+        decode_png(&bytes).ok_or_else(|| StyleError::InvalidValue(name.into(), source.into()))?;
+    let mut cache = cache.lock().expect("background image cache lock");
+    if cache.len() == CACHE_CAPACITY {
+        cache.pop_front();
+    }
+    cache.push_back((source.to_owned(), image.clone()));
+    Ok(image)
+}
+
+fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(value.len() / 4 * 3);
+    let mut accumulator = 0_u32;
+    let mut bits = 0_u8;
+    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        accumulator = (accumulator << 6) | u32::from(digit);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((accumulator >> bits) as u8);
+            accumulator &= (1 << bits) - 1;
+        }
+    }
+    Some(output)
+}
+
+fn decode_png(bytes: &[u8]) -> Option<render::RasterImage> {
+    const MAX_PIXELS: usize = 16 * 1024 * 1024;
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let dimensions = reader.info();
+    let pixel_count = usize::try_from(dimensions.width)
+        .ok()?
+        .checked_mul(usize::try_from(dimensions.height).ok()?)?;
+    if pixel_count > MAX_PIXELS {
+        return None;
+    }
+    let mut decoded = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut decoded).ok()?;
+    let source = &decoded[..info.buffer_size()];
+    let mut rgba = Vec::with_capacity(pixel_count.checked_mul(4)?);
+    match info.color_type {
+        png::ColorType::Rgba => rgba.extend_from_slice(source),
+        png::ColorType::Rgb => {
+            for pixel in source.chunks_exact(3) {
+                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for gray in source {
+                rgba.extend_from_slice(&[*gray, *gray, *gray, 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for pixel in source.chunks_exact(2) {
+                rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+        }
+        png::ColorType::Indexed => return None,
+    }
+    render::RasterImage::new(info.width, info.height, rgba)
 }
 
 fn parse_gradient_direction(name: &str, value: &str) -> Result<[f32; 2], StyleError> {
@@ -1362,5 +1468,40 @@ mod tests {
                 end: [0, 0, 0, 0],
             })
         );
+    }
+
+    #[test]
+    fn decodes_and_caches_png_data_url_backgrounds() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=";
+        let mut first = Style::default();
+        let mut second = Style::default();
+        set_style(
+            &mut first,
+            "background-image",
+            Some(&format!("url(\"{PNG}\")")),
+        )
+        .unwrap();
+        set_style(
+            &mut second,
+            "background-image",
+            Some(&format!("url('{PNG}')")),
+        )
+        .unwrap();
+
+        let Some(BackgroundImage::Raster(first)) = first.background_image else {
+            panic!("expected decoded raster image");
+        };
+        let Some(BackgroundImage::Raster(second)) = second.background_image else {
+            panic!("expected cached raster image");
+        };
+        assert_eq!((first.width, first.height), (2, 1));
+        assert_eq!(&*first.pixels, &[255, 0, 0, 255, 0, 0, 255, 255]);
+        assert!(std::sync::Arc::ptr_eq(&first.pixels, &second.pixels));
+        assert!(set_style(
+            &mut Style::default(),
+            "background-image",
+            Some("url(https://example.com/image.png)")
+        )
+        .is_err());
     }
 }

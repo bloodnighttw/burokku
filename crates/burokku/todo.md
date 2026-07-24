@@ -36,7 +36,7 @@
 - [x] Add opacity.
 - [x] Add transforms.
 - [x] Add box and text shadows.
-- [ ] Add background images and gradients.
+- [x] Add background images and gradients.
 - [x] Add `rgb()`, `rgba()`, `hsl()`, and `hsla()` colors.
 - [x] Expand named-color support.
 

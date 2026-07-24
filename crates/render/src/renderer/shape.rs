@@ -1,7 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{BackgroundImage, BoxStyle, Canvas, Clip, Color, DrawCommand, Rect, Transform};
+use crate::{
+    BackgroundImage, BoxStyle, Canvas, Clip, Color, DrawCommand, RasterImage, Rect, Transform,
+};
 
 use super::SurfaceSize;
 
@@ -14,6 +16,11 @@ pub(super) struct ShapeRenderer {
     instance_capacity: u64,
     clip_buffer: wgpu::Buffer,
     clip_capacity: u64,
+    image_texture: wgpu::Texture,
+    image_view: wgpu::TextureView,
+    image_sampler: wgpu::Sampler,
+    image_extent: [u32; 3],
+    images: Vec<RasterImage>,
     instances: Vec<ShapeInstance>,
     clips: Vec<GpuClip>,
     overlay_start: usize,
@@ -49,6 +56,22 @@ impl ShapeRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let clip_capacity = std::mem::size_of::<GpuClip>() as u64;
@@ -58,8 +81,23 @@ impl ShapeRenderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let screen_bind_group =
-            create_bind_group(device, &bind_group_layout, &screen_buffer, &clip_buffer);
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("render background image sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
+        let (image_texture, image_view) = create_image_texture(device, [1, 1, 1]);
+        let screen_bind_group = create_bind_group(
+            device,
+            &bind_group_layout,
+            &screen_buffer,
+            &clip_buffer,
+            &image_view,
+            &image_sampler,
+        );
         let pipeline = create_pipeline(device, &bind_group_layout, target_format);
         let instance_capacity = std::mem::size_of::<ShapeInstance>() as u64;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -77,6 +115,11 @@ impl ShapeRenderer {
             instance_capacity,
             clip_buffer,
             clip_capacity,
+            image_texture,
+            image_view,
+            image_sampler,
+            image_extent: [1, 1, 1],
+            images: Vec::new(),
             instances: Vec::new(),
             clips: Vec::new(),
             overlay_start: 0,
@@ -90,6 +133,7 @@ impl ShapeRenderer {
         canvas: &Canvas,
         size: SurfaceSize,
     ) {
+        self.prepare_images(device, queue, canvas);
         queue.write_buffer(
             &self.screen_buffer,
             0,
@@ -107,10 +151,10 @@ impl ShapeRenderer {
             for command in canvas.commands() {
                 let shape = match command {
                     DrawCommand::Box { rect, style, clips } if !overlay => {
-                        Some((*rect, *style, clips.as_slice()))
+                        Some((*rect, style.clone(), clips.as_slice()))
                     }
                     DrawCommand::OverlayBox { rect, style, clips } if overlay => {
-                        Some((*rect, *style, clips.as_slice()))
+                        Some((*rect, style.clone(), clips.as_slice()))
                     }
                     _ => None,
                 };
@@ -128,6 +172,22 @@ impl ShapeRenderer {
 
                 let clip_start = self.clips.len() as u32;
                 self.clips.extend(clips.iter().copied().map(GpuClip::new));
+                let image_layer = match &style.background_image {
+                    Some(BackgroundImage::Raster(image)) => self
+                        .images
+                        .iter()
+                        .position(|candidate| candidate == image)
+                        .map(|layer| {
+                            (
+                                layer as u32,
+                                [
+                                    image.width as f32 / self.image_extent[0] as f32,
+                                    image.height as f32 / self.image_extent[1] as f32,
+                                ],
+                            )
+                        }),
+                    _ => None,
+                };
                 if let Some(shadow) = style.shadow {
                     let spread = shadow.spread;
                     let shadow_rect = Rect::new(
@@ -153,6 +213,7 @@ impl ShapeRenderer {
                         clip_start,
                         clips.len() as u32,
                         shadow.blur,
+                        None,
                     ));
                 }
                 self.instances.push(ShapeInstance::new(
@@ -161,6 +222,7 @@ impl ShapeRenderer {
                     clip_start,
                     clips.len() as u32,
                     0.0,
+                    image_layer,
                 ));
             }
         }
@@ -197,9 +259,79 @@ impl ShapeRenderer {
                     &self.bind_group_layout,
                     &self.screen_buffer,
                     &self.clip_buffer,
+                    &self.image_view,
+                    &self.image_sampler,
                 );
             }
             queue.write_buffer(&self.clip_buffer, 0, clip_bytes);
+        }
+    }
+
+    fn prepare_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: &Canvas) {
+        self.images.clear();
+        for image in canvas.commands().iter().filter_map(|command| {
+            let style = match command {
+                DrawCommand::Box { style, .. } | DrawCommand::OverlayBox { style, .. } => style,
+                DrawCommand::Text { .. } => return None,
+            };
+            match &style.background_image {
+                Some(BackgroundImage::Raster(image)) => Some(image),
+                _ => None,
+            }
+        }) {
+            if !self.images.iter().any(|candidate| candidate == image) {
+                self.images.push(image.clone());
+            }
+        }
+        let extent = [
+            self.images
+                .iter()
+                .map(|image| image.width)
+                .max()
+                .unwrap_or(1),
+            self.images
+                .iter()
+                .map(|image| image.height)
+                .max()
+                .unwrap_or(1),
+            self.images.len().max(1) as u32,
+        ];
+        if extent != self.image_extent {
+            (self.image_texture, self.image_view) = create_image_texture(device, extent);
+            self.image_extent = extent;
+            self.screen_bind_group = create_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.screen_buffer,
+                &self.clip_buffer,
+                &self.image_view,
+                &self.image_sampler,
+            );
+        }
+        for (layer, image) in self.images.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.image_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &image.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(image.width * 4),
+                    rows_per_image: Some(image.height),
+                },
+                wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
     }
 
@@ -232,6 +364,8 @@ fn create_bind_group(
     layout: &wgpu::BindGroupLayout,
     screen_buffer: &wgpu::Buffer,
     clip_buffer: &wgpu::Buffer,
+    image_view: &wgpu::TextureView,
+    image_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("render screen and clips bind group"),
@@ -245,8 +379,42 @@ fn create_bind_group(
                 binding: 1,
                 resource: clip_buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(image_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(image_sampler),
+            },
         ],
     })
+}
+
+fn create_image_texture(
+    device: &wgpu::Device,
+    extent: [u32; 3],
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("render background image array"),
+        size: wgpu::Extent3d {
+            width: extent[0],
+            height: extent[1],
+            depth_or_array_layers: extent[2],
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("render background image array view"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..wgpu::TextureViewDescriptor::default()
+    });
+    (texture, view)
 }
 
 fn create_pipeline(
@@ -316,6 +484,7 @@ struct ShapeInstance {
     gradient: [f32; 4],
     transform_x: [f32; 3],
     transform_y: [f32; 3],
+    image: [f32; 4],
 }
 
 impl ShapeInstance {
@@ -325,6 +494,7 @@ impl ShapeInstance {
         clip_start: u32,
         clip_count: u32,
         effect_blur: f32,
+        image_layer: Option<(u32, [f32; 2])>,
     ) -> Self {
         let border = style.border.filter(|border| border.width > 0.0);
         let outline = style.outline.filter(|outline| outline.width > 0.0);
@@ -333,7 +503,7 @@ impl ShapeInstance {
             color[3] *= alpha;
             color
         };
-        let (gradient_color, gradient) = match style.background_image {
+        let (gradient_color, gradient) = match style.background_image.as_ref() {
             Some(BackgroundImage::LinearGradient {
                 direction,
                 start: _,
@@ -345,12 +515,13 @@ impl ShapeInstance {
             Some(BackgroundImage::RadialGradient { start: _, end }) => {
                 (with_opacity(end.components()), [0.0, 0.0, 2.0, 0.0])
             }
+            Some(BackgroundImage::Raster(_)) => ([0.0; 4], [0.0, 0.0, 3.0, 0.0]),
             None => ([0.0; 4], [0.0; 4]),
         };
-        let background = match style.background_image {
+        let background = match style.background_image.as_ref() {
             Some(BackgroundImage::LinearGradient { start, .. })
             | Some(BackgroundImage::RadialGradient { start, .. }) => start,
-            None => style.background,
+            Some(BackgroundImage::Raster(_)) | None => &style.background,
         };
         let Transform { matrix } = style.transform;
         Self {
@@ -379,11 +550,14 @@ impl ShapeInstance {
             gradient,
             transform_x: [matrix[0], matrix[2], matrix[4]],
             transform_y: [matrix[1], matrix[3], matrix[5]],
+            image: image_layer.map_or([0.0; 4], |(layer, scale)| {
+                [scale[0], scale[1], layer as f32, alpha]
+            }),
         }
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 15] = wgpu::vertex_attr_array![
+        const ATTRIBUTES: [wgpu::VertexAttribute; 16] = wgpu::vertex_attr_array![
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
@@ -398,7 +572,8 @@ impl ShapeInstance {
             11 => Float32x4,
             12 => Float32x4,
             13 => Float32x3,
-            14 => Float32x3
+            14 => Float32x3,
+            15 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
