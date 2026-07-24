@@ -11,5 +11,6 @@ pub(crate) use taffy::style::{
 };
 pub(crate) use values::{
     BorderStyle, CornerRadiusValue, Isolation, LengthPercentageValue, LengthValue, LineHeightValue,
-    MaxSizeValue, Overflow, Position, SizeValue, ZIndex,
+    FontStyleValue, MaxSizeValue, Overflow, OverflowWrapValue, Position, SizeValue, TextAlignValue,
+    TextDecorationLineValue, WhiteSpaceValue, WordBreakValue, ZIndex,
 };

@@ -1,8 +1,9 @@
 use super::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, CornerRadiusValue, Display,
     FlexDirection, FlexWrap, GridAutoFlow, GridTemplateArea, Isolation, JustifyContent,
-    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, Position,
-    SizeValue, ZIndex,
+    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue,
+    Position, SizeValue, TextAlignValue, TextDecorationLineValue, WhiteSpaceValue, WordBreakValue,
+    FontStyleValue, ZIndex,
 };
 
 pub(crate) type Color = [u8; 4];
@@ -95,7 +96,16 @@ pub(crate) struct Style {
     pub(crate) font_size: Option<LengthPercentageValue>,
     pub(crate) line_height: Option<LineHeightValue>,
     pub(crate) font_weight: Option<u16>,
-    pub(crate) font_family: Option<String>,
+    pub(crate) font_families: Option<Vec<String>>,
+    pub(crate) font_style: Option<FontStyleValue>,
+    pub(crate) text_align: Option<TextAlignValue>,
+    pub(crate) letter_spacing: Option<LengthValue>,
+    pub(crate) word_spacing: Option<LengthValue>,
+    pub(crate) text_decoration_line: Option<TextDecorationLineValue>,
+    pub(crate) text_decoration_color: Option<Color>,
+    pub(crate) white_space: Option<WhiteSpaceValue>,
+    pub(crate) overflow_wrap: Option<OverflowWrapValue>,
+    pub(crate) word_break: Option<WordBreakValue>,
 }
 
 impl Default for Style {
@@ -173,7 +183,16 @@ impl Default for Style {
             font_size: None,
             line_height: None,
             font_weight: None,
-            font_family: None,
+            font_families: None,
+            font_style: None,
+            text_align: None,
+            letter_spacing: None,
+            word_spacing: None,
+            text_decoration_line: None,
+            text_decoration_color: None,
+            white_space: None,
+            overflow_wrap: None,
+            word_break: None,
         }
     }
 }

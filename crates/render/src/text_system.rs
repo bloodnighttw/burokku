@@ -1,6 +1,9 @@
-use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight, Wrap};
+use glyphon::{
+    cosmic_text::Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as GlyphStyle,
+    Weight, Wrap,
+};
 
-use crate::{FontFamily, TextStyle, TextWrap};
+use crate::{FontFamily, FontStyle, TextAlign, TextStyle, TextWrap};
 
 /// Width behavior used while calculating intrinsic text dimensions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -97,18 +100,68 @@ impl TextSystem {
             &mut self.font_system,
             wrap.unwrap_or_else(|| wrap_mode(style.wrap)),
         );
-        let family = match &style.font_family {
+        let family = match self.resolve_font_family(&style.font_families) {
             FontFamily::SansSerif => Family::SansSerif,
             FontFamily::Serif => Family::Serif,
             FontFamily::Monospace => Family::Monospace,
+            FontFamily::Cursive => Family::Cursive,
+            FontFamily::Fantasy => Family::Fantasy,
             FontFamily::Named(name) => Family::Name(name),
         };
         let attrs = Attrs::new()
             .family(family)
-            .weight(Weight(style.font_weight));
-        buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced, None);
+            .weight(Weight(style.font_weight))
+            .style(match style.font_style {
+                FontStyle::Normal => GlyphStyle::Normal,
+                FontStyle::Italic => GlyphStyle::Italic,
+                FontStyle::Oblique => GlyphStyle::Oblique,
+            })
+            .letter_spacing(style.letter_spacing / font_size);
+        let alignment = match style.text_align {
+            TextAlign::Start => None,
+            TextAlign::End => Some(Align::End),
+            TextAlign::Left => Some(Align::Left),
+            TextAlign::Right => Some(Align::Right),
+            TextAlign::Center => Some(Align::Center),
+            TextAlign::Justify => Some(Align::Justified),
+        };
+        if style.word_spacing == 0.0 {
+            buffer.set_text(
+                &mut self.font_system,
+                text,
+                &attrs,
+                Shaping::Advanced,
+                alignment,
+            );
+        } else {
+            let word_attrs = attrs
+                .clone()
+                .letter_spacing((style.letter_spacing + style.word_spacing) / font_size);
+            let spans = text_spans(text, attrs.clone(), word_attrs);
+            buffer.set_rich_text(
+                &mut self.font_system,
+                spans,
+                &attrs,
+                Shaping::Advanced,
+                alignment,
+            );
+        }
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer
+    }
+
+    fn resolve_font_family<'a>(&self, families: &'a [FontFamily]) -> &'a FontFamily {
+        families
+            .iter()
+            .find(|family| match family {
+                FontFamily::Named(requested) => self.font_system.db().faces().any(|face| {
+                    face.families
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(requested))
+                }),
+                _ => true,
+            })
+            .unwrap_or(&DEFAULT_FONT_FAMILY)
     }
 
     pub(crate) fn font_system_mut(&mut self) -> &mut FontSystem {
@@ -127,7 +180,50 @@ pub(crate) const fn wrap_mode(wrap: TextWrap) -> Wrap {
         TextWrap::None => Wrap::None,
         TextWrap::Glyph => Wrap::Glyph,
         TextWrap::Word => Wrap::Word,
+        TextWrap::WordOrGlyph => Wrap::WordOrGlyph,
     }
+}
+
+static DEFAULT_FONT_FAMILY: FontFamily = FontFamily::SansSerif;
+
+fn text_spans<'a>(
+    text: &'a str,
+    normal: Attrs<'a>,
+    spaced_word: Attrs<'a>,
+) -> Vec<(&'a str, Attrs<'a>)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    let mut whitespace = None;
+    for (index, character) in text.char_indices() {
+        let is_word_separator = matches!(character, ' ' | '\t');
+        match whitespace {
+            None => whitespace = Some(is_word_separator),
+            Some(current) if current != is_word_separator => {
+                spans.push((
+                    &text[start..index],
+                    if current {
+                        spaced_word.clone()
+                    } else {
+                        normal.clone()
+                    },
+                ));
+                start = index;
+                whitespace = Some(is_word_separator);
+            }
+            _ => {}
+        }
+    }
+    if start < text.len() {
+        spans.push((
+            &text[start..],
+            if whitespace.unwrap_or(false) {
+                spaced_word
+            } else {
+                normal
+            },
+        ));
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -158,5 +254,78 @@ mod tests {
         assert!(wrapped.width < unconstrained.width);
         assert!(wrapped.height > unconstrained.height);
         assert!(wrapped.line_count > unconstrained.line_count);
+    }
+
+    #[test]
+    fn applies_letter_and_word_spacing_to_measurement() {
+        let mut system = TextSystem::new();
+        let plain = system.measure("a a", &TextStyle::default(), TextConstraints::UNCONSTRAINED);
+        if plain.width == 0.0 {
+            return;
+        }
+        let spaced = system.measure(
+            "a a",
+            &TextStyle {
+                letter_spacing: 2.0,
+                word_spacing: 5.0,
+                ..TextStyle::default()
+            },
+            TextConstraints::UNCONSTRAINED,
+        );
+
+        assert!(spaced.width > plain.width + 5.0);
+    }
+
+    #[test]
+    fn chooses_the_first_available_font_family_fallback() {
+        let system = TextSystem::new();
+        let families = [
+            FontFamily::Named("A font that cannot exist".to_owned()),
+            FontFamily::Serif,
+            FontFamily::SansSerif,
+        ];
+
+        assert_eq!(system.resolve_font_family(&families), &FontFamily::Serif);
+    }
+
+    #[test]
+    fn applies_text_alignment_to_glyph_positions() {
+        let mut system = TextSystem::new();
+        let left = system.layout_buffer(
+            "aligned",
+            &TextStyle {
+                text_align: TextAlign::Left,
+                ..TextStyle::default()
+            },
+            Some(200.0),
+            None,
+            None,
+        );
+        let Some(left_x) = left
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first())
+            .map(|glyph| glyph.x)
+        else {
+            return;
+        };
+        let right = system.layout_buffer(
+            "aligned",
+            &TextStyle {
+                text_align: TextAlign::Right,
+                ..TextStyle::default()
+            },
+            Some(200.0),
+            None,
+            None,
+        );
+        let right_x = right
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first())
+            .expect("the same text should shape")
+            .x;
+
+        assert!(right_x > left_x + 50.0);
     }
 }

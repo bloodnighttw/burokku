@@ -165,6 +165,65 @@ pub(crate) enum LineHeightValue {
     Percent(f32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextAlignValue {
+    Start,
+    End,
+    Left,
+    Right,
+    Center,
+    Justify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FontStyleValue {
+    Normal,
+    Italic,
+    Oblique,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextDecorationLineValue(u8);
+
+impl TextDecorationLineValue {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const UNDERLINE: Self = Self(1);
+    pub(crate) const OVERLINE: Self = Self(2);
+    pub(crate) const LINE_THROUGH: Self = Self(4);
+
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WhiteSpaceValue {
+    Normal,
+    NoWrap,
+    Pre,
+    PreWrap,
+    PreLine,
+    BreakSpaces,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverflowWrapValue {
+    Normal,
+    BreakWord,
+    Anywhere,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WordBreakValue {
+    Normal,
+    BreakAll,
+    KeepAll,
+}
+
 impl From<Px> for SizeValue {
     fn from(value: Px) -> Self {
         Self::Px(value.value())

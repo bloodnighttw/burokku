@@ -2,8 +2,9 @@ use std::borrow::Cow;
 
 use super::{
     AlignContent, AlignItems, BorderStyle, BoxSizing, Color, CornerRadiusValue, Display,
-    FlexDirection, FlexWrap, Isolation, LengthPercentageValue, LengthValue, LineHeightValue,
-    MaxSizeValue, Overflow, Position, SizeValue, Style, ZIndex,
+    FlexDirection, FlexWrap, FontStyleValue, Isolation, LengthPercentageValue, LengthValue,
+    LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue, Position, SizeValue, Style,
+    TextAlignValue, TextDecorationLineValue, WhiteSpaceValue, WordBreakValue, ZIndex,
 };
 use taffy::style::{
     GridAutoTracks, GridPlacement, GridTemplateArea, GridTemplateComponent, GridTemplateTracks,
@@ -316,7 +317,72 @@ pub(crate) fn set_style(
                     .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))?,
             });
         }
-        "font-family" => style.font_family = Some(value.trim_matches(['\'', '"']).into()),
+        "font-family" => style.font_families = Some(parse_font_families(name, value)?),
+        "font-style" => {
+            style.font_style = Some(match value {
+                "normal" => FontStyleValue::Normal,
+                "italic" => FontStyleValue::Italic,
+                "oblique" => FontStyleValue::Oblique,
+                _ => return invalid(name, value),
+            })
+        }
+        "text-align" => {
+            style.text_align = Some(match value {
+                "start" => TextAlignValue::Start,
+                "end" => TextAlignValue::End,
+                "left" => TextAlignValue::Left,
+                "right" => TextAlignValue::Right,
+                "center" => TextAlignValue::Center,
+                "justify" => TextAlignValue::Justify,
+                _ => return invalid(name, value),
+            })
+        }
+        "letter-spacing" => {
+            style.letter_spacing = Some(if value == "normal" {
+                LengthValue::ZERO
+            } else {
+                parse_length_value(name, value, true)?
+            })
+        }
+        "word-spacing" => {
+            style.word_spacing = Some(if value == "normal" {
+                LengthValue::ZERO
+            } else {
+                parse_length_value(name, value, true)?
+            })
+        }
+        "text-decoration" => parse_text_decoration(style, name, value)?,
+        "text-decoration-line" => {
+            style.text_decoration_line = Some(parse_text_decoration_line(name, value)?)
+        }
+        "text-decoration-color" => style.text_decoration_color = Some(parse_color(name, value)?),
+        "white-space" => {
+            style.white_space = Some(match value {
+                "normal" => WhiteSpaceValue::Normal,
+                "nowrap" => WhiteSpaceValue::NoWrap,
+                "pre" => WhiteSpaceValue::Pre,
+                "pre-wrap" => WhiteSpaceValue::PreWrap,
+                "pre-line" => WhiteSpaceValue::PreLine,
+                "break-spaces" => WhiteSpaceValue::BreakSpaces,
+                _ => return invalid(name, value),
+            })
+        }
+        "overflow-wrap" | "word-wrap" => {
+            style.overflow_wrap = Some(match value {
+                "normal" => OverflowWrapValue::Normal,
+                "break-word" => OverflowWrapValue::BreakWord,
+                "anywhere" => OverflowWrapValue::Anywhere,
+                _ => return invalid(name, value),
+            })
+        }
+        "word-break" => {
+            style.word_break = Some(match value {
+                "normal" => WordBreakValue::Normal,
+                "break-all" => WordBreakValue::BreakAll,
+                "keep-all" => WordBreakValue::KeepAll,
+                _ => return invalid(name, value),
+            })
+        }
         _ => return Err(StyleError::UnsupportedProperty(name.into())),
     }
 
@@ -475,11 +541,111 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
         "font-size" => reset!(font_size),
         "line-height" => reset!(line_height),
         "font-weight" => reset!(font_weight),
-        "font-family" => reset!(font_family),
+        "font-family" => reset!(font_families),
+        "font-style" => reset!(font_style),
+        "text-align" => reset!(text_align),
+        "letter-spacing" => reset!(letter_spacing),
+        "word-spacing" => reset!(word_spacing),
+        "text-decoration" => {
+            reset!(text_decoration_line);
+            reset!(text_decoration_color);
+        }
+        "text-decoration-line" => reset!(text_decoration_line),
+        "text-decoration-color" => reset!(text_decoration_color),
+        "white-space" => reset!(white_space),
+        "overflow-wrap" | "word-wrap" => reset!(overflow_wrap),
+        "word-break" => reset!(word_break),
         _ => return Err(StyleError::UnsupportedProperty(name.into())),
     }
 
     Ok(())
+}
+
+fn parse_font_families(name: &str, value: &str) -> Result<Vec<String>, StyleError> {
+    let mut families = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    for (index, character) in value.char_indices() {
+        match (quote, character) {
+            (Some(expected), actual) if actual == expected => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, ',') => {
+                let family = value[start..index].trim().trim_matches(['\'', '"']).trim();
+                if family.is_empty() {
+                    return invalid(name, value);
+                }
+                families.push(family.to_owned());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return invalid(name, value);
+    }
+    let family = value[start..].trim().trim_matches(['\'', '"']).trim();
+    if family.is_empty() {
+        return invalid(name, value);
+    }
+    families.push(family.to_owned());
+    Ok(families)
+}
+
+fn parse_text_decoration(style: &mut Style, name: &str, value: &str) -> Result<(), StyleError> {
+    let mut line = TextDecorationLineValue::NONE;
+    let mut saw_line = false;
+    let mut color = None;
+    for token in value.split_ascii_whitespace() {
+        let flag = match token {
+            "none" if !saw_line => {
+                saw_line = true;
+                TextDecorationLineValue::NONE
+            }
+            "underline" => TextDecorationLineValue::UNDERLINE,
+            "overline" => TextDecorationLineValue::OVERLINE,
+            "line-through" => TextDecorationLineValue::LINE_THROUGH,
+            _ if color.is_none() => {
+                color = Some(parse_color(name, token)?);
+                continue;
+            }
+            _ => return invalid(name, value),
+        };
+        if token != "none" {
+            saw_line = true;
+            line = line.union(flag);
+        }
+    }
+    if !saw_line {
+        return invalid(name, value);
+    }
+    style.text_decoration_line = Some(line);
+    if let Some(color) = color {
+        style.text_decoration_color = Some(color);
+    }
+    Ok(())
+}
+
+fn parse_text_decoration_line(
+    name: &str,
+    value: &str,
+) -> Result<TextDecorationLineValue, StyleError> {
+    let mut line = TextDecorationLineValue::NONE;
+    let mut saw_value = false;
+    for token in value.split_ascii_whitespace() {
+        let flag = match token {
+            "none" if !saw_value => TextDecorationLineValue::NONE,
+            "underline" => TextDecorationLineValue::UNDERLINE,
+            "overline" => TextDecorationLineValue::OVERLINE,
+            "line-through" => TextDecorationLineValue::LINE_THROUGH,
+            _ => return invalid(name, value),
+        };
+        saw_value = true;
+        line = line.union(flag);
+    }
+    if !saw_value {
+        return invalid(name, value);
+    }
+    Ok(line)
 }
 
 fn normalized_name(name: &str) -> Cow<'_, str> {
@@ -1195,6 +1361,48 @@ mod tests {
         assert_eq!(style.margin_bottom, SizeValue::Px(20.0));
         assert_eq!(style.margin_left, SizeValue::Auto);
         assert_eq!(style.align_items, Some(AlignItems::CENTER));
+    }
+
+    #[test]
+    fn parses_typography_properties_and_font_fallbacks() {
+        let mut style = Style::default();
+        set_style(
+            &mut style,
+            "font-family",
+            Some("\"Inter\", Noto Sans, sans-serif"),
+        )
+        .unwrap();
+        set_style(&mut style, "font-style", Some("italic")).unwrap();
+        set_style(&mut style, "text-align", Some("center")).unwrap();
+        set_style(&mut style, "letter-spacing", Some("-0.5px")).unwrap();
+        set_style(&mut style, "word-spacing", Some("3px")).unwrap();
+        set_style(
+            &mut style,
+            "text-decoration",
+            Some("underline line-through red"),
+        )
+        .unwrap();
+        set_style(&mut style, "white-space", Some("pre-wrap")).unwrap();
+        set_style(&mut style, "overflow-wrap", Some("anywhere")).unwrap();
+
+        assert_eq!(
+            style.font_families,
+            Some(vec![
+                "Inter".to_owned(),
+                "Noto Sans".to_owned(),
+                "sans-serif".to_owned()
+            ])
+        );
+        assert_eq!(style.font_style, Some(FontStyleValue::Italic));
+        assert_eq!(style.text_align, Some(TextAlignValue::Center));
+        assert_eq!(style.letter_spacing, Some(LengthValue::Px(-0.5)));
+        assert_eq!(style.word_spacing, Some(LengthValue::Px(3.0)));
+        let decoration = style.text_decoration_line.unwrap();
+        assert!(decoration.contains(TextDecorationLineValue::UNDERLINE));
+        assert!(decoration.contains(TextDecorationLineValue::LINE_THROUGH));
+        assert_eq!(style.text_decoration_color, Some([255, 0, 0, 255]));
+        assert_eq!(style.white_space, Some(WhiteSpaceValue::PreWrap));
+        assert_eq!(style.overflow_wrap, Some(OverflowWrapValue::Anywhere));
     }
 
     #[test]
