@@ -1,16 +1,16 @@
 use std::{error::Error, sync::Arc};
 
-use render::{wgpu, Canvas, RenderError, Renderer, SurfaceSize, TextSystem};
+use render::{wgpu, RenderError, Renderer, SurfaceSize, TextSystem};
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::ui::{self, Document, UiStore};
+use crate::ui::{self, Document, UiFrame, UiStore};
 
 /// The WebGPU state used by the application window.
 #[allow(clippy::upper_case_acronyms)]
 pub struct GPU {
     surface: wgpu::Surface<'static>,
     renderer: Renderer,
-    canvas: Canvas,
+    frame: UiFrame,
     text_system: TextSystem,
     store: UiStore,
     ui_version: u64,
@@ -32,12 +32,12 @@ impl GPU {
 
         let mut text_system = TextSystem::new();
         let (ui_version, snapshot) = store.snapshot_with_version();
-        let canvas = build_canvas(&snapshot, size, window.scale_factor(), &mut text_system);
+        let frame = build_frame(&snapshot, size, window.scale_factor(), &mut text_system);
 
         Ok(Self {
             surface,
             renderer,
-            canvas,
+            frame,
             text_system,
             store,
             ui_version,
@@ -49,7 +49,7 @@ impl GPU {
         self.renderer
             .resize(&self.surface, SurfaceSize::new(size.width, size.height));
         let (ui_version, snapshot) = self.store.snapshot_with_version();
-        self.canvas = build_canvas(&snapshot, size, scale_factor, &mut self.text_system);
+        self.frame = build_frame(&snapshot, size, scale_factor, &mut self.text_system);
         self.ui_version = ui_version;
     }
 
@@ -57,7 +57,7 @@ impl GPU {
         let Some((version, snapshot)) = self.store.snapshot_if_changed(self.ui_version) else {
             return false;
         };
-        self.canvas = build_canvas(
+        self.frame = build_frame(
             &snapshot,
             window.inner_size(),
             window.scale_factor(),
@@ -70,21 +70,27 @@ impl GPU {
     pub fn render(&mut self, window: &Window) -> Result<(), RenderError> {
         self.renderer.render_with_pre_present(
             &self.surface,
-            &self.canvas,
+            &self.frame.canvas,
             &mut self.text_system,
             || window.pre_present_notify(),
         )
     }
+
+    /// The current logical layout, retained for hit testing and input routing.
+    #[allow(dead_code)]
+    pub fn layout(&self) -> &ui::layouts::Layout {
+        &self.frame.layout
+    }
 }
 
-fn build_canvas(
+fn build_frame(
     document: &Document,
     size: PhysicalSize<u32>,
     scale_factor: f64,
     text_system: &mut TextSystem,
-) -> Canvas {
+) -> UiFrame {
     let scale_factor = scale_factor as f32;
-    ui::build_canvas(
+    ui::build_frame(
         document,
         size.width as f32 / scale_factor,
         size.height as f32 / scale_factor,

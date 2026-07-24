@@ -7,7 +7,7 @@ pub mod layouts;
 
 pub use bridge::install;
 pub use elements::{Document, DocumentError, ElementKind};
-pub use render::build_canvas;
+pub use render::{build_canvas, build_frame, UiFrame};
 pub use store::UiStore;
 
 #[cfg(test)]

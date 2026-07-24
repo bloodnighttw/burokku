@@ -5,14 +5,21 @@ use super::{
     layouts::{compute_layout, Layout, LayoutKind},
 };
 
-/// Computes the document layout and converts it into renderer drawing commands.
-pub fn build_canvas(
+/// The computed UI geometry and the drawing commands produced from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiFrame {
+    pub layout: Layout,
+    pub canvas: Canvas,
+}
+
+/// Computes and preserves the document layout while building drawing commands.
+pub fn build_frame(
     document: &Document,
     viewport_width: f32,
     viewport_height: f32,
     scale_factor: f32,
     text_system: &mut TextSystem,
-) -> Canvas {
+) -> UiFrame {
     let layout = compute_layout(
         document,
         viewport_width.max(0.0),
@@ -22,7 +29,25 @@ pub fn build_canvas(
     let scale_factor = scale_factor.max(f32::EPSILON);
     let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
     paint_layout(&layout, scale_factor, &mut canvas);
-    canvas
+    UiFrame { layout, canvas }
+}
+
+/// Computes the document layout and converts it into renderer drawing commands.
+pub fn build_canvas(
+    document: &Document,
+    viewport_width: f32,
+    viewport_height: f32,
+    scale_factor: f32,
+    text_system: &mut TextSystem,
+) -> Canvas {
+    build_frame(
+        document,
+        viewport_width,
+        viewport_height,
+        scale_factor,
+        text_system,
+    )
+    .canvas
 }
 
 fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
@@ -101,6 +126,23 @@ mod tests {
         let canvas = build_canvas(&document, 800.0, 600.0, 1.0, &mut TextSystem::new());
 
         assert_eq!(canvas.commands().len(), 2);
+    }
+
+    #[test]
+    fn frame_preserves_the_layout_used_to_build_the_canvas() {
+        let mut document = Document::new();
+        let card = document.create_node(ElementKind::Div);
+        document.set_style(card, "width", Some("100px")).unwrap();
+        document.set_style(card, "height", Some("50px")).unwrap();
+        document
+            .set_style(card, "background-color", Some("#ffffff"))
+            .unwrap();
+        document.insert(BODY_ID, card, None).unwrap();
+
+        let frame = build_frame(&document, 800.0, 600.0, 1.0, &mut TextSystem::new());
+
+        assert_eq!(frame.layout.kind.children()[0].element_id(), card);
+        assert_eq!(frame.canvas.commands().len(), 1);
     }
 
     #[test]
