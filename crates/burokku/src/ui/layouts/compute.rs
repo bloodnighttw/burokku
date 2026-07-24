@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, Outline, Rect as RenderRect,
-    TextConstraints, TextStyle, TextSystem,
+    Border, BorderSide, BorderStyle as RenderBorderStyle, BoxStyle, Clip, Color, CornerRadius,
+    CornerSize, FontFamily, Outline, Rect as RenderRect, TextConstraints, TextStyle, TextSystem,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -23,8 +23,9 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        Color as ElementColor, LengthPercentageValue, LineHeightValue, MaxSizeValue,
-        Overflow as ElementOverflow, SizeValue, Style as ElementStyle,
+        BorderStyle as ElementBorderStyle, Color as ElementColor, CornerRadiusValue,
+        LengthPercentageValue, LineHeightValue, MaxSizeValue, Overflow as ElementOverflow,
+        Position as ElementPosition, SizeValue, Style as ElementStyle,
     },
     Document, ElementKind, BODY_ID,
 };
@@ -65,7 +66,13 @@ pub(super) fn compute_layout_with_scroll(
         height: viewport_height.max(0.0),
     };
     let mut nodes = Vec::new();
-    let root = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
+    let root = add_element(
+        &mut nodes,
+        document,
+        BODY_ID,
+        &TextStyle::default(),
+        viewport,
+    );
     nodes[root].style.size = Size {
         width: Dimension::length(viewport.width),
         height: Dimension::length(viewport.height),
@@ -86,6 +93,7 @@ pub(super) fn compute_layout_with_scroll(
         Point::ZERO,
         &[],
         RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
+        RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
     )
 }
 
@@ -94,6 +102,7 @@ fn add_element(
     document: &Document,
     element_id: u64,
     inherited_text_style: &TextStyle,
+    viewport: Size<f32>,
 ) -> usize {
     let element = document
         .node(element_id)
@@ -103,7 +112,7 @@ fn add_element(
     nodes.push(LayoutNode {
         element_id,
         kind: element.kind.clone(),
-        style: to_taffy_style(&element.kind, &element.style),
+        style: to_taffy_style(&element.kind, &element.style, viewport),
         paint_style: element.style.clone(),
         text_style: text_style.clone(),
         children: Vec::with_capacity(element.children.len()),
@@ -114,7 +123,7 @@ fn add_element(
     let children = element
         .children
         .iter()
-        .map(|child| add_element(nodes, document, *child, &text_style))
+        .map(|child| add_element(nodes, document, *child, &text_style, viewport))
         .collect();
     nodes[node_id].children = children;
     node_id
@@ -216,15 +225,33 @@ impl ElementLayoutTree<'_> {
         parent_location: Point<f32>,
         ancestor_clips: &[Clip],
         viewport: RenderRect,
+        positioned_ancestor: RenderRect,
     ) -> Layout {
         let data = &self.nodes[node];
-        let location = Point {
+        let taffy_location = Point {
             x: parent_location.x + data.layout.location.x,
             y: parent_location.y + data.layout.location.y,
         };
         let width = data.layout.size.width;
         let height = data.layout.size.height;
-        let mut descendant_clips = ancestor_clips.to_vec();
+        let containing_block = if data.paint_style.position == ElementPosition::Fixed {
+            viewport
+        } else {
+            positioned_ancestor
+        };
+        let location = positioned_location(
+            &data.paint_style,
+            taffy_location,
+            width,
+            height,
+            containing_block,
+        );
+        let own_ancestor_clips = if data.paint_style.position == ElementPosition::Fixed {
+            &[][..]
+        } else {
+            ancestor_clips
+        };
+        let mut descendant_clips = own_ancestor_clips.to_vec();
         let own_clip = overflow_clip(data, location, width, height, viewport);
         if let Some(clip) = own_clip {
             descendant_clips.push(clip);
@@ -267,10 +294,25 @@ impl ElementLayoutTree<'_> {
                     x: location.x - offset.x,
                     y: location.y - offset.y,
                 };
+                let own_positioned_box = padding_box(data, location, width, height);
+                let child_positioned_ancestor =
+                    if data.paint_style.position == ElementPosition::Static {
+                        translated_rect(positioned_ancestor, -offset.x, -offset.y)
+                    } else {
+                        translated_rect(own_positioned_box, -offset.x, -offset.y)
+                    };
                 let mut children: Vec<_> = data
                     .children
                     .iter()
-                    .map(|child| self.to_layout(*child, child_parent, &descendant_clips, viewport))
+                    .map(|child| {
+                        self.to_layout(
+                            *child,
+                            child_parent,
+                            &descendant_clips,
+                            viewport,
+                            child_positioned_ancestor,
+                        )
+                    })
                     .collect();
                 let scroll_viewport = padding_box(data, location, width, height);
                 let (content_width, content_height) =
@@ -295,11 +337,23 @@ impl ElementLayoutTree<'_> {
                         x: location.x - offset.x,
                         y: location.y - offset.y,
                     };
+                    let child_positioned_ancestor =
+                        if data.paint_style.position == ElementPosition::Static {
+                            translated_rect(positioned_ancestor, -offset.x, -offset.y)
+                        } else {
+                            translated_rect(own_positioned_box, -offset.x, -offset.y)
+                        };
                     children = data
                         .children
                         .iter()
                         .map(|child| {
-                            self.to_layout(*child, child_parent, &descendant_clips, viewport)
+                            self.to_layout(
+                                *child,
+                                child_parent,
+                                &descendant_clips,
+                                viewport,
+                                child_positioned_ancestor,
+                            )
                         })
                         .collect();
                 }
@@ -332,11 +386,86 @@ impl ElementLayoutTree<'_> {
             y: location.y,
             width,
             height,
-            clips: ancestor_clips.to_vec(),
+            clips: own_ancestor_clips.to_vec(),
             scroll,
+            is_fixed: data.paint_style.position == ElementPosition::Fixed,
             kind,
         }
     }
+}
+
+fn positioned_location(
+    style: &ElementStyle,
+    fallback: Point<f32>,
+    width: f32,
+    height: f32,
+    containing_block: RenderRect,
+) -> Point<f32> {
+    if matches!(
+        style.position,
+        ElementPosition::Static | ElementPosition::Relative
+    ) {
+        return fallback;
+    }
+    Point {
+        x: positioned_axis(
+            style.left,
+            style.right,
+            style.margin_left,
+            style.margin_right,
+            containing_block.x,
+            containing_block.width,
+            width,
+        )
+        .unwrap_or(fallback.x),
+        y: positioned_axis(
+            style.top,
+            style.bottom,
+            style.margin_top,
+            style.margin_bottom,
+            containing_block.y,
+            containing_block.height,
+            height,
+        )
+        .unwrap_or(fallback.y),
+    }
+}
+
+fn positioned_axis(
+    start: SizeValue,
+    end: SizeValue,
+    start_margin: SizeValue,
+    end_margin: SizeValue,
+    origin: f32,
+    containing_size: f32,
+    own_size: f32,
+) -> Option<f32> {
+    resolve_position(start, containing_size)
+        .map(|offset| origin + offset + resolve_margin(start_margin, containing_size))
+        .or_else(|| {
+            resolve_position(end, containing_size).map(|offset| {
+                origin + containing_size
+                    - offset
+                    - own_size
+                    - resolve_margin(end_margin, containing_size)
+            })
+        })
+}
+
+fn resolve_position(value: SizeValue, basis: f32) -> Option<f32> {
+    match value {
+        SizeValue::Auto => None,
+        SizeValue::Px(value) => Some(value),
+        SizeValue::Percent(value) => Some(basis * value / 100.0),
+    }
+}
+
+fn resolve_margin(value: SizeValue, basis: f32) -> f32 {
+    resolve_position(value, basis).unwrap_or(0.0)
+}
+
+fn translated_rect(rect: RenderRect, x: f32, y: f32) -> RenderRect {
+    RenderRect::new(rect.x + x, rect.y + y, rect.width, rect.height)
 }
 
 fn padding_box(data: &LayoutNode, location: Point<f32>, width: f32, height: f32) -> RenderRect {
@@ -354,7 +483,7 @@ fn scroll_content_size(
     viewport: RenderRect,
     offset: ScrollOffset,
 ) -> (f32, f32) {
-    children.iter().fold(
+    children.iter().filter(|child| !child.is_fixed).fold(
         (viewport.width, viewport.height),
         |(width, height), child| {
             (
@@ -507,11 +636,23 @@ fn overflow_clip(
     );
     let corner_radius = if clips_x && clips_y {
         let outer = box_style(&data.paint_style, width, height).corner_radius;
-        CornerRadius::new(
-            (outer.top_left - border.left.max(border.top)).max(0.0),
-            (outer.top_right - border.right.max(border.top)).max(0.0),
-            (outer.bottom_right - border.right.max(border.bottom)).max(0.0),
-            (outer.bottom_left - border.left.max(border.bottom)).max(0.0),
+        CornerRadius::elliptical(
+            CornerSize::new(
+                (outer.top_left.x - border.left).max(0.0),
+                (outer.top_left.y - border.top).max(0.0),
+            ),
+            CornerSize::new(
+                (outer.top_right.x - border.right).max(0.0),
+                (outer.top_right.y - border.top).max(0.0),
+            ),
+            CornerSize::new(
+                (outer.bottom_right.x - border.right).max(0.0),
+                (outer.bottom_right.y - border.bottom).max(0.0),
+            ),
+            CornerSize::new(
+                (outer.bottom_left.x - border.left).max(0.0),
+                (outer.bottom_left.y - border.bottom).max(0.0),
+            ),
         )
     } else {
         CornerRadius::ZERO
@@ -648,7 +789,7 @@ impl LayoutGridContainer for ElementLayoutTree<'_> {
     }
 }
 
-fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
+fn to_taffy_style(kind: &ElementKind, style: &ElementStyle, viewport: Size<f32>) -> TaffyStyle {
     TaffyStyle {
         display: if matches!(kind, ElementKind::Comment(_)) {
             Display::None
@@ -656,28 +797,56 @@ fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
             style.display
         },
         box_sizing: style.box_sizing,
-        position: style.position,
+        position: match style.position {
+            ElementPosition::Static | ElementPosition::Relative => taffy::style::Position::Relative,
+            ElementPosition::Absolute | ElementPosition::Fixed => taffy::style::Position::Absolute,
+        },
         overflow: Point {
             x: taffy_overflow(style.overflow_x),
             y: taffy_overflow(style.overflow_y),
         },
-        inset: Rect {
-            left: length_percentage_auto(style.left),
-            right: length_percentage_auto(style.right),
-            top: length_percentage_auto(style.top),
-            bottom: length_percentage_auto(style.bottom),
+        inset: if style.position == ElementPosition::Static {
+            Rect {
+                left: LengthPercentageAuto::AUTO,
+                right: LengthPercentageAuto::AUTO,
+                top: LengthPercentageAuto::AUTO,
+                bottom: LengthPercentageAuto::AUTO,
+            }
+        } else {
+            Rect {
+                left: length_percentage_auto(style.left),
+                right: length_percentage_auto(style.right),
+                top: length_percentage_auto(style.top),
+                bottom: length_percentage_auto(style.bottom),
+            }
         },
         size: Size {
-            width: dimension(style.width),
-            height: dimension(style.height),
+            width: fixed_size_dimension(
+                style.width,
+                style.left,
+                style.right,
+                style.margin_left,
+                style.margin_right,
+                viewport.width,
+                style.position,
+            ),
+            height: fixed_size_dimension(
+                style.height,
+                style.top,
+                style.bottom,
+                style.margin_top,
+                style.margin_bottom,
+                viewport.height,
+                style.position,
+            ),
         },
         min_size: Size {
-            width: dimension(style.min_width),
-            height: dimension(style.min_height),
+            width: positioned_dimension(style.min_width, viewport.width, style.position),
+            height: positioned_dimension(style.min_height, viewport.height, style.position),
         },
         max_size: Size {
-            width: max_dimension(style.max_width),
-            height: max_dimension(style.max_height),
+            width: positioned_max_dimension(style.max_width, viewport.width, style.position),
+            height: positioned_max_dimension(style.max_height, viewport.height, style.position),
         },
         aspect_ratio: style.aspect_ratio,
         margin: Rect {
@@ -693,10 +862,22 @@ fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
             bottom: length_percentage(style.padding_bottom),
         },
         border: Rect {
-            left: LengthPercentage::length(style.border_left_width.px()),
-            right: LengthPercentage::length(style.border_right_width.px()),
-            top: LengthPercentage::length(style.border_top_width.px()),
-            bottom: LengthPercentage::length(style.border_bottom_width.px()),
+            left: LengthPercentage::length(effective_border_width(
+                style.border_left_width.px(),
+                style.border_left_style,
+            )),
+            right: LengthPercentage::length(effective_border_width(
+                style.border_right_width.px(),
+                style.border_right_style,
+            )),
+            top: LengthPercentage::length(effective_border_width(
+                style.border_top_width.px(),
+                style.border_top_style,
+            )),
+            bottom: LengthPercentage::length(effective_border_width(
+                style.border_bottom_width.px(),
+                style.border_bottom_style,
+            )),
         },
         align_content: style.align_content,
         align_items: style.align_items,
@@ -723,6 +904,44 @@ fn dimension(value: SizeValue) -> Dimension {
     }
 }
 
+fn positioned_dimension(value: SizeValue, viewport: f32, position: ElementPosition) -> Dimension {
+    if position == ElementPosition::Fixed {
+        match value {
+            SizeValue::Percent(value) => Dimension::length(viewport * value / 100.0),
+            _ => dimension(value),
+        }
+    } else {
+        dimension(value)
+    }
+}
+
+fn fixed_size_dimension(
+    value: SizeValue,
+    start: SizeValue,
+    end: SizeValue,
+    start_margin: SizeValue,
+    end_margin: SizeValue,
+    viewport: f32,
+    position: ElementPosition,
+) -> Dimension {
+    if position == ElementPosition::Fixed && value == SizeValue::Auto {
+        if let (Some(start), Some(end)) = (
+            resolve_position(start, viewport),
+            resolve_position(end, viewport),
+        ) {
+            return Dimension::length(
+                (viewport
+                    - start
+                    - end
+                    - resolve_margin(start_margin, viewport)
+                    - resolve_margin(end_margin, viewport))
+                .max(0.0),
+            );
+        }
+    }
+    positioned_dimension(value, viewport, position)
+}
+
 fn taffy_overflow(value: ElementOverflow) -> taffy::style::Overflow {
     match value {
         ElementOverflow::Visible => taffy::style::Overflow::Visible,
@@ -737,6 +956,21 @@ fn max_dimension(value: MaxSizeValue) -> Dimension {
         MaxSizeValue::None => Dimension::AUTO,
         MaxSizeValue::Px(value) => Dimension::length(value),
         MaxSizeValue::Percent(value) => Dimension::percent(value / 100.0),
+    }
+}
+
+fn positioned_max_dimension(
+    value: MaxSizeValue,
+    viewport: f32,
+    position: ElementPosition,
+) -> Dimension {
+    if position == ElementPosition::Fixed {
+        match value {
+            MaxSizeValue::Percent(value) => Dimension::length(viewport * value / 100.0),
+            _ => max_dimension(value),
+        }
+    } else {
+        max_dimension(value)
     }
 }
 
@@ -785,27 +1019,42 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
 
 fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
     let border_widths = [
-        style.border_top_width.px(),
-        style.border_right_width.px(),
-        style.border_bottom_width.px(),
-        style.border_left_width.px(),
+        effective_border_width(style.border_top_width.px(), style.border_top_style),
+        effective_border_width(style.border_right_width.px(), style.border_right_style),
+        effective_border_width(style.border_bottom_width.px(), style.border_bottom_style),
+        effective_border_width(style.border_left_width.px(), style.border_left_style),
     ];
 
     BoxStyle {
         background: style.background_color.map_or(Color::TRANSPARENT, rgba),
-        corner_radius: CornerRadius::new(
+        corner_radius: CornerRadius::elliptical(
             radius(style.border_top_left_radius, width, height),
             radius(style.border_top_right_radius, width, height),
             radius(style.border_bottom_right_radius, width, height),
             radius(style.border_bottom_left_radius, width, height),
         ),
         border: border_widths.iter().any(|width| *width > 0.0).then(|| {
-            Border::per_side(
-                border_widths[0],
-                border_widths[1],
-                border_widths[2],
-                border_widths[3],
-                style.border_color.map_or(Color::BLACK, rgba),
+            Border::sides(
+                border_side(
+                    border_widths[0],
+                    style.border_top_color,
+                    style.border_top_style,
+                ),
+                border_side(
+                    border_widths[1],
+                    style.border_right_color,
+                    style.border_right_style,
+                ),
+                border_side(
+                    border_widths[2],
+                    style.border_bottom_color,
+                    style.border_bottom_style,
+                ),
+                border_side(
+                    border_widths[3],
+                    style.border_left_color,
+                    style.border_left_style,
+                ),
             )
         }),
         outline: (style.outline_width.px() > 0.0).then(|| {
@@ -818,11 +1067,45 @@ fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
     }
 }
 
-fn radius(value: LengthPercentageValue, width: f32, height: f32) -> f32 {
+fn radius(value: CornerRadiusValue, width: f32, height: f32) -> CornerSize {
+    CornerSize::new(
+        resolve_radius(value.horizontal, width),
+        resolve_radius(value.vertical, height),
+    )
+}
+
+fn resolve_radius(value: LengthPercentageValue, basis: f32) -> f32 {
     match value {
         LengthPercentageValue::Px(value) => value,
-        LengthPercentageValue::Percent(value) => width.min(height) * value / 100.0,
+        LengthPercentageValue::Percent(value) => basis * value / 100.0,
     }
+}
+
+fn effective_border_width(width: f32, style: ElementBorderStyle) -> f32 {
+    if matches!(style, ElementBorderStyle::None | ElementBorderStyle::Hidden) {
+        0.0
+    } else {
+        width
+    }
+}
+
+fn border_side(width: f32, color: Option<ElementColor>, style: ElementBorderStyle) -> BorderSide {
+    BorderSide::new(
+        width,
+        color.map_or(Color::BLACK, rgba),
+        match style {
+            ElementBorderStyle::None => RenderBorderStyle::None,
+            ElementBorderStyle::Hidden => RenderBorderStyle::Hidden,
+            ElementBorderStyle::Dotted => RenderBorderStyle::Dotted,
+            ElementBorderStyle::Dashed => RenderBorderStyle::Dashed,
+            ElementBorderStyle::Solid => RenderBorderStyle::Solid,
+            ElementBorderStyle::Double => RenderBorderStyle::Double,
+            ElementBorderStyle::Groove => RenderBorderStyle::Groove,
+            ElementBorderStyle::Ridge => RenderBorderStyle::Ridge,
+            ElementBorderStyle::Inset => RenderBorderStyle::Inset,
+            ElementBorderStyle::Outset => RenderBorderStyle::Outset,
+        },
+    )
 }
 
 fn rgba(color: ElementColor) -> Color {
@@ -927,5 +1210,159 @@ mod tests {
             StackingLayer::new(Some(-7), false)
         );
         assert_eq!(children[1].stacking_layer(), StackingLayer::new(None, true));
+    }
+
+    #[test]
+    fn static_ignores_insets_while_relative_offsets_its_flow_position() {
+        let mut document = Document::new();
+        let static_box = document.create_node(ElementKind::Div);
+        let relative_box = document.create_node(ElementKind::Div);
+        for element in [static_box, relative_box] {
+            document.set_style(element, "width", Some("20px")).unwrap();
+            document.set_style(element, "height", Some("20px")).unwrap();
+            document.set_style(element, "left", Some("15px")).unwrap();
+            document.set_style(element, "top", Some("10px")).unwrap();
+            document.insert(BODY_ID, element, None).unwrap();
+        }
+        document
+            .set_style(relative_box, "position", Some("relative"))
+            .unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let children = layout.children();
+
+        assert_eq!((children[0].x, children[0].y), (0.0, 0.0));
+        assert_eq!((children[1].x, children[1].y), (15.0, 30.0));
+    }
+
+    #[test]
+    fn absolute_insets_use_the_nearest_positioned_ancestor() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let static_wrapper = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        document
+            .set_style(positioned, "position", Some("relative"))
+            .unwrap();
+        document
+            .set_style(positioned, "margin-left", Some("30px"))
+            .unwrap();
+        document
+            .set_style(positioned, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(positioned, "height", Some("100px"))
+            .unwrap();
+        document
+            .set_style(static_wrapper, "margin-left", Some("20px"))
+            .unwrap();
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document.set_style(absolute, "left", Some("5px")).unwrap();
+        document.set_style(absolute, "top", Some("7px")).unwrap();
+        document.set_style(absolute, "width", Some("10px")).unwrap();
+        document
+            .set_style(absolute, "height", Some("10px"))
+            .unwrap();
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, static_wrapper, None).unwrap();
+        document.insert(static_wrapper, absolute, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 150.0, &mut TextSystem::new());
+        let absolute = &layout.children()[0].children()[0].children()[0];
+
+        assert_eq!((absolute.x, absolute.y), (35.0, 7.0));
+    }
+
+    #[test]
+    fn fixed_insets_and_percent_sizes_use_the_viewport() {
+        let mut document = Document::new();
+        let wrapper = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        let stretched = document.create_node(ElementKind::Div);
+        document
+            .set_style(wrapper, "margin-left", Some("40px"))
+            .unwrap();
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document.set_style(fixed, "right", Some("10px")).unwrap();
+        document.set_style(fixed, "bottom", Some("15px")).unwrap();
+        document.set_style(fixed, "width", Some("50%")).unwrap();
+        document.set_style(fixed, "height", Some("20px")).unwrap();
+        document
+            .set_style(stretched, "position", Some("fixed"))
+            .unwrap();
+        document.set_style(stretched, "left", Some("10px")).unwrap();
+        document
+            .set_style(stretched, "right", Some("20px"))
+            .unwrap();
+        document.set_style(stretched, "top", Some("0")).unwrap();
+        document
+            .set_style(stretched, "height", Some("10px"))
+            .unwrap();
+        document.insert(BODY_ID, wrapper, None).unwrap();
+        document.insert(wrapper, fixed, None).unwrap();
+        document.insert(wrapper, stretched, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+        let stretched = &layout.children()[0].children()[1];
+
+        assert_eq!(
+            (fixed.x, fixed.y, fixed.width, fixed.height),
+            (90.0, 65.0, 100.0, 20.0)
+        );
+        assert!(fixed.clips.is_empty());
+        assert_eq!((stretched.x, stretched.width), (10.0, 170.0));
+    }
+
+    #[test]
+    fn fixed_descendants_do_not_move_with_a_scroll_container() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        document
+            .set_style(container, "position", Some("relative"))
+            .unwrap();
+        document
+            .set_style(container, "overflow", Some("scroll"))
+            .unwrap();
+        document
+            .set_style(container, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(container, "height", Some("60px"))
+            .unwrap();
+        document.set_style(content, "width", Some("300px")).unwrap();
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document.set_style(fixed, "left", Some("7px")).unwrap();
+        document.set_style(fixed, "top", Some("5px")).unwrap();
+        document.set_style(fixed, "width", Some("20px")).unwrap();
+        document.set_style(fixed, "height", Some("10px")).unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, content, None).unwrap();
+        document.insert(container, fixed, None).unwrap();
+        let mut offsets = HashMap::new();
+        offsets.insert(container, ScrollOffset::new(40.0, 30.0));
+
+        let mut layout =
+            compute_layout_with_scroll(&document, 200.0, 100.0, &mut TextSystem::new(), &offsets);
+        let fixed_before = {
+            let fixed = &layout.children()[0].children()[1];
+            (fixed.x, fixed.y)
+        };
+        assert_eq!(fixed_before, (7.0, 5.0));
+
+        assert!(layout.apply_scroll_offset(container, ScrollOffset::new(60.0, 50.0)));
+        let fixed = &layout.children()[0].children()[1];
+        assert_eq!((fixed.x, fixed.y), fixed_before);
     }
 }

@@ -58,6 +58,7 @@ pub struct Layout {
     pub clips: Vec<Clip>,
     /// Scroll geometry when this box establishes a scroll container.
     pub scroll: Option<ScrollContainer>,
+    pub(crate) is_fixed: bool,
     pub kind: LayoutKind,
 }
 
@@ -235,6 +236,9 @@ impl Layout {
         translation: ScrollOffset,
         stationary_clip_count: usize,
     ) {
+        if self.is_fixed {
+            return;
+        }
         self.x += translation.x;
         self.y += translation.y;
         for clip in self.clips.iter_mut().skip(stationary_clip_count) {

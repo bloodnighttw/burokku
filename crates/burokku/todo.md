@@ -7,12 +7,12 @@
 - [x] Clip descendants for `overflow: hidden` and `overflow: clip`.
 - [x] Implement scroll containers and scrollbars for `overflow: auto` and `overflow: scroll`.
 - [x] Preserve and paint per-side border widths instead of using the largest width for every side.
-- [ ] Support per-side border colors and styles.
+- [x] Support per-side border colors and styles.
 - [ ] Propagate Glyphon text baselines into Taffy so baseline alignment is accurate.
 - [ ] Recompute `line-height: normal` when the effective font size changes.
-- [ ] Support elliptical border radii and the `border-radius` slash syntax.
-- [ ] Distinguish `position: static` from `position: relative`.
-- [ ] Implement viewport-relative behavior for `position: fixed`.
+- [x] Support elliptical border radii and the `border-radius` slash syntax.
+- [x] Distinguish `position: static` from `position: relative`.
+- [x] Implement viewport-relative behavior for `position: fixed`.
 
 ## Layout
 

@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{BoxStyle, Canvas, Clip, Color, DrawCommand, Rect};
+use crate::{Border, BoxStyle, Canvas, Clip, Color, DrawCommand, Rect};
 
 use super::SurfaceSize;
 
@@ -275,11 +275,16 @@ struct ScreenUniform {
 struct ShapeInstance {
     center: [f32; 2],
     half_size: [f32; 2],
-    radii: [f32; 4],
+    radii_x: [f32; 4],
+    radii_y: [f32; 4],
     background: [f32; 4],
-    border_color: [f32; 4],
+    border_top_color: [f32; 4],
+    border_right_color: [f32; 4],
+    border_bottom_color: [f32; 4],
+    border_left_color: [f32; 4],
     outline_color: [f32; 4],
     border_widths: [f32; 4],
+    border_styles: [u32; 4],
     outline_width: f32,
     outline_offset: f32,
     clip_range: [u32; 2],
@@ -291,14 +296,18 @@ impl ShapeInstance {
             .border
             .filter(|border| border.widths().iter().any(|width| *width > 0.0));
         let outline = style.outline.filter(|outline| outline.width > 0.0);
+        let (radii_x, radii_y) = style.corner_radius.normalized(rect);
+        let border_colors = border.map_or([Color::TRANSPARENT; 4], Border::colors);
         Self {
             center: [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5],
             half_size: [rect.width * 0.5, rect.height * 0.5],
-            radii: style.corner_radius.normalized(rect),
+            radii_x,
+            radii_y,
             background: style.background.components(),
-            border_color: border
-                .map_or(Color::TRANSPARENT, |border| border.color)
-                .components(),
+            border_top_color: border_colors[0].components(),
+            border_right_color: border_colors[1].components(),
+            border_bottom_color: border_colors[2].components(),
+            border_left_color: border_colors[3].components(),
             outline_color: outline
                 .map_or(Color::TRANSPARENT, |outline| outline.color)
                 .components(),
@@ -311,6 +320,8 @@ impl ShapeInstance {
                     left.clamp(0.0, rect.width),
                 ]
             }),
+            border_styles: border
+                .map_or([0; 4], |border| border.styles().map(|style| style as u32)),
             outline_width: outline.map_or(0.0, |outline| outline.width.max(0.0)),
             outline_offset: outline.map_or(0.0, |outline| outline.offset.max(0.0)),
             clip_range: [clip_start, clip_count],
@@ -318,7 +329,7 @@ impl ShapeInstance {
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+        const ATTRIBUTES: [wgpu::VertexAttribute; 15] = wgpu::vertex_attr_array![
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
@@ -326,9 +337,14 @@ impl ShapeInstance {
             4 => Float32x4,
             5 => Float32x4,
             6 => Float32x4,
-            7 => Float32,
-            8 => Float32,
-            9 => Uint32x2
+            7 => Float32x4,
+            8 => Float32x4,
+            9 => Float32x4,
+            10 => Float32x4,
+            11 => Uint32x4,
+            12 => Float32,
+            13 => Float32,
+            14 => Uint32x2
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -343,18 +359,21 @@ impl ShapeInstance {
 struct GpuClip {
     center: [f32; 2],
     half_size: [f32; 2],
-    radii: [f32; 4],
+    radii_x: [f32; 4],
+    radii_y: [f32; 4],
 }
 
 impl GpuClip {
     fn new(clip: Clip) -> Self {
+        let (radii_x, radii_y) = clip.corner_radius.normalized(clip.rect);
         Self {
             center: [
                 clip.rect.x + clip.rect.width * 0.5,
                 clip.rect.y + clip.rect.height * 0.5,
             ],
             half_size: [clip.rect.width * 0.5, clip.rect.height * 0.5],
-            radii: clip.corner_radius.normalized(clip.rect),
+            radii_x,
+            radii_y,
         }
     }
 }
