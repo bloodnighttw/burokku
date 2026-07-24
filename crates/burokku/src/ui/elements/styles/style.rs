@@ -1,7 +1,8 @@
 use super::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, CornerRadiusValue, Display,
-    FlexDirection, FlexWrap, Isolation, JustifyContent, LengthPercentageValue, LengthValue,
-    LineHeightValue, MaxSizeValue, Overflow, Position, SizeValue, ZIndex,
+    FlexDirection, FlexWrap, GridAutoFlow, GridTemplateArea, Isolation, JustifyContent,
+    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, Position,
+    SizeValue, ZIndex,
 };
 
 pub(crate) type Color = [u8; 4];
@@ -57,6 +58,19 @@ pub(crate) struct Style {
     pub(crate) flex_basis: SizeValue,
     pub(crate) flex_grow: f32,
     pub(crate) flex_shrink: f32,
+    pub(crate) order: i32,
+
+    // Grid container and item properties
+    pub(crate) grid_template_rows: Option<String>,
+    pub(crate) grid_template_columns: Option<String>,
+    pub(crate) grid_template_areas: Vec<GridTemplateArea<String>>,
+    pub(crate) grid_auto_rows: Option<String>,
+    pub(crate) grid_auto_columns: Option<String>,
+    pub(crate) grid_auto_flow: GridAutoFlow,
+    pub(crate) grid_row_start: Option<String>,
+    pub(crate) grid_row_end: Option<String>,
+    pub(crate) grid_column_start: Option<String>,
+    pub(crate) grid_column_end: Option<String>,
 
     // Paint
     pub(crate) background_color: Option<Color>,
@@ -128,6 +142,17 @@ impl Default for Style {
             flex_basis: SizeValue::Auto,
             flex_grow: 0.0,
             flex_shrink: 1.0,
+            order: 0,
+            grid_template_rows: None,
+            grid_template_columns: None,
+            grid_template_areas: Vec::new(),
+            grid_auto_rows: None,
+            grid_auto_columns: None,
+            grid_auto_flow: GridAutoFlow::Row,
+            grid_row_start: None,
+            grid_row_end: None,
+            grid_column_start: None,
+            grid_column_end: None,
             background_color: None,
             color: None,
             border_top_color: None,

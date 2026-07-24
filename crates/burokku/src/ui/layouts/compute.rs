@@ -12,7 +12,10 @@ use taffy::{
         AvailableSpace, Dimension, Display, LengthPercentage, LengthPercentageAuto, NodeId,
         TaffyAuto,
     },
-    style::Style as TaffyStyle,
+    style::{
+        GridAutoTracks, GridPlacement, GridTemplateComponent, GridTemplateTracks,
+        Style as TaffyStyle,
+    },
     tree::{
         Cache, Layout as TaffyLayout, LayoutBlockContainer, LayoutFlexboxContainer,
         LayoutGridContainer, LayoutInput, LayoutOutput, LayoutPartialTree, RunMode,
@@ -134,7 +137,11 @@ fn add_element(
         .children
         .iter()
         .map(|child| add_element(nodes, document, *child, &text_style))
-        .collect();
+        .collect::<Vec<_>>();
+    let mut children = children;
+    if matches!(element.style.display, Display::Flex | Display::Grid) {
+        children.sort_by_key(|child| nodes[*child].paint_style.order);
+    }
     nodes[node_id].children = children;
     node_id
 }
@@ -840,6 +847,10 @@ impl LayoutGridContainer for ElementLayoutTree<'_> {
 }
 
 fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
+    let (grid_template_rows, grid_template_row_names) =
+        grid_template(style.grid_template_rows.as_deref());
+    let (grid_template_columns, grid_template_column_names) =
+        grid_template(style.grid_template_columns.as_deref());
     TaffyStyle {
         display: if matches!(kind, ElementKind::Comment(_)) {
             Display::None
@@ -926,6 +937,22 @@ fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
         flex_basis: dimension(style.flex_basis),
         flex_grow: style.flex_grow,
         flex_shrink: style.flex_shrink,
+        grid_template_rows,
+        grid_template_columns,
+        grid_template_areas: style.grid_template_areas.clone(),
+        grid_template_row_names,
+        grid_template_column_names,
+        grid_auto_rows: grid_auto_tracks(style.grid_auto_rows.as_deref()),
+        grid_auto_columns: grid_auto_tracks(style.grid_auto_columns.as_deref()),
+        grid_auto_flow: style.grid_auto_flow,
+        grid_row: taffy::geometry::Line {
+            start: grid_placement(style.grid_row_start.as_deref()),
+            end: grid_placement(style.grid_row_end.as_deref()),
+        },
+        grid_column: taffy::geometry::Line {
+            start: grid_placement(style.grid_column_start.as_deref()),
+            end: grid_placement(style.grid_column_end.as_deref()),
+        },
         ..TaffyStyle::default()
     }
 }
@@ -1067,6 +1094,37 @@ fn resolved_length_percentage_auto(value: SizeValue, basis: f32) -> LengthPercen
         SizeValue::Px(value) => LengthPercentageAuto::length(value),
         SizeValue::Percent(value) => LengthPercentageAuto::length(basis * value / 100.0),
     }
+}
+
+type TemplateTracks = GridTemplateTracks<String, GridTemplateComponent<String>>;
+
+fn grid_template(value: Option<&str>) -> (Vec<GridTemplateComponent<String>>, Vec<Vec<String>>) {
+    value.map_or_else(
+        || (Vec::new(), Vec::new()),
+        |value| {
+            let parsed = value
+                .parse::<TemplateTracks>()
+                .expect("grid templates are validated when styles are set");
+            (parsed.tracks, parsed.line_names)
+        },
+    )
+}
+
+fn grid_auto_tracks(value: Option<&str>) -> Vec<taffy::style::TrackSizingFunction> {
+    value.map_or_else(Vec::new, |value| {
+        value
+            .parse::<GridAutoTracks>()
+            .expect("implicit grid tracks are validated when styles are set")
+            .0
+    })
+}
+
+fn grid_placement(value: Option<&str>) -> GridPlacement<String> {
+    value.map_or(GridPlacement::Auto, |value| {
+        value
+            .parse()
+            .expect("grid placement is validated when styles are set")
+    })
 }
 
 fn dimension(value: SizeValue) -> Dimension {
@@ -1538,6 +1596,80 @@ mod tests {
     }
 
     #[test]
+    fn computes_explicit_grid_tracks_and_named_placement() {
+        let mut document = Document::new();
+        let grid = document.create_node(ElementKind::Div);
+        let item = document.create_node(ElementKind::Div);
+        document.set_style(grid, "display", Some("grid")).unwrap();
+        document.set_style(grid, "width", Some("300px")).unwrap();
+        document.set_style(grid, "height", Some("100px")).unwrap();
+        document
+            .set_style(
+                grid,
+                "grid-template-columns",
+                Some("[left] 80px [content] 120px [right]"),
+            )
+            .unwrap();
+        document
+            .set_style(grid, "grid-template-rows", Some("40px 60px"))
+            .unwrap();
+        document
+            .set_style(item, "grid-column", Some("content / right"))
+            .unwrap();
+        document.set_style(item, "grid-row", Some("2")).unwrap();
+        document.insert(BODY_ID, grid, None).unwrap();
+        document.insert(grid, item, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 200.0, &mut TextSystem::new());
+        let grid = &layout.children()[0];
+        let item = &grid.children()[0];
+
+        assert_eq!((grid.width, grid.height), (300.0, 100.0));
+        assert_eq!((item.x, item.y), (80.0, 40.0));
+        assert_eq!((item.width, item.height), (120.0, 60.0));
+    }
+
+    #[test]
+    fn computes_implicit_grid_tracks_with_column_auto_flow() {
+        let mut document = Document::new();
+        let grid = document.create_node(ElementKind::Div);
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        let third = document.create_node(ElementKind::Div);
+        document.set_style(grid, "display", Some("grid")).unwrap();
+        document.set_style(grid, "width", Some("200px")).unwrap();
+        document.set_style(grid, "height", Some("60px")).unwrap();
+        document
+            .set_style(grid, "grid-template-rows", Some("30px 30px"))
+            .unwrap();
+        document
+            .set_style(grid, "grid-auto-columns", Some("40px"))
+            .unwrap();
+        document
+            .set_style(grid, "grid-auto-flow", Some("column"))
+            .unwrap();
+        document.insert(BODY_ID, grid, None).unwrap();
+        document.insert(grid, first, None).unwrap();
+        document.insert(grid, second, None).unwrap();
+        document.insert(grid, third, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let children = layout.children()[0].children();
+
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| (child.x, child.y, child.width, child.height))
+                .collect::<Vec<_>>(),
+            vec![
+                (0.0, 0.0, 40.0, 30.0),
+                (0.0, 30.0, 40.0, 30.0),
+                (40.0, 0.0, 40.0, 30.0),
+            ]
+        );
+    }
+
+    #[test]
     fn nested_absolute_percentages_converge_on_positioned_ancestors() {
         let mut document = Document::new();
         let positioned = document.create_node(ElementKind::Div);
@@ -1617,6 +1749,59 @@ mod tests {
     }
 
     #[test]
+    fn computes_named_grid_template_areas() {
+        let mut document = Document::new();
+        let grid = document.create_node(ElementKind::Div);
+        let header = document.create_node(ElementKind::Div);
+        let main = document.create_node(ElementKind::Div);
+        document.set_style(grid, "display", Some("grid")).unwrap();
+        document.set_style(grid, "width", Some("300px")).unwrap();
+        document.set_style(grid, "height", Some("100px")).unwrap();
+        document
+            .set_style(grid, "grid-template-columns", Some("100px 200px"))
+            .unwrap();
+        document
+            .set_style(grid, "grid-template-rows", Some("40px 60px"))
+            .unwrap();
+        document
+            .set_style(
+                grid,
+                "grid-template-areas",
+                Some("\"header header\" \"sidebar main\""),
+            )
+            .unwrap();
+        document
+            .set_style(header, "grid-area", Some("header"))
+            .unwrap();
+        document.set_style(main, "grid-area", Some("main")).unwrap();
+        document.insert(BODY_ID, grid, None).unwrap();
+        document.insert(grid, header, None).unwrap();
+        document.insert(grid, main, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 200.0, &mut TextSystem::new());
+        let children = layout.children()[0].children();
+
+        assert_eq!(
+            (
+                children[0].x,
+                children[0].y,
+                children[0].width,
+                children[0].height
+            ),
+            (0.0, 0.0, 300.0, 40.0)
+        );
+        assert_eq!(
+            (
+                children[1].x,
+                children[1].y,
+                children[1].width,
+                children[1].height
+            ),
+            (100.0, 40.0, 200.0, 60.0)
+        );
+    }
+
+    #[test]
     fn border_width_without_style_has_no_layout_or_paint_border() {
         let mut document = Document::new();
         let element = document.create_node(ElementKind::Div);
@@ -1645,5 +1830,101 @@ mod tests {
         };
         assert_eq!((element.width, element.height), (120.0, 70.0));
         assert!(style.border.is_some());
+    }
+
+    #[test]
+    fn flex_shorthand_controls_growth() {
+        let mut document = Document::new();
+        let flex = document.create_node(ElementKind::Div);
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        document.set_style(flex, "display", Some("flex")).unwrap();
+        document.set_style(flex, "width", Some("300px")).unwrap();
+        document.set_style(first, "flex", Some("2")).unwrap();
+        document.set_style(second, "flex", Some("1")).unwrap();
+        document.insert(BODY_ID, flex, None).unwrap();
+        document.insert(flex, first, None).unwrap();
+        document.insert(flex, second, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 100.0, &mut TextSystem::new());
+        let children = layout.children()[0].children();
+
+        assert_eq!(children[0].width, 200.0);
+        assert_eq!(children[1].width, 100.0);
+        assert_eq!(children[1].x, 200.0);
+    }
+
+    #[test]
+    fn order_reorders_flex_items_stably_but_not_block_children() {
+        let mut document = Document::new();
+        let flex = document.create_node(ElementKind::Div);
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        let third = document.create_node(ElementKind::Div);
+        document.set_style(flex, "display", Some("flex")).unwrap();
+        document.set_style(first, "width", Some("40px")).unwrap();
+        document.set_style(second, "width", Some("40px")).unwrap();
+        document.set_style(third, "width", Some("40px")).unwrap();
+        document.set_style(first, "order", Some("2")).unwrap();
+        document.set_style(second, "order", Some("-1")).unwrap();
+        document.set_style(third, "order", Some("2")).unwrap();
+        document.insert(BODY_ID, flex, None).unwrap();
+        document.insert(flex, first, None).unwrap();
+        document.insert(flex, second, None).unwrap();
+        document.insert(flex, third, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let children = layout.children()[0].children();
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.element_id)
+                .collect::<Vec<_>>(),
+            vec![second, first, third]
+        );
+        assert_eq!(
+            children.iter().map(|child| child.x).collect::<Vec<_>>(),
+            vec![0.0, 40.0, 80.0]
+        );
+
+        let mut document = Document::new();
+        let grid = document.create_node(ElementKind::Div);
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        document.set_style(grid, "display", Some("grid")).unwrap();
+        document
+            .set_style(grid, "grid-template-columns", Some("40px 40px"))
+            .unwrap();
+        document.set_style(first, "order", Some("1")).unwrap();
+        document.set_style(second, "order", Some("-1")).unwrap();
+        document.insert(BODY_ID, grid, None).unwrap();
+        document.insert(grid, first, None).unwrap();
+        document.insert(grid, second, None).unwrap();
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let children = layout.children()[0].children();
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| (child.element_id, child.x))
+                .collect::<Vec<_>>(),
+            vec![(second, 0.0), (first, 40.0)]
+        );
+
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        document.set_style(first, "order", Some("2")).unwrap();
+        document.set_style(second, "order", Some("-1")).unwrap();
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(BODY_ID, second, None).unwrap();
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        assert_eq!(
+            layout
+                .children()
+                .iter()
+                .map(|child| child.element_id)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
     }
 }
