@@ -279,3 +279,27 @@ impl CompositeClip {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CornerRadius, CornerSize, Rect};
+
+    #[test]
+    fn composite_clip_preserves_elliptical_corner_radii() {
+        let clip = Clip::new(
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            CornerRadius::elliptical(
+                CornerSize::new(30.0, 10.0),
+                CornerSize::new(20.0, 8.0),
+                CornerSize::ZERO,
+                CornerSize::ZERO,
+            ),
+        );
+
+        let composite = CompositeClip::new(clip);
+
+        assert_eq!(composite.radii_x, [30.0, 20.0, 0.0, 0.0]);
+        assert_eq!(composite.radii_y, [10.0, 8.0, 0.0, 0.0]);
+    }
+}

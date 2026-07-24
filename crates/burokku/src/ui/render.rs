@@ -886,6 +886,65 @@ mod tests {
     }
 
     #[test]
+    fn effect_groups_include_native_and_text_decoration_overlays() {
+        let mut button_document = Document::new();
+        let button = button_document.create_node(ElementKind::Button);
+        button_document
+            .set_attribute(button, "data-burokku-focused", Some(""))
+            .unwrap();
+        button_document
+            .set_attribute(button, "aria-pressed", Some("true"))
+            .unwrap();
+        button_document
+            .set_style(button, "opacity", Some("0.5"))
+            .unwrap();
+        button_document.insert(BODY_ID, button, None).unwrap();
+
+        let button_canvas =
+            build_canvas(&button_document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+        let DrawCommand::Group {
+            canvas, opacity, ..
+        } = &button_canvas.commands()[0]
+        else {
+            panic!("native control should be retained as an opacity group");
+        };
+        assert_eq!(*opacity, 0.5);
+        assert_eq!(
+            canvas
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::OverlayBox { .. }))
+                .count(),
+            2
+        );
+
+        let mut text_document = Document::new();
+        let container = text_document.create_node(ElementKind::Div);
+        let text = text_document.create_node(ElementKind::Text("decorated".into()));
+        text_document
+            .set_style(container, "text-decoration", Some("underline"))
+            .unwrap();
+        text_document
+            .set_style(container, "transform", Some("translateX(5px)"))
+            .unwrap();
+        text_document.insert(BODY_ID, container, None).unwrap();
+        text_document.insert(container, text, None).unwrap();
+
+        let text_canvas = build_canvas(&text_document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+        let DrawCommand::Group { canvas, .. } = &text_canvas.commands()[0] else {
+            panic!("decorated text should be retained as a transform group");
+        };
+        assert!(canvas
+            .commands()
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Text { .. })));
+        assert!(canvas
+            .commands()
+            .iter()
+            .any(|command| matches!(command, DrawCommand::OverlayBox { .. })));
+    }
+
+    #[test]
     fn multiple_selects_do_not_paint_a_closed_dropdown_indicator() {
         let mut document = Document::new();
         let select = document.create_node(ElementKind::Select);
