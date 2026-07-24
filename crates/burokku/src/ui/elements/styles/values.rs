@@ -53,6 +53,45 @@ pub(crate) enum Isolation {
     Isolate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Transform {
+    pub(crate) matrix: [f32; 6],
+}
+
+impl Transform {
+    pub(crate) const IDENTITY: Self = Self {
+        matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    };
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Shadow {
+    pub(crate) offset_x: f32,
+    pub(crate) offset_y: f32,
+    pub(crate) blur: f32,
+    pub(crate) spread: f32,
+    pub(crate) color: [u8; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum BackgroundImage {
+    LinearGradient {
+        direction: [f32; 2],
+        start: [u8; 4],
+        end: [u8; 4],
+    },
+    RadialGradient {
+        start: [u8; 4],
+        end: [u8; 4],
+    },
+}
+
 /// A CSS size that accepts `<length-percentage> | auto`.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
 pub(crate) enum SizeValue {

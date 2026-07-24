@@ -96,14 +96,9 @@ impl TextRenderer {
                     cached.matches(text, style, bounds.width, bounds.height)
                 });
         if buffers_match_in_order {
-            self.placements.extend(commands.iter().enumerate().map(
-                |(buffer_index, (bounds, clips, _, style))| TextPlacement {
-                    buffer_index,
-                    bounds: *bounds,
-                    clips: clips.to_vec(),
-                    color: style.color,
-                },
-            ));
+            for (buffer_index, (bounds, clips, _, style)) in commands.iter().enumerate() {
+                push_text_placements(&mut self.placements, buffer_index, *bounds, clips, style);
+            }
         } else {
             let mut previous_buffers: HashMap<u64, Vec<CachedText>> = HashMap::new();
             for cached in std::mem::take(&mut self.buffers) {
@@ -140,12 +135,7 @@ impl TextRenderer {
                     });
                 let buffer_index = self.buffers.len();
                 self.buffers.push(cached);
-                self.placements.push(TextPlacement {
-                    buffer_index,
-                    bounds,
-                    clips: clips.to_vec(),
-                    color: style.color,
-                });
+                push_text_placements(&mut self.placements, buffer_index, bounds, clips, style);
             }
         }
 
@@ -178,6 +168,95 @@ impl TextRenderer {
     pub fn finish_frame(&mut self) {
         self.atlas.trim();
     }
+}
+
+fn push_text_placements(
+    placements: &mut Vec<TextPlacement>,
+    buffer_index: usize,
+    bounds: Rect,
+    clips: &[Clip],
+    style: &TextStyle,
+) {
+    let bounds = transformed_text_bounds(bounds, style);
+    if let Some(shadow) = style.shadow {
+        let blur = shadow.blur.max(0.0);
+        let samples: &[[f32; 2]] = if blur > 0.0 {
+            &[
+                [0.0, 0.0],
+                [-1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, -1.0],
+                [0.0, 1.0],
+                [-0.707, -0.707],
+                [0.707, -0.707],
+                [-0.707, 0.707],
+                [0.707, 0.707],
+            ]
+        } else {
+            &[[0.0, 0.0]]
+        };
+        for sample in samples {
+            let mut shadow_bounds = bounds;
+            shadow_bounds.x += shadow.offset[0] + sample[0] * blur * 0.5;
+            shadow_bounds.y += shadow.offset[1] + sample[1] * blur * 0.5;
+            let mut color = color_with_opacity(shadow.color, style.opacity);
+            color.alpha /= samples.len() as f32;
+            placements.push(TextPlacement {
+                buffer_index,
+                bounds: shadow_bounds,
+                clips: clips.to_vec(),
+                color,
+            });
+        }
+    }
+    placements.push(TextPlacement {
+        buffer_index,
+        bounds,
+        clips: clips.to_vec(),
+        color: color_with_opacity(style.color, style.opacity),
+    });
+}
+
+fn transformed_text_bounds(bounds: Rect, style: &TextStyle) -> Rect {
+    let [a, b, c, d, e, f] = style.transform.matrix;
+    let center = [
+        bounds.x + bounds.width * 0.5,
+        bounds.y + bounds.height * 0.5,
+    ];
+    let corners = [
+        [-bounds.width * 0.5, -bounds.height * 0.5],
+        [bounds.width * 0.5, -bounds.height * 0.5],
+        [-bounds.width * 0.5, bounds.height * 0.5],
+        [bounds.width * 0.5, bounds.height * 0.5],
+    ];
+    let transformed = corners.map(|point| {
+        [
+            center[0] + a * point[0] + c * point[1] + e,
+            center[1] + b * point[0] + d * point[1] + f,
+        ]
+    });
+    let min_x = transformed
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = transformed
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = transformed
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min);
+    let max_y = transformed
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+fn color_with_opacity(mut color: Color, opacity: f32) -> Color {
+    color.alpha *= opacity.clamp(0.0, 1.0);
+    color
 }
 
 impl CachedText {

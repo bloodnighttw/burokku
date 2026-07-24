@@ -1,9 +1,9 @@
 use super::{
-    AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, CornerRadiusValue, Display,
-    FlexDirection, FlexWrap, GridAutoFlow, GridTemplateArea, Isolation, JustifyContent,
-    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue,
-    Position, SizeValue, TextAlignValue, TextDecorationLineValue, WhiteSpaceValue, WordBreakValue,
-    FontStyleValue, ZIndex,
+    AlignContent, AlignItems, AlignSelf, BackgroundImage, BorderStyle, BoxSizing,
+    CornerRadiusValue, Display, FlexDirection, FlexWrap, FontStyleValue, GridAutoFlow,
+    GridTemplateArea, Isolation, JustifyContent, LengthPercentageValue, LengthValue,
+    LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue, Position, Shadow, SizeValue,
+    TextAlignValue, TextDecorationLineValue, Transform, WhiteSpaceValue, WordBreakValue, ZIndex,
 };
 
 pub(crate) type Color = [u8; 4];
@@ -75,7 +75,12 @@ pub(crate) struct Style {
 
     // Paint
     pub(crate) background_color: Option<Color>,
+    pub(crate) background_image: Option<BackgroundImage>,
     pub(crate) color: Option<Color>,
+    pub(crate) opacity: f32,
+    pub(crate) transform: Transform,
+    pub(crate) box_shadow: Option<Shadow>,
+    pub(crate) text_shadow: Option<Shadow>,
     pub(crate) border_top_color: Option<Color>,
     pub(crate) border_right_color: Option<Color>,
     pub(crate) border_bottom_color: Option<Color>,
@@ -164,7 +169,12 @@ impl Default for Style {
             grid_column_start: None,
             grid_column_end: None,
             background_color: None,
+            background_image: None,
             color: None,
+            opacity: 1.0,
+            transform: Transform::default(),
+            box_shadow: None,
+            text_shadow: None,
             border_top_color: None,
             border_right_color: None,
             border_bottom_color: None,

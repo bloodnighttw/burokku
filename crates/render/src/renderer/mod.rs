@@ -207,8 +207,8 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::{
-        Border, BorderSide, BorderStyle, BoxStyle, Clip, Color, CornerRadius, CornerSize, Outline,
-        Rect, TextStyle,
+        BackgroundImage, Border, BorderSide, BorderStyle, BoxShadow, BoxStyle, Clip, Color,
+        CornerRadius, CornerSize, Outline, Rect, TextStyle, Transform,
     };
 
     #[tokio::test(flavor = "current_thread")]
@@ -231,6 +231,7 @@ mod tests {
                 corner_radius: CornerRadius::all(6.0),
                 border: Some(Border::new(3.0, Color::BLACK)),
                 outline: Some(Outline::new(2.0, 2.0, Color::from_rgba8(20, 80, 220, 255))),
+                ..BoxStyle::default()
             },
         );
 
@@ -493,6 +494,76 @@ mod tests {
         assert_eq!(image.pixel(24, 24), Some([255, 255, 255, 255]));
         let inside = image.pixel(32, 32).expect("inside clipped shape");
         assert!(inside[0] > 180 && inside[1] < 80 && inside[2] < 90);
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn renders_gradient_opacity_transform_and_shadow_pixels() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(96, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 40.0, 20.0),
+            BoxStyle {
+                background_image: Some(BackgroundImage::LinearGradient {
+                    direction: [1.0, 0.0],
+                    start: Color::from_rgba8(255, 0, 0, 255),
+                    end: Color::from_rgba8(0, 0, 255, 255),
+                }),
+                opacity: 0.5,
+                ..BoxStyle::default()
+            },
+        );
+        canvas.draw_box(
+            Rect::new(8.0, 38.0, 12.0, 12.0),
+            BoxStyle {
+                background: Color::from_rgba8(0, 180, 0, 255),
+                transform: Transform {
+                    matrix: [1.0, 0.0, 0.0, 1.0, 20.0, 0.0],
+                },
+                ..BoxStyle::default()
+            },
+        );
+        canvas.draw_box(
+            Rect::new(64.0, 10.0, 12.0, 12.0),
+            BoxStyle {
+                background: Color::from_rgba8(240, 180, 0, 255),
+                shadow: Some(BoxShadow {
+                    offset: [5.0, 6.0],
+                    blur: 2.0,
+                    spread: 1.0,
+                    color: Color::from_rgba8(0, 0, 0, 180),
+                }),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(96, 64),
+            &mut text_system,
+        )
+        .expect("off-screen paint effects render");
+
+        let gradient_left = image.pixel(10, 18).unwrap();
+        let gradient_right = image.pixel(45, 18).unwrap();
+        assert!(gradient_left[0] > gradient_left[2]);
+        assert!(gradient_right[2] > gradient_right[0]);
+        assert!(gradient_left[1] > 120, "opacity must reveal white below");
+        assert_eq!(image.pixel(12, 44), Some([255, 255, 255, 255]));
+        let transformed = image.pixel(34, 44).unwrap();
+        assert!(transformed[1] > transformed[0].saturating_add(80));
+        let shadow = image.pixel(78, 25).unwrap();
+        assert!(shadow[0] < 245 && shadow[1] < 245 && shadow[2] < 245);
         drop(adapter);
     }
 }

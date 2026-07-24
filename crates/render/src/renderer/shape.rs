@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{Border, BoxStyle, Canvas, Clip, Color, DrawCommand, Rect};
+use crate::{BackgroundImage, Border, BoxStyle, Canvas, Clip, Color, DrawCommand, Rect, Transform};
 
 use super::SurfaceSize;
 
@@ -128,11 +128,45 @@ impl ShapeRenderer {
 
                 let clip_start = self.clips.len() as u32;
                 self.clips.extend(clips.iter().copied().map(GpuClip::new));
+                if let Some(shadow) = style.shadow {
+                    let spread = shadow.spread;
+                    let shadow_rect = Rect::new(
+                        rect.x + shadow.offset[0] - spread,
+                        rect.y + shadow.offset[1] - spread,
+                        rect.width + spread * 2.0,
+                        rect.height + spread * 2.0,
+                    );
+                    let mut shadow_style = BoxStyle {
+                        background: shadow.color,
+                        corner_radius: style.corner_radius,
+                        opacity: style.opacity,
+                        transform: style.transform,
+                        ..BoxStyle::default()
+                    };
+                    let radius_spread = spread.max(0.0);
+                    for corner in [
+                        &mut shadow_style.corner_radius.top_left,
+                        &mut shadow_style.corner_radius.top_right,
+                        &mut shadow_style.corner_radius.bottom_right,
+                        &mut shadow_style.corner_radius.bottom_left,
+                    ] {
+                        corner.x += radius_spread;
+                        corner.y += radius_spread;
+                    }
+                    self.instances.push(ShapeInstance::new(
+                        shadow_rect,
+                        shadow_style,
+                        clip_start,
+                        clips.len() as u32,
+                        shadow.blur,
+                    ));
+                }
                 self.instances.push(ShapeInstance::new(
                     rect,
                     style,
                     clip_start,
                     clips.len() as u32,
+                    0.0,
                 ));
             }
         }
@@ -278,39 +312,69 @@ struct ShapeInstance {
     radii_x: [f32; 4],
     radii_y: [f32; 4],
     background: [f32; 4],
-    border_top_color: [f32; 4],
-    border_right_color: [f32; 4],
-    border_bottom_color: [f32; 4],
-    border_left_color: [f32; 4],
+    border_colors: [u32; 4],
     outline_color: [f32; 4],
     border_widths: [f32; 4],
     border_styles: [u32; 4],
-    outline_width: f32,
-    outline_offset: f32,
+    effect_params: [f32; 4],
     clip_range: [u32; 2],
+    gradient_color: [f32; 4],
+    gradient: [f32; 4],
+    transform_x: [f32; 3],
+    transform_y: [f32; 3],
 }
 
 impl ShapeInstance {
-    fn new(rect: Rect, style: BoxStyle, clip_start: u32, clip_count: u32) -> Self {
+    fn new(
+        rect: Rect,
+        style: BoxStyle,
+        clip_start: u32,
+        clip_count: u32,
+        effect_blur: f32,
+    ) -> Self {
         let border = style
             .border
             .filter(|border| border.widths().iter().any(|width| *width > 0.0));
         let outline = style.outline.filter(|outline| outline.width > 0.0);
         let (radii_x, radii_y) = style.corner_radius.normalized(rect);
         let border_colors = border.map_or([Color::TRANSPARENT; 4], Border::colors);
+        let alpha = style.opacity.clamp(0.0, 1.0);
+        let with_opacity = |mut color: [f32; 4]| {
+            color[3] *= alpha;
+            color
+        };
+        let (gradient_color, gradient) = match style.background_image {
+            Some(BackgroundImage::LinearGradient {
+                direction,
+                start: _,
+                end,
+            }) => (
+                with_opacity(end.components()),
+                [direction[0], direction[1], 1.0, 0.0],
+            ),
+            Some(BackgroundImage::RadialGradient { start: _, end }) => {
+                (with_opacity(end.components()), [0.0, 0.0, 2.0, 0.0])
+            }
+            None => ([0.0; 4], [0.0; 4]),
+        };
+        let background = match style.background_image {
+            Some(BackgroundImage::LinearGradient { start, .. })
+            | Some(BackgroundImage::RadialGradient { start, .. }) => start,
+            None => style.background,
+        };
+        let Transform { matrix } = style.transform;
         Self {
             center: [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5],
             half_size: [rect.width * 0.5, rect.height * 0.5],
             radii_x,
             radii_y,
-            background: style.background.components(),
-            border_top_color: border_colors[0].components(),
-            border_right_color: border_colors[1].components(),
-            border_bottom_color: border_colors[2].components(),
-            border_left_color: border_colors[3].components(),
-            outline_color: outline
-                .map_or(Color::TRANSPARENT, |outline| outline.color)
-                .components(),
+            background: with_opacity(background.components()),
+            border_colors: border_colors.map(|color| packed_color(color, alpha)),
+            outline_color: with_opacity(
+                outline
+                    .map_or(Color::TRANSPARENT, |outline| outline.color)
+                    .components(),
+            ),
             border_widths: border.map_or([0.0; 4], |border| {
                 let [top, right, bottom, left] = border.widths();
                 [
@@ -322,9 +386,17 @@ impl ShapeInstance {
             }),
             border_styles: border
                 .map_or([0; 4], |border| border.styles().map(|style| style as u32)),
-            outline_width: outline.map_or(0.0, |outline| outline.width.max(0.0)),
-            outline_offset: outline.map_or(0.0, |outline| outline.offset.max(0.0)),
+            effect_params: [
+                outline.map_or(0.0, |outline| outline.width.max(0.0)),
+                outline.map_or(0.0, |outline| outline.offset.max(0.0)),
+                effect_blur.max(0.0),
+                0.0,
+            ],
             clip_range: [clip_start, clip_count],
+            gradient_color,
+            gradient,
+            transform_x: [matrix[0], matrix[2], matrix[4]],
+            transform_y: [matrix[1], matrix[3], matrix[5]],
         }
     }
 
@@ -335,16 +407,16 @@ impl ShapeInstance {
             2 => Float32x4,
             3 => Float32x4,
             4 => Float32x4,
-            5 => Float32x4,
+            5 => Uint32x4,
             6 => Float32x4,
             7 => Float32x4,
-            8 => Float32x4,
+            8 => Uint32x4,
             9 => Float32x4,
-            10 => Float32x4,
-            11 => Uint32x4,
-            12 => Float32,
-            13 => Float32,
-            14 => Uint32x2
+            10 => Uint32x2,
+            11 => Float32x4,
+            12 => Float32x4,
+            13 => Float32x3,
+            14 => Float32x3
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -352,6 +424,12 @@ impl ShapeInstance {
             attributes: &ATTRIBUTES,
         }
     }
+}
+
+fn packed_color(color: Color, opacity: f32) -> u32 {
+    let [red, green, blue, alpha] = color.rgba8();
+    let alpha = ((alpha as f32 * opacity.clamp(0.0, 1.0)).round() as u32).min(255);
+    red as u32 | (green as u32) << 8 | (blue as u32) << 16 | alpha << 24
 }
 
 #[repr(C)]
@@ -393,6 +471,7 @@ mod tests {
             },
             3,
             2,
+            0.0,
         );
 
         assert_eq!(instance.border_widths, [0.0, 30.0, 8.0, 12.0]);

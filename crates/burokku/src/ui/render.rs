@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BorderSide, BoxStyle, Canvas, Clip, Color, CornerRadius, CornerSize, Outline, Rect,
-    TextDecorationLine, TextRunMetrics, TextStyle, TextSystem,
+    Border, BorderSide, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, CornerSize, Outline,
+    Rect, TextDecorationLine, TextRunMetrics, TextShadow, TextStyle, TextSystem, Transform,
 };
 
 use super::{
@@ -226,18 +226,86 @@ fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: 
 
 fn visual_bounds(layout: &Layout) -> Rect {
     let mut bounds = Rect::new(layout.x, layout.y, layout.width, layout.height);
-    if let LayoutKind::Box { style, .. } = &layout.kind {
-        if let Some(outline) = style.outline {
-            let expansion = (outline.offset + outline.width).max(0.0);
-            bounds = Rect::new(
-                bounds.x - expansion,
-                bounds.y - expansion,
-                bounds.width + expansion * 2.0,
-                bounds.height + expansion * 2.0,
-            );
+    match &layout.kind {
+        LayoutKind::Box { style, .. } => {
+            if let Some(outline) = style.outline {
+                let expansion = (outline.offset + outline.width).max(0.0);
+                bounds = expanded_rect(bounds, expansion);
+            }
+            if let Some(shadow) = style.shadow {
+                let mut shadow_bounds =
+                    expanded_rect(bounds, shadow.spread.max(0.0) + shadow.blur * 2.0);
+                shadow_bounds.x += shadow.offset[0];
+                shadow_bounds.y += shadow.offset[1];
+                bounds = union_rect(bounds, shadow_bounds);
+            }
+            bounds = transformed_rect(bounds, style.transform.matrix);
+        }
+        LayoutKind::Text { style, .. } => {
+            if let Some(shadow) = style.shadow {
+                let mut shadow_bounds = expanded_rect(bounds, shadow.blur);
+                shadow_bounds.x += shadow.offset[0];
+                shadow_bounds.y += shadow.offset[1];
+                bounds = union_rect(bounds, shadow_bounds);
+            }
+            bounds = transformed_rect(bounds, style.transform.matrix);
         }
     }
     bounds
+}
+
+fn expanded_rect(rect: Rect, amount: f32) -> Rect {
+    Rect::new(
+        rect.x - amount,
+        rect.y - amount,
+        rect.width + amount * 2.0,
+        rect.height + amount * 2.0,
+    )
+}
+
+fn union_rect(left: Rect, right: Rect) -> Rect {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    Rect::new(
+        x,
+        y,
+        (left.x + left.width).max(right.x + right.width) - x,
+        (left.y + left.height).max(right.y + right.height) - y,
+    )
+}
+
+fn transformed_rect(rect: Rect, matrix: [f32; 6]) -> Rect {
+    let [a, b, c, d, e, f] = matrix;
+    let center = [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5];
+    let corners = [
+        [-rect.width * 0.5, -rect.height * 0.5],
+        [rect.width * 0.5, -rect.height * 0.5],
+        [-rect.width * 0.5, rect.height * 0.5],
+        [rect.width * 0.5, rect.height * 0.5],
+    ];
+    let transformed = corners.map(|point| {
+        [
+            center[0] + a * point[0] + c * point[1] + e,
+            center[1] + b * point[0] + d * point[1] + f,
+        ]
+    });
+    let min_x = transformed
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = transformed
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = transformed
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min);
+    let max_y = transformed
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
 fn intersects_visible_area(mut bounds: Rect, clips: &[Clip], viewport: Rect) -> bool {
@@ -272,6 +340,7 @@ fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
 fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
     BoxStyle {
         background: style.background,
+        background_image: style.background_image,
         corner_radius: CornerRadius::elliptical(
             scaled_corner(style.corner_radius.top_left, scale_factor),
             scaled_corner(style.corner_radius.top_right, scale_factor),
@@ -293,6 +362,26 @@ fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
                 outline.color,
             )
         }),
+        opacity: style.opacity,
+        transform: Transform {
+            matrix: [
+                style.transform.matrix[0],
+                style.transform.matrix[1],
+                style.transform.matrix[2],
+                style.transform.matrix[3],
+                style.transform.matrix[4] * scale_factor,
+                style.transform.matrix[5] * scale_factor,
+            ],
+        },
+        shadow: style.shadow.map(|shadow| BoxShadow {
+            offset: [
+                shadow.offset[0] * scale_factor,
+                shadow.offset[1] * scale_factor,
+            ],
+            blur: shadow.blur * scale_factor,
+            spread: shadow.spread * scale_factor,
+            color: shadow.color,
+        }),
     }
 }
 
@@ -310,6 +399,16 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
     style.line_height *= scale_factor;
     style.letter_spacing *= scale_factor;
     style.word_spacing *= scale_factor;
+    style.transform.matrix[4] *= scale_factor;
+    style.transform.matrix[5] *= scale_factor;
+    style.shadow = style.shadow.map(|shadow| TextShadow {
+        offset: [
+            shadow.offset[0] * scale_factor,
+            shadow.offset[1] * scale_factor,
+        ],
+        blur: shadow.blur * scale_factor,
+        color: shadow.color,
+    });
     style
 }
 
@@ -317,6 +416,7 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
 mod tests {
     use super::*;
     use crate::ui::elements::{ElementKind, BODY_ID};
+    use render::{BackgroundImage, DrawCommand};
 
     #[test]
     fn builds_canvas_from_computed_ui_layout() {
@@ -435,6 +535,41 @@ mod tests {
             assert!((rect.width - run.width).abs() < 0.01);
             assert!(rect.width < text_layout.width);
         }
+    }
+
+    #[test]
+    fn carries_paint_effects_from_style_to_canvas_commands() {
+        let mut document = Document::new();
+        let card = document.create_node(ElementKind::Div);
+        document.set_style(card, "width", Some("100px")).unwrap();
+        document.set_style(card, "height", Some("50px")).unwrap();
+        document.set_style(card, "opacity", Some("0.5")).unwrap();
+        document
+            .set_style(card, "transform", Some("translate(3px, 4px)"))
+            .unwrap();
+        document
+            .set_style(card, "box-shadow", Some("1px 2px 3px 4px navy"))
+            .unwrap();
+        document
+            .set_style(
+                card,
+                "background-image",
+                Some("linear-gradient(to right, red, blue)"),
+            )
+            .unwrap();
+        document.insert(BODY_ID, card, None).unwrap();
+
+        let canvas = build_canvas(&document, 200.0, 100.0, 2.0, &mut TextSystem::new());
+        let DrawCommand::Box { style, .. } = &canvas.commands()[0] else {
+            panic!("expected a box command");
+        };
+        assert_eq!(style.opacity, 0.5);
+        assert_eq!(style.transform.matrix[4..], [6.0, 8.0]);
+        assert_eq!(style.shadow.unwrap().offset, [2.0, 4.0]);
+        assert!(matches!(
+            style.background_image,
+            Some(BackgroundImage::LinearGradient { .. })
+        ));
     }
 
     #[test]

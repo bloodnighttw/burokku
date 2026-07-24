@@ -1,10 +1,11 @@
 use std::borrow::Cow;
 
 use super::{
-    AlignContent, AlignItems, BorderStyle, BoxSizing, Color, CornerRadiusValue, Display,
-    FlexDirection, FlexWrap, FontStyleValue, Isolation, LengthPercentageValue, LengthValue,
-    LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue, Position, SizeValue, Style,
-    TextAlignValue, TextDecorationLineValue, WhiteSpaceValue, WordBreakValue, ZIndex,
+    AlignContent, AlignItems, BackgroundImage, BorderStyle, BoxSizing, Color, CornerRadiusValue,
+    Display, FlexDirection, FlexWrap, FontStyleValue, Isolation, LengthPercentageValue,
+    LengthValue, LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue, Position, Shadow,
+    SizeValue, Style, TextAlignValue, TextDecorationLineValue, Transform, WhiteSpaceValue,
+    WordBreakValue, ZIndex,
 };
 use taffy::style::{
     GridAutoTracks, GridPlacement, GridTemplateArea, GridTemplateComponent, GridTemplateTracks,
@@ -256,7 +257,17 @@ pub(crate) fn set_style(
         }
 
         "background-color" => color!(background_color),
+        "background-image" => style.background_image = parse_background_image(name, value)?,
         "color" => color!(color),
+        "opacity" => {
+            style.opacity = parse_number(name, value)?;
+            if !(0.0..=1.0).contains(&style.opacity) {
+                return invalid(name, value);
+            }
+        }
+        "transform" => style.transform = parse_transform(name, value)?,
+        "box-shadow" => style.box_shadow = parse_shadow(name, value, true)?,
+        "text-shadow" => style.text_shadow = parse_shadow(name, value, false)?,
         "border-color" => {
             let [top, right, bottom, left] = parse_box_colors(name, value)?;
             style.border_top_color = Some(top);
@@ -504,7 +515,12 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
             reset!(grid_column_end);
         }
         "background-color" => reset!(background_color),
+        "background-image" => reset!(background_image),
         "color" => reset!(color),
+        "opacity" => reset!(opacity),
+        "transform" => reset!(transform),
+        "box-shadow" => reset!(box_shadow),
+        "text-shadow" => reset!(text_shadow),
         "border-color" => reset_box!(
             border_top_color,
             border_right_color,
@@ -1267,25 +1283,313 @@ fn parse_number(name: &str, value: &str) -> Result<f32, StyleError> {
         .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))
 }
 
-fn parse_color(name: &str, value: &str) -> Result<Color, StyleError> {
-    let named = match value.to_ascii_lowercase().as_str() {
-        "transparent" => Some([0, 0, 0, 0]),
-        "black" => Some([0, 0, 0, 255]),
-        "white" => Some([255, 255, 255, 255]),
-        "red" => Some([255, 0, 0, 255]),
-        "green" => Some([0, 128, 0, 255]),
-        "blue" => Some([0, 0, 255, 255]),
-        "gray" | "grey" => Some([128, 128, 128, 255]),
-        "yellow" => Some([255, 255, 0, 255]),
-        "magenta" | "fuchsia" => Some([255, 0, 255, 255]),
-        "cyan" | "aqua" => Some([0, 255, 255, 255]),
-        _ => None,
+fn parse_transform(name: &str, value: &str) -> Result<Transform, StyleError> {
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(Transform::IDENTITY);
+    }
+    let mut result = Transform::IDENTITY.matrix;
+    let mut rest = value.trim();
+    while !rest.is_empty() {
+        let open = rest
+            .find('(')
+            .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))?;
+        let close = rest[open + 1..]
+            .find(')')
+            .map(|index| open + 1 + index)
+            .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))?;
+        let function = rest[..open].trim().to_ascii_lowercase();
+        let arguments = split_arguments(&rest[open + 1..close]);
+        let matrix = match function.as_str() {
+            "translate" => {
+                let x = parse_length(name, argument(&arguments, 0, value)?)?;
+                let y = arguments
+                    .get(1)
+                    .map(|value| parse_length(name, value))
+                    .transpose()?
+                    .unwrap_or(0.0);
+                [1.0, 0.0, 0.0, 1.0, x, y]
+            }
+            "translatex" => [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                parse_length(name, argument(&arguments, 0, value)?)?,
+                0.0,
+            ],
+            "translatey" => [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                parse_length(name, argument(&arguments, 0, value)?)?,
+            ],
+            "scale" => {
+                let x = parse_number(name, argument(&arguments, 0, value)?)?;
+                let y = arguments
+                    .get(1)
+                    .map(|value| parse_number(name, value))
+                    .transpose()?
+                    .unwrap_or(x);
+                [x, 0.0, 0.0, y, 0.0, 0.0]
+            }
+            "scalex" => [
+                parse_number(name, argument(&arguments, 0, value)?)?,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+            ],
+            "scaley" => [
+                1.0,
+                0.0,
+                0.0,
+                parse_number(name, argument(&arguments, 0, value)?)?,
+                0.0,
+                0.0,
+            ],
+            "rotate" => {
+                let angle = parse_angle(name, argument(&arguments, 0, value)?)?;
+                let (sin, cos) = angle.sin_cos();
+                [cos, sin, -sin, cos, 0.0, 0.0]
+            }
+            "matrix" if arguments.len() == 6 => {
+                let mut matrix = [0.0; 6];
+                for (output, argument) in matrix.iter_mut().zip(arguments) {
+                    *output = parse_number(name, argument)?;
+                }
+                matrix
+            }
+            _ => return invalid(name, value),
+        };
+        result = multiply_affine(result, matrix);
+        rest = rest[close + 1..].trim();
+    }
+    Ok(Transform { matrix: result })
+}
+
+fn multiply_affine(left: [f32; 6], right: [f32; 6]) -> [f32; 6] {
+    [
+        left[0] * right[0] + left[2] * right[1],
+        left[1] * right[0] + left[3] * right[1],
+        left[0] * right[2] + left[2] * right[3],
+        left[1] * right[2] + left[3] * right[3],
+        left[0] * right[4] + left[2] * right[5] + left[4],
+        left[1] * right[4] + left[3] * right[5] + left[5],
+    ]
+}
+
+fn parse_angle(name: &str, value: &str) -> Result<f32, StyleError> {
+    if let Some(degrees) = value.strip_suffix("deg") {
+        return Ok(parse_number(name, degrees.trim())?.to_radians());
+    }
+    if let Some(turns) = value.strip_suffix("turn") {
+        return Ok(parse_number(name, turns.trim())? * std::f32::consts::TAU);
+    }
+    if let Some(radians) = value.strip_suffix("rad") {
+        return parse_number(name, radians.trim());
+    }
+    if value == "0" {
+        return Ok(0.0);
+    }
+    invalid(name, value)
+}
+
+fn parse_shadow(name: &str, value: &str, allow_spread: bool) -> Result<Option<Shadow>, StyleError> {
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    if split_top_level(value, ',').len() != 1
+        || value.split_ascii_whitespace().any(|v| v == "inset")
+    {
+        return invalid(name, value);
+    }
+    let parts = split_whitespace_preserving_functions(value);
+    let color_index = parts
+        .iter()
+        .position(|part| parse_color(name, part).is_ok());
+    let color = color_index
+        .map(|index| parse_color(name, &parts[index]))
+        .transpose()?
+        .unwrap_or([0, 0, 0, 255]);
+    let lengths = parts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != color_index)
+        .map(|(_, part)| parse_length(name, part))
+        .collect::<Result<Vec<_>, _>>()?;
+    let valid = if allow_spread { 2..=4 } else { 2..=3 };
+    if !valid.contains(&lengths.len()) || lengths.get(2).is_some_and(|value| *value < 0.0) {
+        return invalid(name, value);
+    }
+    Ok(Some(Shadow {
+        offset_x: lengths[0],
+        offset_y: lengths[1],
+        blur: lengths.get(2).copied().unwrap_or(0.0),
+        spread: if allow_spread {
+            lengths.get(3).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        },
+        color,
+    }))
+}
+
+fn parse_background_image(name: &str, value: &str) -> Result<Option<BackgroundImage>, StyleError> {
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let lower = value.to_ascii_lowercase();
+    let (function, inner) = if lower.starts_with("linear-gradient(") && value.ends_with(')') {
+        ("linear", &value[16..value.len() - 1])
+    } else if lower.starts_with("radial-gradient(") && value.ends_with(')') {
+        ("radial", &value[16..value.len() - 1])
+    } else {
+        return invalid(name, value);
     };
-    if let Some(color) = named {
-        return Ok(color);
+    let parts = split_top_level(inner, ',');
+    if parts.len() < 2 {
+        return invalid(name, value);
+    }
+    if function == "radial" {
+        let start = parse_color_stop(name, parts[parts.len() - 2])?;
+        let end = parse_color_stop(name, parts[parts.len() - 1])?;
+        return Ok(Some(BackgroundImage::RadialGradient { start, end }));
+    }
+    let (direction, color_start) = if parse_color_stop(name, parts[0]).is_ok() {
+        ([0.0, 1.0], 0)
+    } else {
+        (parse_gradient_direction(name, parts[0])?, 1)
+    };
+    if parts.len() - color_start < 2 {
+        return invalid(name, value);
+    }
+    Ok(Some(BackgroundImage::LinearGradient {
+        direction,
+        start: parse_color_stop(name, parts[color_start])?,
+        end: parse_color_stop(name, parts.last().expect("at least two stops"))?,
+    }))
+}
+
+fn parse_gradient_direction(name: &str, value: &str) -> Result<[f32; 2], StyleError> {
+    let value = value.trim().to_ascii_lowercase();
+    let angle = if let Some(side) = value.strip_prefix("to ") {
+        return match side.trim() {
+            "right" => Ok([1.0, 0.0]),
+            "left" => Ok([-1.0, 0.0]),
+            "bottom" => Ok([0.0, 1.0]),
+            "top" => Ok([0.0, -1.0]),
+            "bottom right" | "right bottom" => Ok([std::f32::consts::FRAC_1_SQRT_2; 2]),
+            "top left" | "left top" => Ok([-std::f32::consts::FRAC_1_SQRT_2; 2]),
+            "top right" | "right top" => Ok([
+                std::f32::consts::FRAC_1_SQRT_2,
+                -std::f32::consts::FRAC_1_SQRT_2,
+            ]),
+            "bottom left" | "left bottom" => Ok([
+                -std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ]),
+            _ => invalid(name, value.as_str()),
+        };
+    } else {
+        parse_angle(name, &value)?
+    };
+    Ok([angle.sin(), -angle.cos()])
+}
+
+fn parse_color_stop(name: &str, value: &str) -> Result<Color, StyleError> {
+    let parts = split_whitespace_preserving_functions(value);
+    parts
+        .first()
+        .and_then(|part| parse_color(name, part).ok())
+        .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))
+}
+
+fn argument<'a>(
+    arguments: &'a [&str],
+    index: usize,
+    original: &str,
+) -> Result<&'a str, StyleError> {
+    arguments
+        .get(index)
+        .copied()
+        .ok_or_else(|| StyleError::InvalidValue("transform".into(), original.into()))
+}
+
+fn split_arguments(value: &str) -> Vec<&str> {
+    let comma = split_top_level(value, ',');
+    if comma.len() > 1 {
+        comma
+    } else {
+        value.split_ascii_whitespace().collect()
+    }
+}
+
+fn split_top_level(value: &str, separator: char) -> Vec<&str> {
+    let mut depth = 0;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if character == separator && depth == 0 => {
+                parts.push(value[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(value[start..].trim());
+    parts
+}
+
+fn split_whitespace_preserving_functions(value: &str) -> Vec<String> {
+    let mut depth = 0;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if character.is_ascii_whitespace() && depth == 0 => {
+                if start < index {
+                    parts.push(value[start..index].to_owned());
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < value.len() {
+        parts.push(value[start..].to_owned());
+    }
+    parts
+}
+
+fn parse_color(name: &str, value: &str) -> Result<Color, StyleError> {
+    let lower = value.trim().to_ascii_lowercase();
+    if let Some(rgb) = named_color(&lower) {
+        return Ok([
+            (rgb >> 16) as u8,
+            (rgb >> 8) as u8,
+            rgb as u8,
+            if lower == "transparent" { 0 } else { 255 },
+        ]);
+    }
+    for function in ["rgb", "rgba", "hsl", "hsla"] {
+        if lower.starts_with(&format!("{function}(")) && lower.ends_with(')') {
+            return parse_function_color(
+                name,
+                function,
+                &lower[function.len() + 1..lower.len() - 1],
+            );
+        }
     }
 
-    let hex = value
+    let hex = lower
         .strip_prefix('#')
         .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))?;
     let parse = |value: &str| {
@@ -1312,6 +1616,240 @@ fn parse_color(name: &str, value: &str) -> Result<Color, StyleError> {
         ]),
         _ => invalid(name, value),
     }
+}
+
+fn parse_function_color(name: &str, function: &str, inner: &str) -> Result<Color, StyleError> {
+    let normalized = inner.replace('/', " ");
+    let parts = if normalized.contains(',') {
+        normalized
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        normalized.split_ascii_whitespace().collect::<Vec<_>>()
+    };
+    let has_alpha = matches!(function, "rgba" | "hsla") || parts.len() == 4;
+    if parts.len() != if has_alpha { 4 } else { 3 } {
+        return invalid(name, inner);
+    }
+    let alpha = if has_alpha {
+        parse_alpha(name, parts[3])?
+    } else {
+        255
+    };
+    if function.starts_with("rgb") {
+        return Ok([
+            parse_rgb_channel(name, parts[0])?,
+            parse_rgb_channel(name, parts[1])?,
+            parse_rgb_channel(name, parts[2])?,
+            alpha,
+        ]);
+    }
+    let hue = parse_hue(name, parts[0])?;
+    let saturation = parse_percentage(name, parts[1])?;
+    let lightness = parse_percentage(name, parts[2])?;
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let segment = hue / 60.0;
+    let secondary = chroma * (1.0 - (segment.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match segment as u32 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let match_value = lightness - chroma * 0.5;
+    Ok([
+        ((red + match_value) * 255.0).round() as u8,
+        ((green + match_value) * 255.0).round() as u8,
+        ((blue + match_value) * 255.0).round() as u8,
+        alpha,
+    ])
+}
+
+fn parse_rgb_channel(name: &str, value: &str) -> Result<u8, StyleError> {
+    let channel = if let Some(percent) = value.strip_suffix('%') {
+        parse_number(name, percent.trim())? * 2.55
+    } else {
+        parse_number(name, value)?
+    };
+    Ok(channel.clamp(0.0, 255.0).round() as u8)
+}
+
+fn parse_alpha(name: &str, value: &str) -> Result<u8, StyleError> {
+    let alpha = if let Some(percent) = value.strip_suffix('%') {
+        parse_number(name, percent.trim())? / 100.0
+    } else {
+        parse_number(name, value)?
+    };
+    Ok((alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+fn parse_percentage(name: &str, value: &str) -> Result<f32, StyleError> {
+    let value = value
+        .strip_suffix('%')
+        .ok_or_else(|| StyleError::InvalidValue(name.into(), value.into()))?;
+    Ok((parse_number(name, value.trim())? / 100.0).clamp(0.0, 1.0))
+}
+
+fn parse_hue(name: &str, value: &str) -> Result<f32, StyleError> {
+    let degrees = if let Some(value) = value.strip_suffix("deg") {
+        parse_number(name, value.trim())?
+    } else if let Some(value) = value.strip_suffix("turn") {
+        parse_number(name, value.trim())? * 360.0
+    } else if let Some(value) = value.strip_suffix("rad") {
+        parse_number(name, value.trim())?.to_degrees()
+    } else {
+        parse_number(name, value)?
+    };
+    Ok(degrees.rem_euclid(360.0))
+}
+
+fn named_color(value: &str) -> Option<u32> {
+    Some(match value {
+        "transparent" | "black" => 0x000000,
+        "silver" => 0xc0c0c0,
+        "gray" | "grey" => 0x808080,
+        "white" => 0xffffff,
+        "maroon" => 0x800000,
+        "red" => 0xff0000,
+        "purple" => 0x800080,
+        "fuchsia" | "magenta" => 0xff00ff,
+        "green" => 0x008000,
+        "lime" => 0x00ff00,
+        "olive" => 0x808000,
+        "yellow" => 0xffff00,
+        "navy" => 0x000080,
+        "blue" => 0x0000ff,
+        "teal" => 0x008080,
+        "aqua" | "cyan" => 0x00ffff,
+        "orange" => 0xffa500,
+        "aliceblue" => 0xf0f8ff,
+        "antiquewhite" => 0xfaebd7,
+        "aquamarine" => 0x7fffd4,
+        "azure" => 0xf0ffff,
+        "beige" => 0xf5f5dc,
+        "bisque" => 0xffe4c4,
+        "blanchedalmond" => 0xffebcd,
+        "blueviolet" => 0x8a2be2,
+        "brown" => 0xa52a2a,
+        "burlywood" => 0xdeb887,
+        "cadetblue" => 0x5f9ea0,
+        "chartreuse" => 0x7fff00,
+        "chocolate" => 0xd2691e,
+        "coral" => 0xff7f50,
+        "cornflowerblue" => 0x6495ed,
+        "cornsilk" => 0xfff8dc,
+        "crimson" => 0xdc143c,
+        "darkblue" => 0x00008b,
+        "darkcyan" => 0x008b8b,
+        "darkgoldenrod" => 0xb8860b,
+        "darkgray" | "darkgrey" => 0xa9a9a9,
+        "darkgreen" => 0x006400,
+        "darkkhaki" => 0xbdb76b,
+        "darkmagenta" => 0x8b008b,
+        "darkolivegreen" => 0x556b2f,
+        "darkorange" => 0xff8c00,
+        "darkorchid" => 0x9932cc,
+        "darkred" => 0x8b0000,
+        "darksalmon" => 0xe9967a,
+        "darkseagreen" => 0x8fbc8f,
+        "darkslateblue" => 0x483d8b,
+        "darkslategray" | "darkslategrey" => 0x2f4f4f,
+        "darkturquoise" => 0x00ced1,
+        "darkviolet" => 0x9400d3,
+        "deeppink" => 0xff1493,
+        "deepskyblue" => 0x00bfff,
+        "dimgray" | "dimgrey" => 0x696969,
+        "dodgerblue" => 0x1e90ff,
+        "firebrick" => 0xb22222,
+        "floralwhite" => 0xfffaf0,
+        "forestgreen" => 0x228b22,
+        "gainsboro" => 0xdcdcdc,
+        "ghostwhite" => 0xf8f8ff,
+        "gold" => 0xffd700,
+        "goldenrod" => 0xdaa520,
+        "greenyellow" => 0xadff2f,
+        "honeydew" => 0xf0fff0,
+        "hotpink" => 0xff69b4,
+        "indianred" => 0xcd5c5c,
+        "indigo" => 0x4b0082,
+        "ivory" => 0xfffff0,
+        "khaki" => 0xf0e68c,
+        "lavender" => 0xe6e6fa,
+        "lavenderblush" => 0xfff0f5,
+        "lawngreen" => 0x7cfc00,
+        "lemonchiffon" => 0xfffacd,
+        "lightblue" => 0xadd8e6,
+        "lightcoral" => 0xf08080,
+        "lightcyan" => 0xe0ffff,
+        "lightgoldenrodyellow" => 0xfafad2,
+        "lightgray" | "lightgrey" => 0xd3d3d3,
+        "lightgreen" => 0x90ee90,
+        "lightpink" => 0xffb6c1,
+        "lightsalmon" => 0xffa07a,
+        "lightseagreen" => 0x20b2aa,
+        "lightskyblue" => 0x87cefa,
+        "lightslategray" | "lightslategrey" => 0x778899,
+        "lightsteelblue" => 0xb0c4de,
+        "lightyellow" => 0xffffe0,
+        "limegreen" => 0x32cd32,
+        "linen" => 0xfaf0e6,
+        "mediumaquamarine" => 0x66cdaa,
+        "mediumblue" => 0x0000cd,
+        "mediumorchid" => 0xba55d3,
+        "mediumpurple" => 0x9370db,
+        "mediumseagreen" => 0x3cb371,
+        "mediumslateblue" => 0x7b68ee,
+        "mediumspringgreen" => 0x00fa9a,
+        "mediumturquoise" => 0x48d1cc,
+        "mediumvioletred" => 0xc71585,
+        "midnightblue" => 0x191970,
+        "mintcream" => 0xf5fffa,
+        "mistyrose" => 0xffe4e1,
+        "moccasin" => 0xffe4b5,
+        "navajowhite" => 0xffdead,
+        "oldlace" => 0xfdf5e6,
+        "olivedrab" => 0x6b8e23,
+        "orangered" => 0xff4500,
+        "orchid" => 0xda70d6,
+        "palegoldenrod" => 0xeee8aa,
+        "palegreen" => 0x98fb98,
+        "paleturquoise" => 0xafeeee,
+        "palevioletred" => 0xdb7093,
+        "papayawhip" => 0xffefd5,
+        "peachpuff" => 0xffdab9,
+        "peru" => 0xcd853f,
+        "pink" => 0xffc0cb,
+        "plum" => 0xdda0dd,
+        "powderblue" => 0xb0e0e6,
+        "rebeccapurple" => 0x663399,
+        "rosybrown" => 0xbc8f8f,
+        "royalblue" => 0x4169e1,
+        "saddlebrown" => 0x8b4513,
+        "salmon" => 0xfa8072,
+        "sandybrown" => 0xf4a460,
+        "seagreen" => 0x2e8b57,
+        "seashell" => 0xfff5ee,
+        "sienna" => 0xa0522d,
+        "skyblue" => 0x87ceeb,
+        "slateblue" => 0x6a5acd,
+        "slategray" | "slategrey" => 0x708090,
+        "snow" => 0xfffafa,
+        "springgreen" => 0x00ff7f,
+        "steelblue" => 0x4682b4,
+        "tan" => 0xd2b48c,
+        "thistle" => 0xd8bfd8,
+        "tomato" => 0xff6347,
+        "turquoise" => 0x40e0d0,
+        "violet" => 0xee82ee,
+        "wheat" => 0xf5deb3,
+        "whitesmoke" => 0xf5f5f5,
+        "yellowgreen" => 0x9acd32,
+        _ => return None,
+    })
 }
 
 fn invalid<T>(name: &str, value: &str) -> Result<T, StyleError> {
@@ -1781,5 +2319,83 @@ mod tests {
 
         assert!(set_style(&mut style, "grid-row", Some("1 / 2 / 3")).is_err());
         assert!(set_style(&mut style, "grid-area", Some("0")).is_err());
+    }
+
+    #[test]
+    fn parses_functional_and_extended_named_colors() {
+        let mut style = Style::default();
+        set_style(&mut style, "color", Some("rgb(100% 0% 50% / 25%)")).unwrap();
+        assert_eq!(style.color, Some([255, 0, 128, 64]));
+
+        set_style(&mut style, "color", Some("rgba(12, 34, 56, 0.5)")).unwrap();
+        assert_eq!(style.color, Some([12, 34, 56, 128]));
+
+        set_style(&mut style, "color", Some("hsl(120 100% 25%)")).unwrap();
+        assert_eq!(style.color, Some([0, 128, 0, 255]));
+
+        set_style(&mut style, "color", Some("rebeccapurple")).unwrap();
+        assert_eq!(style.color, Some([102, 51, 153, 255]));
+        set_style(&mut style, "color", Some("lightgoldenrodyellow")).unwrap();
+        assert_eq!(style.color, Some([250, 250, 210, 255]));
+    }
+
+    #[test]
+    fn parses_opacity_transform_and_shadows() {
+        let mut style = Style::default();
+        set_style(&mut style, "opacity", Some("0.35")).unwrap();
+        set_style(
+            &mut style,
+            "transform",
+            Some("translate(10px, 20px) scale(2) rotate(0deg)"),
+        )
+        .unwrap();
+        set_style(
+            &mut style,
+            "box-shadow",
+            Some("4px 6px 8px 2px rgba(0, 0, 0, 0.5)"),
+        )
+        .unwrap();
+        set_style(&mut style, "text-shadow", Some("1px 2px 3px navy")).unwrap();
+
+        assert_eq!(style.opacity, 0.35);
+        assert_eq!(style.transform.matrix, [2.0, 0.0, 0.0, 2.0, 10.0, 20.0]);
+        assert_eq!(style.box_shadow.unwrap().spread, 2.0);
+        assert_eq!(style.box_shadow.unwrap().color, [0, 0, 0, 128]);
+        assert_eq!(style.text_shadow.unwrap().color, [0, 0, 128, 255]);
+        assert!(set_style(&mut style, "opacity", Some("1.1")).is_err());
+        assert!(set_style(&mut style, "text-shadow", Some("1px 2px 3px 4px red")).is_err());
+    }
+
+    #[test]
+    fn parses_linear_and_radial_gradient_images() {
+        let mut style = Style::default();
+        set_style(
+            &mut style,
+            "background-image",
+            Some("linear-gradient(to right, red 0%, rgb(0 0 255) 100%)"),
+        )
+        .unwrap();
+        assert_eq!(
+            style.background_image,
+            Some(BackgroundImage::LinearGradient {
+                direction: [1.0, 0.0],
+                start: [255, 0, 0, 255],
+                end: [0, 0, 255, 255],
+            })
+        );
+
+        set_style(
+            &mut style,
+            "background-image",
+            Some("radial-gradient(white, transparent)"),
+        )
+        .unwrap();
+        assert_eq!(
+            style.background_image,
+            Some(BackgroundImage::RadialGradient {
+                start: [255, 255, 255, 255],
+                end: [0, 0, 0, 0],
+            })
+        );
     }
 }
