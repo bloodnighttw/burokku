@@ -253,7 +253,10 @@ impl ElementLayoutTree<'_> {
         let (kind, scroll) = match &data.kind {
             ElementKind::Text(text) => {
                 let mut style = data.text_style.clone();
-                style.transform = relative_transform;
+                style.opacity = data.paint_style.opacity;
+                style.transform = Transform {
+                    matrix: data.paint_style.transform.matrix,
+                };
                 (
                     LayoutKind::Text {
                         text: text.clone(),
@@ -360,8 +363,10 @@ impl ElementLayoutTree<'_> {
                             &data.paint_style,
                             width,
                             height,
-                            data.text_style.opacity,
-                            relative_transform,
+                            data.paint_style.opacity,
+                            Transform {
+                                matrix: data.paint_style.transform.matrix,
+                            },
                         ),
                         stacking_layer: StackingLayer::from_style(&data.paint_style),
                         children,
@@ -827,7 +832,7 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
     if let Some(font_family) = &style.font_family {
         merged.font_family = FontFamily::Named(font_family.clone());
     }
-    merged.opacity = (parent.opacity * style.opacity).clamp(0.0, 1.0);
+    merged.opacity = style.opacity;
     merged.transform = Transform::IDENTITY;
     merged.shadows = style
         .text_shadow

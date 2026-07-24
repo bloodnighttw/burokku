@@ -10,11 +10,16 @@ use super::Layout;
 pub struct StackingLayer {
     z_index: Option<i32>,
     isolated: bool,
+    effect_context: bool,
 }
 
 impl StackingLayer {
     pub const fn new(z_index: Option<i32>, isolated: bool) -> Self {
-        Self { z_index, isolated }
+        Self {
+            z_index,
+            isolated,
+            effect_context: false,
+        }
     }
 
     pub const fn z_index(self) -> Option<i32> {
@@ -27,11 +32,10 @@ impl StackingLayer {
 
     /// Whether this layer establishes a new stacking context.
     ///
-    /// Burokku currently supports the two context-creating style conditions:
-    /// a numeric `z-index` and `isolation: isolate`. Add future conditions
-    /// such as opacity or transforms here when their styles are implemented.
+    /// Burokku currently supports numeric `z-index`, `isolation: isolate`,
+    /// opacity, and transforms as context-creating style conditions.
     pub const fn establishes_context(self) -> bool {
-        self.z_index.is_some() || self.isolated
+        self.z_index.is_some() || self.isolated || self.effect_context
     }
 
     /// Compatibility alias for [`Self::establishes_context`].
@@ -52,7 +56,11 @@ impl StackingLayer {
             ZIndex::Value(index) => Some(index),
         };
         let isolated = style.isolation == Isolation::Isolate;
-        Self::new(z_index, isolated)
+        Self {
+            z_index,
+            isolated,
+            effect_context: style.opacity < 1.0 || style.transform != Default::default(),
+        }
     }
 }
 
@@ -111,5 +119,22 @@ mod tests {
         let layer = StackingLayer::from_style(&ElementStyle::default());
 
         assert!(!layer.establishes_context());
+    }
+
+    #[test]
+    fn opacity_and_transforms_establish_contexts() {
+        let opacity = ElementStyle {
+            opacity: 0.5,
+            ..ElementStyle::default()
+        };
+        let transformed = ElementStyle {
+            transform: crate::ui::elements::styles::Transform {
+                matrix: [1.0, 0.0, 0.0, 1.0, 4.0, 0.0],
+            },
+            ..ElementStyle::default()
+        };
+
+        assert!(StackingLayer::from_style(&opacity).establishes_context());
+        assert!(StackingLayer::from_style(&transformed).establishes_context());
     }
 }

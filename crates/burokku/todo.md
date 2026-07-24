@@ -33,8 +33,8 @@
 
 ## Paint
 
-- [ ] Add opacity.
-- [ ] Add transforms.
+- [x] Add opacity.
+- [x] Add transforms.
 - [x] Add box and text shadows.
 - [x] Add background images and gradients.
 - [x] Add `rgb()`, `rgba()`, `hsl()`, and `hsla()` colors.

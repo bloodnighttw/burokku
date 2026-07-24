@@ -1,4 +1,4 @@
-use super::{BoxStyle, Clip, Color, Rect, TextStyle};
+use super::{BoxStyle, Clip, Color, Rect, TextStyle, Transform};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawCommand {
@@ -16,6 +16,13 @@ pub enum DrawCommand {
         bounds: Rect,
         text: String,
         style: TextStyle,
+        clips: Vec<Clip>,
+    },
+    Group {
+        canvas: Box<Canvas>,
+        origin: [f32; 2],
+        transform: Transform,
+        opacity: f32,
         clips: Vec<Clip>,
     },
 }
@@ -113,6 +120,24 @@ impl Canvas {
 
     pub fn commands(&self) -> &[DrawCommand] {
         &self.commands
+    }
+
+    pub fn draw_group(
+        &mut self,
+        canvas: Canvas,
+        origin: [f32; 2],
+        transform: Transform,
+        opacity: f32,
+        clips: impl IntoIterator<Item = Clip>,
+    ) -> &mut Self {
+        self.commands.push(DrawCommand::Group {
+            canvas: Box::new(canvas),
+            origin,
+            transform,
+            opacity: opacity.clamp(0.0, 1.0),
+            clips: clips.into_iter().collect(),
+        });
+        self
     }
 
     pub fn clear(&mut self) {
