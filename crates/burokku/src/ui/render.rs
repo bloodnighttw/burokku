@@ -52,11 +52,21 @@ pub(crate) fn build_frame_with_scroll(
 }
 
 fn frame_from_layout(layout: Layout, scale_factor: f32) -> UiFrame {
+    let canvas = canvas_from_layout(&layout, scale_factor);
+    UiFrame { layout, canvas }
+}
+
+fn canvas_from_layout(layout: &Layout, scale_factor: f32) -> Canvas {
     let scale_factor = scale_factor.max(f32::EPSILON);
     let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
-    paint_layout(&layout, scale_factor, &mut canvas);
-    paint_scrollbars(&layout, scale_factor, &mut canvas);
-    UiFrame { layout, canvas }
+    let viewport = Rect::new(0.0, 0.0, layout.width, layout.height);
+    paint_layout(layout, viewport, scale_factor, &mut canvas);
+    paint_scrollbars(layout, viewport, scale_factor, &mut canvas);
+    canvas
+}
+
+pub(crate) fn repaint_frame(frame: &mut UiFrame, scale_factor: f32) {
+    frame.canvas = canvas_from_layout(&frame.layout, scale_factor);
 }
 
 /// Computes the document layout and converts it into renderer drawing commands.
@@ -77,7 +87,7 @@ pub fn build_canvas(
     .canvas
 }
 
-fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
+fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
     for layout in layout {
         if layout.width <= 0.0 && layout.height <= 0.0 {
             continue;
@@ -89,6 +99,10 @@ fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
             layout.width * scale_factor,
             layout.height * scale_factor,
         );
+        let logical_bounds = visual_bounds(layout);
+        if !intersects_visible_area(logical_bounds, &layout.clips, viewport) {
+            continue;
+        }
         let clips = layout
             .clips
             .iter()
@@ -116,7 +130,7 @@ fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
     }
 }
 
-fn paint_scrollbars(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
+fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
     let track_style = BoxStyle {
         background: Color::from_rgba8(15, 23, 42, 36),
         corner_radius: CornerRadius::all(4.0 * scale_factor),
@@ -137,20 +151,53 @@ fn paint_scrollbars(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
             .iter()
             .copied()
             .chain([scroll.clip])
-            .map(|clip| scaled_clip(clip, scale_factor));
+            .collect::<Vec<_>>();
         for scrollbar in [scroll.horizontal, scroll.vertical].into_iter().flatten() {
+            if !intersects_visible_area(scrollbar.track, &clips, viewport) {
+                continue;
+            }
             canvas.draw_overlay_box_with_clips(
                 scaled_rect(scrollbar.track, scale_factor),
                 track_style,
-                clips.clone(),
+                clips
+                    .iter()
+                    .copied()
+                    .map(|clip| scaled_clip(clip, scale_factor)),
             );
             canvas.draw_overlay_box_with_clips(
                 scaled_rect(scrollbar.thumb, scale_factor),
                 thumb_style,
-                clips.clone(),
+                clips
+                    .iter()
+                    .copied()
+                    .map(|clip| scaled_clip(clip, scale_factor)),
             );
         }
     }
+}
+
+fn visual_bounds(layout: &Layout) -> Rect {
+    let mut bounds = Rect::new(layout.x, layout.y, layout.width, layout.height);
+    if let LayoutKind::Box { style, .. } = &layout.kind {
+        if let Some(outline) = style.outline {
+            let expansion = (outline.offset + outline.width).max(0.0);
+            bounds = Rect::new(
+                bounds.x - expansion,
+                bounds.y - expansion,
+                bounds.width + expansion * 2.0,
+                bounds.height + expansion * 2.0,
+            );
+        }
+    }
+    bounds
+}
+
+fn intersects_visible_area(mut bounds: Rect, clips: &[Clip], viewport: Rect) -> bool {
+    bounds = bounds.intersection(viewport);
+    for clip in clips {
+        bounds = bounds.intersection(clip.rect);
+    }
+    bounds.width > 0.0 && bounds.height > 0.0
 }
 
 fn scaled_rect(rect: Rect, scale_factor: f32) -> Rect {
@@ -558,5 +605,109 @@ mod tests {
 
         assert!(automatic.horizontal.is_none() && automatic.vertical.is_none());
         assert!(forced.horizontal.is_some() && forced.vertical.is_some());
+    }
+
+    #[test]
+    fn retained_scroll_update_matches_a_full_layout_rebuild() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Div);
+        document
+            .set_style(container, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(container, "height", Some("60px"))
+            .unwrap();
+        document
+            .set_style(container, "overflow", Some("auto"))
+            .unwrap();
+        document.set_style(content, "width", Some("240px")).unwrap();
+        document
+            .set_style(content, "height", Some("180px"))
+            .unwrap();
+        document
+            .set_style(content, "overflow", Some("auto"))
+            .unwrap();
+        document.set_style(child, "width", Some("400px")).unwrap();
+        document.set_style(child, "height", Some("300px")).unwrap();
+        document
+            .set_style(child, "background-color", Some("#ff0000"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, content, None).unwrap();
+        document.insert(content, child, None).unwrap();
+
+        let mut retained = build_frame(&document, 300.0, 200.0, 2.0, &mut TextSystem::new());
+        let outer_offset = ScrollOffset::new(50.0, 40.0);
+        let inner_offset = ScrollOffset::new(60.0, 50.0);
+        assert!(retained.layout.apply_scroll_offset(container, outer_offset));
+        assert!(retained.layout.apply_scroll_offset(content, inner_offset));
+        repaint_frame(&mut retained, 2.0);
+
+        let expected = build_frame_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            2.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(container, outer_offset), (content, inner_offset)]),
+        );
+        assert_eq!(retained, expected);
+    }
+
+    #[test]
+    fn canvas_culls_boxes_outside_the_scroll_clip() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        document
+            .set_style(container, "display", Some("flex"))
+            .unwrap();
+        document
+            .set_style(container, "flex-direction", Some("column"))
+            .unwrap();
+        document
+            .set_style(container, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(container, "height", Some("60px"))
+            .unwrap();
+        document
+            .set_style(container, "overflow", Some("auto"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+
+        for color in ["#ff0000", "#00ff00", "#0000ff", "#000000"] {
+            let child = document.create_node(ElementKind::Div);
+            document.set_style(child, "width", Some("100px")).unwrap();
+            document.set_style(child, "height", Some("40px")).unwrap();
+            document.set_style(child, "flex-shrink", Some("0")).unwrap();
+            document
+                .set_style(child, "background-color", Some(color))
+                .unwrap();
+            document.insert(container, child, None).unwrap();
+        }
+
+        let frame = build_frame_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            1.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(container, ScrollOffset::new(0.0, 80.0))]),
+        );
+        let backgrounds: Vec<_> = frame
+            .canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                render::DrawCommand::Box { style, .. } => Some(style.background),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!backgrounds.contains(&Color::from_rgba8(0xff, 0, 0, 0xff)));
+        assert!(!backgrounds.contains(&Color::from_rgba8(0, 0xff, 0, 0xff)));
+        assert!(backgrounds.contains(&Color::from_rgba8(0, 0, 0xff, 0xff)));
     }
 }

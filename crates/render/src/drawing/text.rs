@@ -1,6 +1,6 @@
 use super::Color;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FontFamily {
     #[default]
     SansSerif,
@@ -9,7 +9,7 @@ pub enum FontFamily {
     Named(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TextWrap {
     None,
     Glyph,

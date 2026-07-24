@@ -28,6 +28,7 @@ pub struct GPU {
     ui_version: u64,
     scroll_offsets: HashMap<u64, ScrollOffset>,
     scroll_drag: Option<ScrollDrag>,
+    canvas_dirty: bool,
     // The instance must stay alive for as long as the surface is in use.
     _instance: wgpu::Instance,
 }
@@ -64,6 +65,7 @@ impl GPU {
             ui_version,
             scroll_offsets,
             scroll_drag: None,
+            canvas_dirty: false,
             _instance: instance,
         })
     }
@@ -80,6 +82,7 @@ impl GPU {
             &self.scroll_offsets,
         );
         self.ui_version = ui_version;
+        self.canvas_dirty = false;
     }
 
     pub fn sync_ui(&mut self, window: &Window) -> bool {
@@ -94,10 +97,15 @@ impl GPU {
             &self.scroll_offsets,
         );
         self.ui_version = version;
+        self.canvas_dirty = false;
         true
     }
 
     pub fn render(&mut self, window: &Window) -> Result<RenderTimings, RenderError> {
+        if self.canvas_dirty {
+            ui::repaint_frame(&mut self.frame, window.scale_factor() as f32);
+            self.canvas_dirty = false;
+        }
         self.renderer.render_timed_with_pre_present(
             &self.surface,
             &self.frame.canvas,
@@ -129,7 +137,7 @@ impl GPU {
             return false;
         };
         self.scroll_offsets.insert(element_id, offset);
-        self.rebuild(window);
+        self.apply_scroll_offset(window, element_id, offset);
         true
     }
 
@@ -174,7 +182,7 @@ impl GPU {
             next.clamp(0.0, axis_offset(scrollbar.axis, scroll.max_offset)),
         );
         self.scroll_offsets.insert(element_id, offset);
-        self.rebuild(window);
+        self.apply_scroll_offset(window, element_id, offset);
         true
     }
 
@@ -226,7 +234,7 @@ impl GPU {
             return false;
         }
         self.scroll_offsets.insert(drag.element_id, offset);
-        self.rebuild(window);
+        self.apply_scroll_offset(window, drag.element_id, offset);
         true
     }
 
@@ -250,6 +258,15 @@ impl GPU {
             &self.scroll_offsets,
         );
         self.ui_version = version;
+        self.canvas_dirty = false;
+    }
+
+    fn apply_scroll_offset(&mut self, window: &Window, element_id: u64, offset: ScrollOffset) {
+        if self.frame.layout.apply_scroll_offset(element_id, offset) {
+            self.canvas_dirty = true;
+        } else {
+            self.rebuild(window);
+        }
     }
 }
 

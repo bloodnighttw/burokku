@@ -7,8 +7,8 @@ pub mod layouts;
 
 pub use bridge::install;
 pub use elements::{Document, DocumentError, ElementKind};
-pub(crate) use render::build_frame_with_scroll;
 pub use render::{build_canvas, UiFrame};
+pub(crate) use render::{build_frame_with_scroll, repaint_frame};
 pub use store::UiStore;
 
 #[cfg(test)]

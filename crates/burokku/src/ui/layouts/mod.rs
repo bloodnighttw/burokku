@@ -179,6 +179,116 @@ impl Layout {
     pub fn hit_test(&self, x: f32, y: f32) -> Option<&Layout> {
         self.iter_rev().find(|layout| layout.contains(x, y))
     }
+
+    /// Updates a retained scroll container without recomputing document layout.
+    ///
+    /// Scrolling changes descendant placement and scrollbar thumb geometry,
+    /// but it does not affect the sizes produced by the layout engine.
+    pub(crate) fn apply_scroll_offset(&mut self, element_id: u64, requested: ScrollOffset) -> bool {
+        if self.element_id == element_id {
+            return self.apply_own_scroll_offset(requested);
+        }
+
+        match &mut self.kind {
+            LayoutKind::Box { children, .. } => children
+                .iter_mut()
+                .any(|child| child.apply_scroll_offset(element_id, requested)),
+            LayoutKind::Text { .. } => false,
+        }
+    }
+
+    fn apply_own_scroll_offset(&mut self, requested: ScrollOffset) -> bool {
+        let Some(scroll) = &mut self.scroll else {
+            return false;
+        };
+        let offset = ScrollOffset::new(
+            requested.x.clamp(0.0, scroll.max_offset.x),
+            requested.y.clamp(0.0, scroll.max_offset.y),
+        );
+        if offset == scroll.offset {
+            return false;
+        }
+
+        let translation = ScrollOffset::new(scroll.offset.x - offset.x, scroll.offset.y - offset.y);
+        // Descendant clip lists begin with this box's ancestor clips followed
+        // by this scroll container's stationary viewport clip. Clips created
+        // farther down the moving subtree must move with their owning boxes.
+        let stationary_clip_count = self.clips.len() + 1;
+        if let LayoutKind::Box { children, .. } = &mut self.kind {
+            for child in children {
+                child.translate_scrolled_subtree(translation, stationary_clip_count);
+            }
+        }
+
+        scroll.offset = offset;
+        if let Some(scrollbar) = &mut scroll.horizontal {
+            position_scrollbar_thumb(scrollbar, offset.x, scroll.max_offset.x);
+        }
+        if let Some(scrollbar) = &mut scroll.vertical {
+            position_scrollbar_thumb(scrollbar, offset.y, scroll.max_offset.y);
+        }
+        true
+    }
+
+    fn translate_scrolled_subtree(
+        &mut self,
+        translation: ScrollOffset,
+        stationary_clip_count: usize,
+    ) {
+        self.x += translation.x;
+        self.y += translation.y;
+        for clip in self.clips.iter_mut().skip(stationary_clip_count) {
+            translate_rect(&mut clip.rect, translation);
+        }
+
+        if let Some(scroll) = &mut self.scroll {
+            translate_rect(&mut scroll.viewport, translation);
+            translate_rect(&mut scroll.clip.rect, translation);
+            for scrollbar in [&mut scroll.horizontal, &mut scroll.vertical]
+                .into_iter()
+                .flatten()
+            {
+                translate_rect(&mut scrollbar.track, translation);
+                translate_rect(&mut scrollbar.thumb, translation);
+            }
+        }
+
+        if let LayoutKind::Box { children, .. } = &mut self.kind {
+            for child in children {
+                child.translate_scrolled_subtree(translation, stationary_clip_count);
+            }
+        }
+    }
+}
+
+fn position_scrollbar_thumb(scrollbar: &mut Scrollbar, offset: f32, max_offset: f32) {
+    let (track_start, track_size, thumb_size) = match scrollbar.axis {
+        ScrollbarAxis::Horizontal => (
+            scrollbar.track.x,
+            scrollbar.track.width,
+            scrollbar.thumb.width,
+        ),
+        ScrollbarAxis::Vertical => (
+            scrollbar.track.y,
+            scrollbar.track.height,
+            scrollbar.thumb.height,
+        ),
+    };
+    let travel = (track_size - thumb_size).max(0.0);
+    let position = if max_offset > 0.0 {
+        travel * offset / max_offset
+    } else {
+        0.0
+    };
+    match scrollbar.axis {
+        ScrollbarAxis::Horizontal => scrollbar.thumb.x = track_start + position,
+        ScrollbarAxis::Vertical => scrollbar.thumb.y = track_start + position,
+    }
+}
+
+fn translate_rect(rect: &mut Rect, translation: ScrollOffset) {
+    rect.x += translation.x;
+    rect.y += translation.y;
 }
 
 impl<'a> IntoIterator for &'a Layout {
