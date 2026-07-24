@@ -7,7 +7,7 @@ mod stacking;
 #[cfg(test)]
 mod tests;
 
-use render::{BoxStyle, Clip, Rect, TextStyle, TextSystem};
+use render::{BoxStyle, Clip, Rect, TextRunMetrics, TextStyle, TextSystem};
 use std::collections::HashMap;
 
 use crate::ui::elements::Document;
@@ -123,6 +123,7 @@ pub enum LayoutKind {
         text: String,
         style: TextStyle,
         line_count: usize,
+        runs: Vec<TextRunMetrics>,
     },
 }
 

@@ -16,6 +16,7 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
             text: "Burokku".into(),
             style: TextStyle::default(),
             line_count: 1,
+            runs: Vec::new(),
         },
     }
 }

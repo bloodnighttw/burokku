@@ -23,9 +23,28 @@ pub enum TextWrap {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TextWhiteSpace {
     #[default]
-    Collapse,
-    CollapsePreserveNewlines,
-    Preserve,
+    Normal,
+    NoWrap,
+    Pre,
+    PreWrap,
+    PreLine,
+    BreakSpaces,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextOverflowWrap {
+    #[default]
+    Normal,
+    BreakWord,
+    Anywhere,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextWordBreak {
+    #[default]
+    Normal,
+    BreakAll,
+    KeepAll,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -83,6 +102,8 @@ pub struct TextStyle {
     pub text_decoration_color: Color,
     pub text_decoration_color_is_current: bool,
     pub white_space: TextWhiteSpace,
+    pub overflow_wrap: TextOverflowWrap,
+    pub word_break: TextWordBreak,
     pub wrap: TextWrap,
 }
 
@@ -102,7 +123,9 @@ impl Default for TextStyle {
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: Color::BLACK,
             text_decoration_color_is_current: true,
-            white_space: TextWhiteSpace::Collapse,
+            white_space: TextWhiteSpace::Normal,
+            overflow_wrap: TextOverflowWrap::Normal,
+            word_break: TextWordBreak::Normal,
             wrap: TextWrap::Word,
         }
     }
