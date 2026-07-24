@@ -1,6 +1,6 @@
 use std::{collections::HashMap, error::Error, sync::Arc};
 
-use render::{wgpu, RenderError, Renderer, SurfaceSize, TextSystem};
+use render::{wgpu, RenderError, RenderTimings, Renderer, SurfaceSize, TextSystem};
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::ui::{
@@ -97,8 +97,8 @@ impl GPU {
         true
     }
 
-    pub fn render(&mut self, window: &Window) -> Result<(), RenderError> {
-        self.renderer.render_with_pre_present(
+    pub fn render(&mut self, window: &Window) -> Result<RenderTimings, RenderError> {
+        self.renderer.render_timed_with_pre_present(
             &self.surface,
             &self.frame.canvas,
             &mut self.text_system,

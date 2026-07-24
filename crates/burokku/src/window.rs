@@ -86,8 +86,12 @@ impl AppWindow {
         }
 
         match self.gpu.render(&window) {
-            Ok(())
-            | Err(render::RenderError::SurfaceTimeout | render::RenderError::SurfaceOccluded) => {}
+            Ok(timings) => println!(
+                "Render time: {:.3} ms (queue submit: {:.3} ms)",
+                timings.total.as_secs_f64() * 1_000.0,
+                timings.queue_submit.as_secs_f64() * 1_000.0,
+            ),
+            Err(render::RenderError::SurfaceTimeout | render::RenderError::SurfaceOccluded) => {}
             Err(render::RenderError::SurfaceLost | render::RenderError::SurfaceOutdated) => {
                 self.queue_surface();
                 self.request_redraw();

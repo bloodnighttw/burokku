@@ -18,9 +18,10 @@ use text::TextRenderer;
 
 pub use surface::SurfaceSize;
 
-/// CPU-side timing for submitting one rendered frame to the GPU queue.
+/// CPU-side timings for rendering and submitting one frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderTimings {
+    pub total: Duration,
     pub queue_submit: Duration,
 }
 
@@ -141,6 +142,7 @@ impl Renderer {
         text_system: &mut TextSystem,
         on_pre_present: impl FnOnce(),
     ) -> Result<RenderTimings, RenderError> {
+        let render_started_at = Instant::now();
         let frame = self.surface.acquire(surface)?;
         let view = frame
             .texture
@@ -148,7 +150,10 @@ impl Renderer {
         let queue_submit = self.draw_to_view(&view, canvas, self.surface.size(), text_system)?;
         on_pre_present();
         frame.present();
-        Ok(RenderTimings { queue_submit })
+        Ok(RenderTimings {
+            total: render_started_at.elapsed(),
+            queue_submit,
+        })
     }
 
     fn draw_to_view(
