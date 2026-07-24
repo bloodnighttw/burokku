@@ -11,7 +11,7 @@ mod error;
 
 pub(crate) mod styles;
 
-const BODY_ID: u64 = 0;
+pub(super) const BODY_ID: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ElementKind {

@@ -1,6 +1,21 @@
 //! Computed UI nodes ready for rendering and hit testing.
+//! This should be used inside main threads.
 
-use render::{BoxStyle, TextStyle};
+mod compute;
+
+use render::{BoxStyle, TextStyle, TextSystem};
+
+use crate::ui::elements::Document;
+
+/// Computes a renderable layout tree from an element document.
+pub fn compute_layout(
+    document: &Document,
+    viewport_width: f32,
+    viewport_height: f32,
+    text_system: &mut TextSystem,
+) -> Layout {
+    compute::compute_layout(document, viewport_width, viewport_height, text_system)
+}
 
 /// The computed geometry and contents of an element.
 ///
