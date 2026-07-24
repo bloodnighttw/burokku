@@ -30,6 +30,7 @@ fn box_layout(element_id: u64, stacking_layer: StackingLayer, children: Vec<Layo
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
             stacking_layer,
+            native_appearance: None,
             children,
         },
     }
@@ -62,6 +63,7 @@ fn hit_testing_returns_the_topmost_child() {
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
             stacking_layer: StackingLayer::default(),
+            native_appearance: None,
             children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
         },
     };

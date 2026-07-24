@@ -207,16 +207,19 @@
       this.style = createStyle(id, this.__styleValues);
     }
     setAttribute(name, value) {
-      name = String(name);
+      name = String(name).toLowerCase();
       value = String(value);
       this.__attributes.set(name, value);
       if (name === "style") this.style.cssText = value;
+      if (this.__burokkuId !== null) __burokku_dom_set_attribute(this.__burokkuId, name, value);
     }
-    getAttribute(name) { return this.__attributes.get(String(name)) ?? null; }
-    hasAttribute(name) { return this.__attributes.has(String(name)); }
+    getAttribute(name) { return this.__attributes.get(String(name).toLowerCase()) ?? null; }
+    hasAttribute(name) { return this.__attributes.has(String(name).toLowerCase()); }
     removeAttribute(name) {
-      this.__attributes.delete(String(name));
+      name = String(name).toLowerCase();
+      this.__attributes.delete(name);
       if (name === "style") this.style.cssText = "";
+      if (this.__burokkuId !== null) __burokku_dom_set_attribute(this.__burokkuId, name, null);
     }
     setAttributeNS(_namespace, name, value) { this.setAttribute(name, value); }
     removeAttributeNS(_namespace, name) { this.removeAttribute(name); }
@@ -235,6 +238,39 @@
   }
 
   class HTMLElement extends Element {}
+  class HTMLButtonElement extends HTMLElement {
+    get disabled() { return this.hasAttribute("disabled"); }
+    set disabled(value) { value ? this.setAttribute("disabled", "") : this.removeAttribute("disabled"); }
+  }
+  class HTMLOptionElement extends HTMLElement {
+    get disabled() { return this.hasAttribute("disabled"); }
+    set disabled(value) { value ? this.setAttribute("disabled", "") : this.removeAttribute("disabled"); }
+    get selected() {
+      if (this.hasAttribute("selected")) return true;
+      const select = this.parentElement;
+      return select instanceof HTMLSelectElement
+        && !select.children.some(option => option.hasAttribute("selected"))
+        && select.children.find(option => option instanceof HTMLOptionElement) === this;
+    }
+    set selected(value) { value ? this.setAttribute("selected", "") : this.removeAttribute("selected"); }
+    get value() { return this.getAttribute("value") ?? this.textContent; }
+    set value(value) { this.setAttribute("value", value); }
+  }
+  class HTMLSelectElement extends HTMLElement {
+    get disabled() { return this.hasAttribute("disabled"); }
+    set disabled(value) { value ? this.setAttribute("disabled", "") : this.removeAttribute("disabled"); }
+    get options() { return this.children.filter(child => child instanceof HTMLOptionElement); }
+    get selectedIndex() { return this.options.findIndex(option => option.selected); }
+    set selectedIndex(index) {
+      const selected = this.options[Number(index)];
+      for (const option of this.options) option.selected = option === selected;
+    }
+    get value() { return this.options.find(option => option.selected)?.value ?? ""; }
+    set value(value) {
+      const selected = this.options.find(option => option.value === String(value));
+      for (const option of this.options) option.selected = option === selected;
+    }
+  }
   class Text extends Node {
     constructor(id, data) {
       super(id, 3, "#text");
@@ -271,7 +307,12 @@
       this.readyState = "complete";
     }
     createElement(name) {
-      const element = new HTMLElement(__burokku_dom_create("element", String(name)), String(name));
+      name = String(name).toLowerCase();
+      const ElementClass = name === "button" ? HTMLButtonElement
+        : name === "select" ? HTMLSelectElement
+        : name === "option" ? HTMLOptionElement
+        : HTMLElement;
+      const element = new ElementClass(__burokku_dom_create("element", name), name);
       element.ownerDocument = this;
       return element;
     }
@@ -310,6 +351,9 @@
     Node,
     Element,
     HTMLElement,
+    HTMLButtonElement,
+    HTMLSelectElement,
+    HTMLOptionElement,
     HTMLIFrameElement: class HTMLIFrameElement extends HTMLElement {},
     SVGElement: class SVGElement extends Element {},
     Text,

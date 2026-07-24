@@ -50,4 +50,45 @@ mod tests {
             ElementKind::Text("after".into())
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn javascript_select_properties_update_native_selection_state() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        let selected = runtime
+            .eval::<String>(
+                r##"
+                const select = document.createElement("select");
+                const first = document.createElement("option");
+                first.value = "first";
+                first.textContent = "First";
+                const second = document.createElement("option");
+                second.value = "second";
+                second.textContent = "Second";
+                select.append(first, second);
+                document.body.append(select);
+                select.value = "second";
+                `${select.value}:${select.selectedIndex}`;
+                "##,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(selected, "second:1");
+        let snapshot = store.snapshot();
+        let select = snapshot.node(snapshot.body().children[0]).unwrap();
+        assert_eq!(select.kind, ElementKind::Select);
+        assert_eq!(
+            snapshot.node(select.children[0]).unwrap().kind,
+            ElementKind::Option
+        );
+        assert!(snapshot
+            .node(select.children[1])
+            .unwrap()
+            .attributes
+            .contains_key("selected"));
+    }
 }

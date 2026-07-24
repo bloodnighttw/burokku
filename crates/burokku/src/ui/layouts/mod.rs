@@ -7,7 +7,7 @@ mod stacking;
 #[cfg(test)]
 mod tests;
 
-use render::{BoxStyle, Clip, Rect, TextStyle, TextSystem};
+use render::{BoxStyle, Clip, Color, Rect, TextStyle, TextSystem};
 use std::collections::HashMap;
 
 use crate::ui::elements::Document;
@@ -116,12 +116,19 @@ pub enum LayoutKind {
     Box {
         style: BoxStyle,
         stacking_layer: StackingLayer,
+        native_appearance: Option<NativeAppearance>,
         children: Vec<Layout>,
     },
     Text {
         text: String,
         style: TextStyle,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeAppearance {
+    Button,
+    Select { color: Color },
 }
 
 impl Layout {
