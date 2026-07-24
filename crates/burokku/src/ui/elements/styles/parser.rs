@@ -1364,6 +1364,32 @@ fn parse_transform(name: &str, value: &str) -> Result<Transform, StyleError> {
                 let (sin, cos) = angle.sin_cos();
                 [cos, sin, -sin, cos, 0.0, 0.0]
             }
+            "skew" => {
+                let x = parse_angle(name, argument(&arguments, 0, value)?)?.tan();
+                let y = arguments
+                    .get(1)
+                    .map(|value| parse_angle(name, value))
+                    .transpose()?
+                    .unwrap_or(0.0)
+                    .tan();
+                [1.0, y, x, 1.0, 0.0, 0.0]
+            }
+            "skewx" => [
+                1.0,
+                0.0,
+                parse_angle(name, argument(&arguments, 0, value)?)?.tan(),
+                1.0,
+                0.0,
+                0.0,
+            ],
+            "skewy" => [
+                1.0,
+                parse_angle(name, argument(&arguments, 0, value)?)?.tan(),
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+            ],
             "matrix" if arguments.len() == 6 => {
                 let mut matrix = [0.0; 6];
                 for (output, argument) in matrix.iter_mut().zip(arguments) {
@@ -2577,6 +2603,9 @@ mod tests {
         assert!(style.box_shadow[0].inset);
         assert!(!style.box_shadow[1].inset);
         assert_eq!(style.text_shadow.len(), 2);
+
+        set_style(&mut style, "transform", Some("skewX(45deg)")).unwrap();
+        assert!((style.transform.matrix[2] - 1.0).abs() < 0.0001);
     }
 
     #[test]

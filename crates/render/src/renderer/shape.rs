@@ -434,7 +434,7 @@ impl ShapeRenderer {
         for image in canvas.commands().iter().filter_map(|command| {
             let style = match command {
                 DrawCommand::Box { style, .. } | DrawCommand::OverlayBox { style, .. } => style,
-                DrawCommand::Text { .. } => return None,
+                DrawCommand::Text { .. } | DrawCommand::Group { .. } => return None,
             };
             match &style.background_image {
                 Some(BackgroundImage::Raster(image)) => Some(image),

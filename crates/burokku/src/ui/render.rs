@@ -93,51 +93,165 @@ pub fn build_canvas(
 }
 
 fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
-    for layout in layout {
-        if layout.width <= 0.0 && layout.height <= 0.0 {
-            continue;
-        }
-
-        let bounds = Rect::new(
-            layout.x * scale_factor,
-            layout.y * scale_factor,
-            layout.width * scale_factor,
-            layout.height * scale_factor,
+    if establishes_effect_group(layout) {
+        paint_group(
+            layout,
+            viewport,
+            scale_factor,
+            0,
+            Transform::IDENTITY,
+            canvas,
         );
-        let logical_bounds = visual_bounds(layout);
-        if !intersects_visible_area(logical_bounds, &layout.clips, viewport) {
-            continue;
+    } else {
+        paint_context(
+            layout,
+            viewport,
+            scale_factor,
+            0,
+            false,
+            Transform::IDENTITY,
+            canvas,
+        );
+    }
+}
+
+fn paint_context(
+    root: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    strip_root_effect: bool,
+    context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let flattened = root.iter().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < flattened.len() {
+        let layout = flattened[index];
+        if layout.element_id != root.element_id && establishes_effect_group(layout) {
+            paint_group(
+                layout,
+                viewport,
+                scale_factor,
+                clip_skip,
+                context_world,
+                canvas,
+            );
+            index += layout.iter().count();
+        } else {
+            paint_one(
+                layout,
+                viewport,
+                scale_factor,
+                clip_skip,
+                strip_root_effect && layout.element_id == root.element_id,
+                context_world,
+                canvas,
+            );
+            index += 1;
         }
-        let clips = layout
+    }
+}
+
+fn paint_group(
+    layout: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    parent_context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let mut group = Canvas::new();
+    paint_context(
+        layout,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        true,
+        layout_world_transform(layout),
+        &mut group,
+    );
+    let (opacity, transform) = layout_effect(layout);
+    canvas.draw_group(
+        group,
+        [
+            (layout.x + layout.width * 0.5) * scale_factor,
+            (layout.y + layout.height * 0.5) * scale_factor,
+        ],
+        scaled_transform(transform, scale_factor),
+        opacity,
+        layout
             .clips
             .iter()
+            .skip(clip_skip)
             .copied()
-            .map(|clip| scaled_clip(clip, scale_factor))
-            .collect::<Vec<_>>();
-        match &layout.kind {
-            LayoutKind::Box {
-                style,
-                native_appearance,
-                ..
-            } => {
-                if style != &BoxStyle::default() {
-                    canvas.draw_box_with_clips(
-                        bounds,
-                        scaled_box_style(style.clone(), scale_factor),
-                        clips.iter().copied(),
-                    );
-                }
-                if let Some(appearance) = native_appearance {
-                    paint_native_control(bounds, *appearance, scale_factor, &clips, canvas);
-                }
+            .map(|clip| localize_clip(clip, parent_context_world))
+            .map(|clip| scaled_clip(clip, scale_factor)),
+    );
+}
+
+fn paint_one(
+    layout: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    strip_effect: bool,
+    context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    if layout.width <= 0.0 && layout.height <= 0.0 {
+        return;
+    }
+    let bounds = Rect::new(
+        layout.x * scale_factor,
+        layout.y * scale_factor,
+        layout.width * scale_factor,
+        layout.height * scale_factor,
+    );
+    if !intersects_visible_area(visual_bounds(layout), &layout.clips, viewport) {
+        return;
+    }
+    let clips = layout
+        .clips
+        .iter()
+        .skip(clip_skip)
+        .copied()
+        .map(|clip| localize_clip(clip, context_world))
+        .map(|clip| scaled_clip(clip, scale_factor))
+        .collect::<Vec<_>>();
+    match &layout.kind {
+        LayoutKind::Box {
+            style,
+            native_appearance,
+            ..
+        } => {
+            let mut style = style.clone();
+            if strip_effect {
+                style.opacity = 1.0;
+                style.transform = Transform::IDENTITY;
             }
-            LayoutKind::Text {
-                text, style, runs, ..
-            } => {
-                let scaled_style = scaled_text_style(style, scale_factor);
-                canvas.draw_text_with_clips(bounds, text, scaled_style.clone(), clips.clone());
-                paint_text_decorations(bounds, &scaled_style, runs, scale_factor, clips, canvas);
+            if style != BoxStyle::default() {
+                canvas.draw_box_with_clips(
+                    bounds,
+                    scaled_box_style(style, scale_factor),
+                    clips.iter().copied(),
+                );
             }
+            if let Some(appearance) = native_appearance {
+                paint_native_control(bounds, *appearance, scale_factor, &clips, canvas);
+            }
+        }
+        LayoutKind::Text {
+            text, style, runs, ..
+        } => {
+            let mut style = style.clone();
+            if strip_effect {
+                style.opacity = 1.0;
+                style.transform = Transform::IDENTITY;
+            }
+            let scaled_style = scaled_text_style(&style, scale_factor);
+            canvas.draw_text_with_clips(bounds, text, scaled_style.clone(), clips.clone());
+            paint_text_decorations(bounds, &scaled_style, runs, scale_factor, clips, canvas);
         }
     }
 }
@@ -334,6 +448,122 @@ fn paint_select_indicator(
     );
 }
 
+fn establishes_effect_group(layout: &Layout) -> bool {
+    let (opacity, transform) = layout_effect(layout);
+    opacity < 1.0 || transform != Transform::IDENTITY
+}
+
+fn layout_effect(layout: &Layout) -> (f32, Transform) {
+    match &layout.kind {
+        LayoutKind::Box { style, .. } => (style.opacity, style.transform),
+        LayoutKind::Text { style, .. } => (style.opacity, style.transform),
+    }
+}
+
+fn scaled_transform(transform: Transform, scale_factor: f32) -> Transform {
+    let mut transform = transform;
+    transform.matrix[4] *= scale_factor;
+    transform.matrix[5] *= scale_factor;
+    transform
+}
+
+fn layout_world_transform(layout: &Layout) -> Transform {
+    let center = [
+        layout.x + layout.width * 0.5,
+        layout.y + layout.height * 0.5,
+    ];
+    anchored_transform(layout.transform, center)
+}
+
+fn localize_clip(mut clip: Clip, context_world: Transform) -> Clip {
+    if context_world == Transform::IDENTITY {
+        return clip;
+    }
+    let center = [
+        clip.rect.x + clip.rect.width * 0.5,
+        clip.rect.y + clip.rect.height * 0.5,
+    ];
+    let clip_world = anchored_transform(
+        Transform {
+            matrix: clip.transform,
+        },
+        center,
+    );
+    let Some(context_inverse) = inverse_transform(context_world) else {
+        return clip;
+    };
+    let localized = multiply_transform(context_inverse, clip_world);
+    clip.transform = relative_transform(localized, center).matrix;
+    clip
+}
+
+fn anchored_transform(transform: Transform, center: [f32; 2]) -> Transform {
+    let [a, b, c, d, tx, ty] = transform.matrix;
+    Transform {
+        matrix: [
+            a,
+            b,
+            c,
+            d,
+            center[0] + tx - a * center[0] - c * center[1],
+            center[1] + ty - b * center[0] - d * center[1],
+        ],
+    }
+}
+
+fn relative_transform(transform: Transform, center: [f32; 2]) -> Transform {
+    let [a, b, c, d, tx, ty] = transform.matrix;
+    Transform {
+        matrix: [
+            a,
+            b,
+            c,
+            d,
+            tx - center[0] + a * center[0] + c * center[1],
+            ty - center[1] + b * center[0] + d * center[1],
+        ],
+    }
+}
+
+fn multiply_transform(left: Transform, right: Transform) -> Transform {
+    let [la, lb, lc, ld, ltx, lty] = left.matrix;
+    let [ra, rb, rc, rd, rtx, rty] = right.matrix;
+    Transform {
+        matrix: [
+            la * ra + lc * rb,
+            lb * ra + ld * rb,
+            la * rc + lc * rd,
+            lb * rc + ld * rd,
+            la * rtx + lc * rty + ltx,
+            lb * rtx + ld * rty + lty,
+        ],
+    }
+}
+
+fn inverse_transform(transform: Transform) -> Option<Transform> {
+    let [a, b, c, d, tx, ty] = transform.matrix;
+    let determinant = a * d - b * c;
+    if determinant.abs() <= f32::EPSILON {
+        return None;
+    }
+    let inverse = [
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+    ];
+    Some(Transform {
+        matrix: [
+            inverse[0],
+            inverse[1],
+            inverse[2],
+            inverse[3],
+            -inverse[0] * tx - inverse[2] * ty,
+            -inverse[1] * tx - inverse[3] * ty,
+        ],
+    })
+}
+
 fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
     let track_style = BoxStyle {
         background: Color::from_rgba8(15, 23, 42, 36),
@@ -395,7 +625,7 @@ fn visual_bounds(layout: &Layout) -> Rect {
                 shadow_bounds.y += shadow.offset[1];
                 bounds = union_rect(bounds, shadow_bounds);
             }
-            bounds = transformed_rect(bounds, style.transform.matrix);
+            bounds = transformed_rect(bounds, layout.transform.matrix);
         }
         LayoutKind::Text { style, .. } => {
             for shadow in &style.shadows {
@@ -404,7 +634,7 @@ fn visual_bounds(layout: &Layout) -> Rect {
                 shadow_bounds.y += shadow.offset[1];
                 bounds = union_rect(bounds, shadow_bounds);
             }
-            bounds = transformed_rect(bounds, style.transform.matrix);
+            bounds = transformed_rect(bounds, layout.transform.matrix);
         }
     }
     bounds
@@ -799,11 +1029,22 @@ mod tests {
         document.insert(BODY_ID, card, None).unwrap();
 
         let canvas = build_canvas(&document, 200.0, 100.0, 2.0, &mut TextSystem::new());
-        let DrawCommand::Box { style, .. } = &canvas.commands()[0] else {
-            panic!("expected a box command");
+        let DrawCommand::Group {
+            canvas,
+            opacity,
+            transform,
+            ..
+        } = &canvas.commands()[0]
+        else {
+            panic!("expected an effect group");
         };
-        assert_eq!(style.opacity, 0.5);
-        assert_eq!(style.transform.matrix[4..], [6.0, 8.0]);
+        assert_eq!(*opacity, 0.5);
+        assert_eq!(transform.matrix[4..], [6.0, 8.0]);
+        let DrawCommand::Box { style, .. } = &canvas.commands()[0] else {
+            panic!("expected a grouped box command");
+        };
+        assert_eq!(style.opacity, 1.0);
+        assert_eq!(style.transform, Transform::IDENTITY);
         assert_eq!(style.shadows[0].offset, [2.0, 4.0]);
         assert!(matches!(
             style.background_image,
@@ -831,6 +1072,93 @@ mod tests {
             panic!("expected raster background");
         };
         assert_eq!((image.width, image.height), (2, 1));
+    }
+
+    #[test]
+    fn retains_opacity_and_transform_subtrees_as_recursive_groups() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Text("rotated".into()));
+        document.set_style(parent, "width", Some("100px")).unwrap();
+        document.set_style(parent, "height", Some("80px")).unwrap();
+        document.set_style(parent, "opacity", Some("50%")).unwrap();
+        document
+            .set_style(parent, "transform", Some("rotate(30deg) skewX(10deg)"))
+            .unwrap();
+        document.set_style(first, "width", Some("40px")).unwrap();
+        document.set_style(first, "height", Some("30px")).unwrap();
+        document
+            .set_style(first, "background-color", Some("red"))
+            .unwrap();
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, first, None).unwrap();
+        document.insert(parent, second, None).unwrap();
+
+        let canvas = build_canvas(&document, 200.0, 160.0, 1.0, &mut TextSystem::new());
+        let DrawCommand::Group {
+            canvas,
+            opacity,
+            transform,
+            origin,
+            ..
+        } = &canvas.commands()[0]
+        else {
+            panic!("expected recursive effect group");
+        };
+        assert_eq!(*opacity, 0.5);
+        assert_ne!(*transform, Transform::IDENTITY);
+        assert_eq!(*origin, [50.0, 40.0]);
+        assert!(canvas
+            .commands()
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Text { .. })));
+        assert!(canvas
+            .commands()
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Box { .. })));
+    }
+
+    #[test]
+    fn localizes_overflow_clips_inside_transformed_groups() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Div);
+        document.set_style(parent, "width", Some("100px")).unwrap();
+        document.set_style(parent, "height", Some("80px")).unwrap();
+        document
+            .set_style(parent, "overflow", Some("hidden"))
+            .unwrap();
+        document
+            .set_style(parent, "transform", Some("rotate(30deg)"))
+            .unwrap();
+        document.set_style(child, "width", Some("120px")).unwrap();
+        document.set_style(child, "height", Some("100px")).unwrap();
+        document
+            .set_style(child, "background-color", Some("red"))
+            .unwrap();
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, child, None).unwrap();
+
+        let canvas = build_canvas(&document, 200.0, 160.0, 1.0, &mut TextSystem::new());
+        let DrawCommand::Group { canvas, .. } = &canvas.commands()[0] else {
+            panic!("expected transformed parent group");
+        };
+        let child_clip = canvas
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Box { clips, .. } if !clips.is_empty() => Some(clips[0]),
+                _ => None,
+            })
+            .expect("overflow clip on child");
+        for (actual, expected) in child_clip
+            .transform
+            .into_iter()
+            .zip(Transform::IDENTITY.matrix)
+        {
+            assert!((actual - expected).abs() < 0.0001);
+        }
     }
 
     #[test]
@@ -897,7 +1225,9 @@ mod tests {
             .iter()
             .filter_map(|command| match command {
                 render::DrawCommand::Box { style, .. } => Some(style.background),
-                render::DrawCommand::OverlayBox { .. } | render::DrawCommand::Text { .. } => None,
+                render::DrawCommand::OverlayBox { .. }
+                | render::DrawCommand::Text { .. }
+                | render::DrawCommand::Group { .. } => None,
             })
             .collect();
 

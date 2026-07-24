@@ -1,3 +1,4 @@
+mod composite;
 mod gpu;
 mod shape;
 mod surface;
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::{Canvas, TextSystem};
+use composite::{CompositeEffect, CompositeItem, CompositeRenderer};
 use gpu::Gpu;
 use shape::ShapeRenderer;
 use surface::SurfaceState;
@@ -66,6 +68,7 @@ pub struct Renderer {
     surface: SurfaceState,
     shapes: ShapeRenderer,
     text: TextRenderer,
+    composites: CompositeRenderer,
 }
 
 impl Renderer {
@@ -89,11 +92,13 @@ impl Renderer {
     fn from_gpu(gpu: Gpu, surface: SurfaceState) -> Self {
         let shapes = ShapeRenderer::new(&gpu.device, surface.format());
         let text = TextRenderer::new(&gpu.device, &gpu.queue, surface.format());
+        let composites = CompositeRenderer::new(&gpu.device, surface.format());
         Self {
             gpu,
             surface,
             shapes,
             text,
+            composites,
         }
     }
 
@@ -163,6 +168,90 @@ impl Renderer {
         size: SurfaceSize,
         text_system: &mut TextSystem,
     ) -> Result<Duration, RenderError> {
+        let bytes_per_target = u64::from(size.width)
+            .saturating_mul(u64::from(size.height))
+            .saturating_mul(u64::from(
+                self.surface.format().block_copy_size(None).unwrap_or(16),
+            ));
+        let mut budget = GroupBudget {
+            used: 0,
+            maximum: (128 * 1024 * 1024_u64)
+                .min(self.gpu.device.limits().max_buffer_size.saturating_mul(2)),
+            bytes_per_target,
+            maximum_depth: 32,
+        };
+        self.draw_canvas_to_view(view, canvas, size, text_system, &mut budget, 0)
+    }
+
+    fn draw_canvas_to_view(
+        &mut self,
+        view: &wgpu::TextureView,
+        canvas: &Canvas,
+        size: SurfaceSize,
+        text_system: &mut TextSystem,
+        budget: &mut GroupBudget,
+        depth: usize,
+    ) -> Result<Duration, RenderError> {
+        let mut composite_items = Vec::<CompositeItem>::new();
+        let mut reserved = 0_u64;
+        if depth < budget.maximum_depth {
+            for command in canvas.commands() {
+                let crate::DrawCommand::Group {
+                    canvas,
+                    origin,
+                    transform,
+                    opacity,
+                    clips,
+                } = command
+                else {
+                    continue;
+                };
+                if !budget.reserve() {
+                    continue;
+                }
+                let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("render transient group target"),
+                    size: wgpu::Extent3d {
+                        width: size.width,
+                        height: size.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.surface.format(),
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let group_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                self.draw_canvas_to_view(
+                    &group_view,
+                    canvas,
+                    size,
+                    text_system,
+                    budget,
+                    depth + 1,
+                )?;
+                let item = self.composites.item(
+                    &self.gpu.device,
+                    texture,
+                    size,
+                    CompositeEffect {
+                        origin: *origin,
+                        transform: *transform,
+                        opacity: *opacity,
+                        clips: clips.clone(),
+                    },
+                );
+                if let Some(item) = item {
+                    composite_items.push(item);
+                    reserved = reserved.saturating_add(budget.bytes_per_target);
+                } else {
+                    budget.release(budget.bytes_per_target);
+                }
+            }
+        }
         self.shapes
             .prepare(&self.gpu.device, &self.gpu.queue, canvas, size);
         self.text
@@ -192,6 +281,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             self.shapes.draw_base(&mut pass);
+            self.composites.draw(&mut pass, &composite_items, size);
             self.text.draw(&mut pass)?;
             self.shapes.draw_overlay(&mut pass);
         }
@@ -199,7 +289,32 @@ impl Renderer {
         self.gpu.queue.submit([encoder.finish()]);
         let queue_submit = submit_started_at.elapsed();
         self.text.finish_frame();
+        budget.release(reserved);
         Ok(queue_submit)
+    }
+}
+
+struct GroupBudget {
+    used: u64,
+    maximum: u64,
+    bytes_per_target: u64,
+    maximum_depth: usize,
+}
+
+impl GroupBudget {
+    fn reserve(&mut self) -> bool {
+        let Some(next) = self.used.checked_add(self.bytes_per_target) else {
+            return false;
+        };
+        if self.bytes_per_target == 0 || next > self.maximum {
+            return false;
+        }
+        self.used = next;
+        true
+    }
+
+    fn release(&mut self, bytes: u64) {
+        self.used = self.used.saturating_sub(bytes);
     }
 }
 
@@ -725,5 +840,255 @@ mod tests {
         assert!(inset_edge[0] > inset_edge[1].saturating_add(40));
         assert!(outer[0] < 245 && outer[1] < 245 && outer[2] < 245);
         drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn composites_overlapping_descendants_before_applying_group_opacity() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 40),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut group = Canvas::new();
+        group.draw_box(
+            Rect::new(8.0, 8.0, 28.0, 24.0),
+            BoxStyle {
+                background: Color::from_rgba8(255, 0, 0, 255),
+                ..BoxStyle::default()
+            },
+        );
+        group.draw_box(
+            Rect::new(28.0, 8.0, 28.0, 24.0),
+            BoxStyle {
+                background: Color::from_rgba8(0, 0, 255, 255),
+                ..BoxStyle::default()
+            },
+        );
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_group(group, [32.0, 20.0], Transform::IDENTITY, 0.5, []);
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 40),
+            &mut text_system,
+        )
+        .expect("off-screen opacity group render");
+        let red_only = image.pixel(16, 20).unwrap();
+        let overlap = image.pixel(32, 20).unwrap();
+        assert!((i16::from(red_only[1]) - i16::from(overlap[1])).abs() < 8);
+        assert!(overlap[2] > overlap[0].saturating_add(80));
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_composite_preserves_intrinsic_descendant_alpha() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(40, 40),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let style = BoxStyle {
+            background: Color::from_rgba8(255, 0, 0, 128),
+            ..BoxStyle::default()
+        };
+        let mut direct = Canvas::new().with_clear_color(Color::WHITE);
+        direct.draw_box(Rect::new(8.0, 8.0, 24.0, 24.0), style.clone());
+        let direct_image = readback::draw_to_image(
+            &mut renderer,
+            &direct,
+            SurfaceSize::new(40, 40),
+            &mut text_system,
+        )
+        .expect("direct alpha render");
+
+        let mut group = Canvas::new();
+        group.draw_box(Rect::new(8.0, 8.0, 24.0, 24.0), style);
+        let mut grouped = Canvas::new().with_clear_color(Color::WHITE);
+        grouped.draw_group(group, [20.0, 20.0], Transform::IDENTITY, 1.0, []);
+        let grouped_image = readback::draw_to_image(
+            &mut renderer,
+            &grouped,
+            SurfaceSize::new(40, 40),
+            &mut text_system,
+        )
+        .expect("grouped alpha render");
+
+        let direct_pixel = direct_image.pixel(20, 20).unwrap();
+        let grouped_pixel = grouped_image.pixel(20, 20).unwrap();
+        for (direct, grouped) in direct_pixel.into_iter().zip(grouped_pixel) {
+            assert!((i16::from(direct) - i16::from(grouped)).abs() <= 2);
+        }
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn affine_group_rotation_applies_to_rasterized_glyph_pixels() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut group = Canvas::new();
+        group.draw_text(
+            Rect::new(20.0, 8.0, 24.0, 48.0),
+            "I",
+            TextStyle {
+                font_size: 40.0,
+                line_height: 48.0,
+                ..TextStyle::default()
+            },
+        );
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_group(
+            group,
+            [32.0, 32.0],
+            Transform {
+                matrix: [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+            },
+            1.0,
+            [],
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen affine text group render");
+        let mut min_x = 64;
+        let mut max_x = 0;
+        let mut min_y = 64;
+        let mut max_y = 0;
+        for y in 0..64 {
+            for x in 0..64 {
+                let pixel = image.pixel(x, y).unwrap();
+                if pixel[0] < 180 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(max_x > min_x && max_y > min_y);
+        assert!(max_x - min_x > max_y - min_y);
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn affine_group_transform_moves_its_clipped_pixels_together() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut group = Canvas::new();
+        group.draw_box_clipped(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                ..BoxStyle::default()
+            },
+            Clip::rectangular(Rect::new(28.0, 12.0, 8.0, 40.0)),
+        );
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_group(
+            group,
+            [32.0, 32.0],
+            Transform {
+                matrix: [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+            },
+            1.0,
+            [],
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen transformed clipped group");
+        let horizontal = image.pixel(16, 32).unwrap();
+        assert!(horizontal[0] > 180 && horizontal[1] < 80);
+        assert_eq!(image.pixel(32, 16), Some([255, 255, 255, 255]));
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_composite_applies_affine_clip_shape_not_only_its_bounds() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut group = Canvas::new();
+        group.draw_box(
+            Rect::new(4.0, 4.0, 56.0, 56.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                ..BoxStyle::default()
+            },
+        );
+        let mut clip = Clip::rectangular(Rect::new(12.0, 26.0, 40.0, 12.0));
+        let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+        clip.transform = [diagonal, diagonal, -diagonal, diagonal, 0.0, 0.0];
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_group(group, [32.0, 32.0], Transform::IDENTITY, 1.0, [clip]);
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen affine group clip");
+        let center = image.pixel(32, 32).unwrap();
+        assert!(center[0] > 180 && center[1] < 80);
+        assert_eq!(image.pixel(18, 46), Some([255, 255, 255, 255]));
+        drop(adapter);
+    }
+
+    #[test]
+    fn group_budget_rejects_excess_targets_and_depth_is_explicit() {
+        let mut budget = GroupBudget {
+            used: 0,
+            maximum: 128,
+            bytes_per_target: 64,
+            maximum_depth: 3,
+        };
+        assert!(budget.reserve());
+        assert!(budget.reserve());
+        assert!(!budget.reserve());
+        budget.release(64);
+        assert!(budget.reserve());
+        assert_eq!(budget.maximum_depth, 3);
     }
 }
