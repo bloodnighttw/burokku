@@ -784,15 +784,12 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
 }
 
 fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
-    let border_width = [
+    let border_widths = [
         style.border_top_width.px(),
         style.border_right_width.px(),
         style.border_bottom_width.px(),
         style.border_left_width.px(),
-    ]
-    .into_iter()
-    .reduce(f32::max)
-    .unwrap_or(0.0);
+    ];
 
     BoxStyle {
         background: style.background_color.map_or(Color::TRANSPARENT, rgba),
@@ -802,8 +799,15 @@ fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
             radius(style.border_bottom_right_radius, width, height),
             radius(style.border_bottom_left_radius, width, height),
         ),
-        border: (border_width > 0.0)
-            .then(|| Border::new(border_width, style.border_color.map_or(Color::BLACK, rgba))),
+        border: border_widths.iter().any(|width| *width > 0.0).then(|| {
+            Border::per_side(
+                border_widths[0],
+                border_widths[1],
+                border_widths[2],
+                border_widths[3],
+                style.border_color.map_or(Color::BLACK, rgba),
+            )
+        }),
         outline: (style.outline_width.px() > 0.0).then(|| {
             Outline::new(
                 style.outline_width.px(),

@@ -302,6 +302,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn paints_each_border_side_at_its_own_width() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                border: Some(Border::per_side(4.0, 8.0, 12.0, 16.0, Color::BLACK)),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen per-side border render");
+        let is_border = |x, y| {
+            let pixel = image.pixel(x, y).expect("sample in image");
+            pixel[0] < 60 && pixel[1] < 60 && pixel[2] < 60 && pixel[3] > 200
+        };
+        let is_background = |x, y| {
+            let pixel = image.pixel(x, y).expect("sample in image");
+            pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 90 && pixel[3] > 200
+        };
+
+        assert!(is_border(32, 10), "top border should be four pixels wide");
+        assert!(
+            is_background(32, 14),
+            "top border should stop after four pixels"
+        );
+        assert!(
+            is_border(52, 32),
+            "right border should be eight pixels wide"
+        );
+        assert!(
+            is_background(46, 32),
+            "right border should stop after eight pixels"
+        );
+        assert!(
+            is_border(32, 50),
+            "bottom border should be twelve pixels wide"
+        );
+        assert!(
+            is_background(32, 42),
+            "bottom border should stop after twelve pixels"
+        );
+        assert!(
+            is_border(12, 32),
+            "left border should be sixteen pixels wide"
+        );
+        assert!(
+            is_background(26, 32),
+            "left border should stop after sixteen pixels"
+        );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn clips_shape_pixels_to_a_rounded_command_clip() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
