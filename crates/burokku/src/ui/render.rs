@@ -314,6 +314,9 @@ mod tests {
             .set_style(card, "border-width", Some("1px 2px 3px 4px"))
             .unwrap();
         document
+            .set_style(card, "border-style", Some("solid"))
+            .unwrap();
+        document
             .set_style(card, "border-radius", Some("4px"))
             .unwrap();
         document.insert(BODY_ID, card, None).unwrap();
@@ -394,6 +397,9 @@ mod tests {
                 .unwrap();
             document
                 .set_style(container, "border-width", Some("2px"))
+                .unwrap();
+            document
+                .set_style(container, "border-style", Some("solid"))
                 .unwrap();
             document
                 .set_style(container, "border-radius", Some("12px"))

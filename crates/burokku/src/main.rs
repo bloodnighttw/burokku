@@ -20,6 +20,7 @@ Object.assign(card.style, {
     backgroundColor: "#f5f7fa",
     borderColor: "#cbd2dc",
     borderWidth: "1px",
+    borderStyle: "solid",
     borderRadius: "16px",
 });
 
