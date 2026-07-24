@@ -4,11 +4,13 @@ use crate::ui::elements::styles::StyleError;
 
 #[derive(Debug, Error)]
 pub enum DocumentError {
-    #[error("Elements node {0} does not exist")]
+    #[error("UI element {0} does not exist")]
     MissingNode(u64),
-    #[error("Elements node {0} is not a text node")]
+    #[error("UI element {0} is not an element node")]
+    NotElement(u64),
+    #[error("UI element {0} is not a text node")]
     NotText(u64),
-    #[error("Elements::Body cannot be moved")]
+    #[error("the UI body cannot be moved")]
     MoveBody,
     #[error("inserting node {child} below {parent} would create a cycle")]
     Cycle { parent: u64, child: u64 },

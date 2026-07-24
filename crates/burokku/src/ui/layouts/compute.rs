@@ -74,7 +74,7 @@ fn add_element(
     nodes.push(LayoutNode {
         element_id,
         kind: element.kind.clone(),
-        style: to_taffy_style(&element.style),
+        style: to_taffy_style(&element.kind, &element.style),
         paint_style: element.style.clone(),
         text_style: text_style.clone(),
         children: Vec::with_capacity(element.children.len()),
@@ -193,7 +193,15 @@ impl ElementLayoutTree<'_> {
                 text: text.clone(),
                 style: data.text_style.clone(),
             },
-            ElementKind::Body | ElementKind::Div | ElementKind::Span => LayoutKind::Box {
+            ElementKind::Comment(_)
+            | ElementKind::Button
+            | ElementKind::Div
+            | ElementKind::Heading(_)
+            | ElementKind::Image
+            | ElementKind::Select
+            | ElementKind::Span
+            | ElementKind::Body
+            | ElementKind::Other(_) => LayoutKind::Box {
                 style: box_style(&data.paint_style, width, height),
                 children: data
                     .children
@@ -343,9 +351,13 @@ impl LayoutGridContainer for ElementLayoutTree<'_> {
     }
 }
 
-fn to_taffy_style(style: &ElementStyle) -> TaffyStyle {
+fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
     TaffyStyle {
-        display: style.display,
+        display: if matches!(kind, ElementKind::Comment(_)) {
+            Display::None
+        } else {
+            style.display
+        },
         box_sizing: style.box_sizing,
         position: style.position,
         overflow: Point {

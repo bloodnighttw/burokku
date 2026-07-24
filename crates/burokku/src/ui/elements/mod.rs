@@ -1,29 +1,60 @@
-//! This module contain the ** uncomputed ** node of ui, which is called as
-//! **Elements**
+//! Uncomputed UI nodes, called elements.
 
 use std::collections::HashMap;
 
-use crate::ui::elements::{
-    error::DocumentError,
-    styles::{set_style, Style},
-};
+use crate::ui::elements::styles::{set_style, Style};
 mod error;
 
 pub(crate) mod styles;
+
+pub use error::DocumentError;
 
 pub(super) const BODY_ID: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ElementKind {
     Text(String),
+    Comment(String),
+    Button,
     Div,
+    Heading(u8),
+    Image,
+    Select,
     Span,
     Body,
-    // TODO:
-    // Image,
-    // Button,
-    // Select,
-    // Option,
+    Other(String),
+}
+
+impl ElementKind {
+    pub fn is_element(&self) -> bool {
+        !matches!(self, Self::Text(_) | Self::Comment(_))
+    }
+}
+
+impl From<&str> for ElementKind {
+    fn from(name: &str) -> Self {
+        name.to_owned().into()
+    }
+}
+
+impl From<String> for ElementKind {
+    fn from(name: String) -> Self {
+        let name = name.to_ascii_lowercase();
+        match name.as_str() {
+            "button" => Self::Button,
+            "div" => Self::Div,
+            "h1" => Self::Heading(1),
+            "h2" => Self::Heading(2),
+            "h3" => Self::Heading(3),
+            "h4" => Self::Heading(4),
+            "h5" => Self::Heading(5),
+            "h6" => Self::Heading(6),
+            "img" => Self::Image,
+            "select" => Self::Select,
+            "span" => Self::Span,
+            _ => Self::Other(name),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,11 +118,13 @@ impl Document {
 
     pub fn set_text(&mut self, id: u64, text: String) -> Result<(), DocumentError> {
         let node = self.node_mut(id)?;
-        let ElementKind::Text(node_text) = &mut node.kind else {
-            return Err(DocumentError::NotText(id));
-        };
-        *node_text = text;
-        Ok(())
+        match &mut node.kind {
+            ElementKind::Text(node_text) | ElementKind::Comment(node_text) => {
+                *node_text = text;
+                Ok(())
+            }
+            _ => Err(DocumentError::NotText(id)),
+        }
     }
 
     pub fn set_style(
@@ -101,6 +134,9 @@ impl Document {
         value: Option<&str>,
     ) -> Result<(), DocumentError> {
         let node = self.node_mut(id)?;
+        if !node.kind.is_element() {
+            return Err(DocumentError::NotElement(id));
+        }
         set_style(&mut node.style, name, value).map_err(DocumentError::Style)
     }
 
@@ -172,5 +208,54 @@ impl Document {
         self.nodes
             .get_mut(&id)
             .ok_or(DocumentError::MissingNode(id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nodes_can_be_moved_detached_and_reattached() {
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Span);
+        let text = document.create_node(ElementKind::Text("hello".into()));
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(BODY_ID, second, None).unwrap();
+        document.insert(first, text, None).unwrap();
+
+        document.insert(second, text, None).unwrap();
+        assert!(document.node(first).unwrap().children.is_empty());
+        assert_eq!(document.node(second).unwrap().children, [text]);
+
+        document.remove(second, text).unwrap();
+        assert_eq!(document.node(text).unwrap().parent, None);
+        document.insert(first, text, None).unwrap();
+        assert_eq!(document.node(text).unwrap().parent, Some(first));
+    }
+
+    #[test]
+    fn rejects_cycles() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Div);
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, child, None).unwrap();
+
+        assert!(matches!(
+            document.insert(child, parent, None),
+            Err(DocumentError::Cycle { .. })
+        ));
+    }
+
+    #[test]
+    fn element_names_map_to_semantic_kinds() {
+        assert_eq!(ElementKind::from("BUTTON".to_owned()), ElementKind::Button);
+        assert_eq!(ElementKind::from("h3".to_owned()), ElementKind::Heading(3));
+        assert_eq!(
+            ElementKind::from("CUSTOM-CARD".to_owned()),
+            ElementKind::Other("custom-card".to_owned())
+        );
     }
 }

@@ -1,8 +1,8 @@
 use runtime::rquickjs::{Ctx, Error, Function, Result};
 
-use super::{DomStore, NodeKind};
+use super::{ElementKind, UiStore};
 
-pub fn install<'js>(context: &Ctx<'js>, store: DomStore) -> Result<()> {
+pub fn install<'js>(context: &Ctx<'js>, store: UiStore) -> Result<()> {
     let create_store = store.clone();
     context.globals().set(
         "__burokku_dom_create",
@@ -10,9 +10,9 @@ pub fn install<'js>(context: &Ctx<'js>, store: DomStore) -> Result<()> {
             context.clone(),
             move |kind: String, name: String| -> Result<u64> {
                 let kind = match kind.as_str() {
-                    "element" => NodeKind::from(name),
-                    "text" => NodeKind::Text,
-                    "comment" => NodeKind::Comment,
+                    "element" => ElementKind::from(name),
+                    "text" => ElementKind::Text(String::new()),
+                    "comment" => ElementKind::Comment(String::new()),
                     _ => return Err(js_error(format!("unsupported DOM node kind '{kind}'"))),
                 };
                 Ok(create_store.create_node(kind))
@@ -77,5 +77,5 @@ pub fn install<'js>(context: &Ctx<'js>, store: DomStore) -> Result<()> {
 }
 
 fn js_error(message: String) -> Error {
-    Error::new_from_js_message("DOM operation", "native DOM", message)
+    Error::new_from_js_message("DOM operation", "native UI", message)
 }

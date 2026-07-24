@@ -6,7 +6,6 @@ use runtime::{Runtime, WindowEventMessage};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 mod ui;
-mod dom;
 mod window;
 
 const DEFAULT_SCRIPT: &str = r##"
@@ -51,15 +50,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(path) => tokio::fs::read_to_string(path).await?,
         None => DEFAULT_SCRIPT.into(),
     };
-    let dom = dom::DomStore::new();
+    let ui_store = ui::UiStore::new();
     if check_only {
-        return check_dom(dom, source).await;
+        return check_ui(ui_store, source).await;
     }
     let (window_events_tx, window_events_rx) = mpsc::unbounded_channel();
-    let js_dom = dom.clone();
-    let js_task = tokio::spawn(run_javascript(window_events_rx, js_dom, source));
+    let js_ui = ui_store.clone();
+    let js_task = tokio::spawn(run_javascript(window_events_rx, js_ui, source));
 
-    let window_result = window::run(window_events_tx, dom).await;
+    let window_result = window::run(window_events_tx, ui_store).await;
     let js_result = js_task.await?;
 
     window_result?;
@@ -67,20 +66,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn check_dom(dom: dom::DomStore, source: String) -> Result<(), Box<dyn Error>> {
-    let host_dom = dom.clone();
-    let runtime = Runtime::new_with_host(move |context| dom::install(context, host_dom)).await?;
+async fn check_ui(store: ui::UiStore, source: String) -> Result<(), Box<dyn Error>> {
+    let host_store = store.clone();
+    let runtime = Runtime::new_with_host(move |context| ui::install(context, host_store)).await?;
     runtime.eval::<()>(source).await?;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let snapshot = dom.snapshot();
+    let snapshot = store.snapshot();
     if snapshot.body().children.is_empty() {
         return Err("script did not attach any nodes to document.body".into());
     }
     let mut text_system = render::TextSystem::new();
-    let canvas = dom::build_canvas(&snapshot, 800.0, 600.0, 1.0, &mut text_system)?;
+    let canvas = ui::build_canvas(&snapshot, 800.0, 600.0, 1.0, &mut text_system);
     println!(
-        "DOM check: {} root nodes, {} drawing commands",
+        "UI check: {} root nodes, {} drawing commands",
         snapshot.body().children.len(),
         canvas.commands().len()
     );
@@ -89,10 +88,10 @@ async fn check_dom(dom: dom::DomStore, source: String) -> Result<(), Box<dyn Err
 
 async fn run_javascript(
     mut window_events_rx: UnboundedReceiver<WindowEventMessage>,
-    dom: dom::DomStore,
+    store: ui::UiStore,
     source: String,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let runtime = Runtime::new_with_host(move |context| dom::install(context, dom)).await?;
+    let runtime = Runtime::new_with_host(move |context| ui::install(context, store)).await?;
     runtime.eval::<()>(source).await?;
 
     let mut batch = Vec::with_capacity(16);
