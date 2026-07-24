@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use render::{
     Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextStyle, TextSystem,
 };
 
 use super::{
     elements::Document,
-    layouts::{compute_layout, Layout, LayoutKind},
+    layouts::{compute_layout, compute_layout_with_scroll, Layout, LayoutKind, ScrollOffset},
 };
 
 /// The computed UI geometry and the drawing commands produced from it.
@@ -28,9 +30,32 @@ pub fn build_frame(
         viewport_height.max(0.0),
         text_system,
     );
+    frame_from_layout(layout, scale_factor)
+}
+
+pub(crate) fn build_frame_with_scroll(
+    document: &Document,
+    viewport_width: f32,
+    viewport_height: f32,
+    scale_factor: f32,
+    text_system: &mut TextSystem,
+    scroll_offsets: &HashMap<u64, ScrollOffset>,
+) -> UiFrame {
+    let layout = compute_layout_with_scroll(
+        document,
+        viewport_width.max(0.0),
+        viewport_height.max(0.0),
+        text_system,
+        scroll_offsets,
+    );
+    frame_from_layout(layout, scale_factor)
+}
+
+fn frame_from_layout(layout: Layout, scale_factor: f32) -> UiFrame {
     let scale_factor = scale_factor.max(f32::EPSILON);
     let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
     paint_layout(&layout, scale_factor, &mut canvas);
+    paint_scrollbars(&layout, scale_factor, &mut canvas);
     UiFrame { layout, canvas }
 }
 
@@ -87,6 +112,43 @@ fn paint_layout(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
                     clips,
                 );
             }
+        }
+    }
+}
+
+fn paint_scrollbars(layout: &Layout, scale_factor: f32, canvas: &mut Canvas) {
+    let track_style = BoxStyle {
+        background: Color::from_rgba8(15, 23, 42, 36),
+        corner_radius: CornerRadius::all(4.0 * scale_factor),
+        ..BoxStyle::default()
+    };
+    let thumb_style = BoxStyle {
+        background: Color::from_rgba8(71, 85, 105, 210),
+        corner_radius: CornerRadius::all(4.0 * scale_factor),
+        ..BoxStyle::default()
+    };
+
+    for layout in layout {
+        let Some(scroll) = layout.scroll else {
+            continue;
+        };
+        let clips = layout
+            .clips
+            .iter()
+            .copied()
+            .chain([scroll.clip])
+            .map(|clip| scaled_clip(clip, scale_factor));
+        for scrollbar in [scroll.horizontal, scroll.vertical].into_iter().flatten() {
+            canvas.draw_overlay_box_with_clips(
+                scaled_rect(scrollbar.track, scale_factor),
+                track_style,
+                clips.clone(),
+            );
+            canvas.draw_overlay_box_with_clips(
+                scaled_rect(scrollbar.thumb, scale_factor),
+                thumb_style,
+                clips.clone(),
+            );
         }
     }
 }
@@ -242,7 +304,7 @@ mod tests {
             .iter()
             .filter_map(|command| match command {
                 render::DrawCommand::Box { style, .. } => Some(style.background),
-                render::DrawCommand::Text { .. } => None,
+                render::DrawCommand::OverlayBox { .. } | render::DrawCommand::Text { .. } => None,
             })
             .collect();
 
@@ -374,5 +436,127 @@ mod tests {
         assert_eq!(clip.x, container_layout.x);
         assert_eq!(clip.width, container_layout.width);
         assert_eq!((clip.y, clip.height), (0.0, 200.0));
+    }
+
+    #[test]
+    fn scroll_overflow_offsets_content_and_builds_proportional_scrollbars() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        document
+            .set_style(container, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(container, "height", Some("60px"))
+            .unwrap();
+        document
+            .set_style(container, "overflow", Some("auto"))
+            .unwrap();
+        document.set_style(content, "width", Some("240px")).unwrap();
+        document
+            .set_style(content, "height", Some("180px"))
+            .unwrap();
+        document
+            .set_style(content, "background-color", Some("#ff0000"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, content, None).unwrap();
+
+        let offsets = HashMap::from([(container, ScrollOffset::new(50.0, 40.0))]);
+        let frame = build_frame_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            1.0,
+            &mut TextSystem::new(),
+            &offsets,
+        );
+        let container_layout = &frame.layout.children()[0];
+        let content_layout = &container_layout.children()[0];
+        let scroll = container_layout.scroll.expect("scroll container");
+
+        assert_eq!(scroll.max_offset, ScrollOffset::new(140.0, 120.0));
+        assert_eq!(scroll.offset, ScrollOffset::new(50.0, 40.0));
+        assert_eq!(
+            (content_layout.x, content_layout.y),
+            (container_layout.x - 50.0, container_layout.y - 40.0)
+        );
+        let horizontal = scroll.horizontal.expect("horizontal scrollbar");
+        let vertical = scroll.vertical.expect("vertical scrollbar");
+        assert!(horizontal.thumb.width < horizontal.track.width);
+        assert!(vertical.thumb.height < vertical.track.height);
+        assert!(horizontal.thumb.x > horizontal.track.x);
+        assert!(vertical.thumb.y > vertical.track.y);
+
+        let scrollbar_boxes = frame
+            .canvas
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    render::DrawCommand::OverlayBox { style, .. }
+                        if style.background == Color::from_rgba8(15, 23, 42, 36)
+                            || style.background == Color::from_rgba8(71, 85, 105, 210)
+                )
+            })
+            .count();
+        assert_eq!(scrollbar_boxes, 4);
+    }
+
+    #[test]
+    fn scroll_offsets_are_clamped_when_content_shrinks() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        document
+            .set_style(container, "width", Some("100px"))
+            .unwrap();
+        document
+            .set_style(container, "height", Some("60px"))
+            .unwrap();
+        document
+            .set_style(container, "overflow", Some("auto"))
+            .unwrap();
+        document.set_style(content, "width", Some("120px")).unwrap();
+        document.set_style(content, "height", Some("80px")).unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, content, None).unwrap();
+
+        let offsets = HashMap::from([(container, ScrollOffset::new(500.0, 500.0))]);
+        let frame = build_frame_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            1.0,
+            &mut TextSystem::new(),
+            &offsets,
+        );
+        let scroll = frame.layout.children()[0].scroll.expect("scroll container");
+
+        assert_eq!(scroll.max_offset, ScrollOffset::new(20.0, 20.0));
+        assert_eq!(scroll.offset, scroll.max_offset);
+    }
+
+    #[test]
+    fn scroll_always_shows_tracks_while_auto_only_shows_them_for_overflow() {
+        let mut document = Document::new();
+        let automatic = document.create_node(ElementKind::Div);
+        let forced = document.create_node(ElementKind::Div);
+        for (element, overflow) in [(automatic, "auto"), (forced, "scroll")] {
+            document.set_style(element, "width", Some("100px")).unwrap();
+            document.set_style(element, "height", Some("60px")).unwrap();
+            document
+                .set_style(element, "overflow", Some(overflow))
+                .unwrap();
+            document.insert(BODY_ID, element, None).unwrap();
+        }
+
+        let frame = build_frame(&document, 300.0, 200.0, 1.0, &mut TextSystem::new());
+        let automatic = frame.layout.children()[0].scroll.expect("auto container");
+        let forced = frame.layout.children()[1].scroll.expect("scroll container");
+
+        assert!(automatic.horizontal.is_none() && automatic.vertical.is_none());
+        assert!(forced.horizontal.is_some() && forced.vertical.is_some());
     }
 }

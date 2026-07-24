@@ -186,8 +186,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.shapes.draw(&mut pass);
+            self.shapes.draw_base(&mut pass);
             self.text.draw(&mut pass)?;
+            self.shapes.draw_overlay(&mut pass);
         }
         let submit_started_at = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);

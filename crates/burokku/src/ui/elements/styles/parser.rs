@@ -491,7 +491,8 @@ fn parse_overflow(name: &str, value: &str) -> Result<Overflow, StyleError> {
         "visible" => Ok(Overflow::Visible),
         "hidden" => Ok(Overflow::Hidden),
         "clip" => Ok(Overflow::Clip),
-        "scroll" | "auto" => Ok(Overflow::Scroll),
+        "auto" => Ok(Overflow::Auto),
+        "scroll" => Ok(Overflow::Scroll),
         _ => invalid(name, value),
     }
 }
@@ -625,6 +626,16 @@ mod tests {
     #[test]
     fn display_defaults_to_block() {
         assert_eq!(Style::default().display, Display::Block);
+    }
+
+    #[test]
+    fn preserves_auto_and_always_visible_scroll_overflow() {
+        let mut style = Style::default();
+        set_style(&mut style, "overflow-x", Some("auto")).unwrap();
+        set_style(&mut style, "overflow-y", Some("scroll")).unwrap();
+
+        assert_eq!(style.overflow_x, Overflow::Auto);
+        assert_eq!(style.overflow_y, Overflow::Scroll);
     }
 
     #[test]

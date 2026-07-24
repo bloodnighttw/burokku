@@ -7,6 +7,11 @@ pub enum DrawCommand {
         style: BoxStyle,
         clips: Vec<Clip>,
     },
+    OverlayBox {
+        rect: Rect,
+        style: BoxStyle,
+        clips: Vec<Clip>,
+    },
     Text {
         bounds: Rect,
         text: String,
@@ -55,6 +60,20 @@ impl Canvas {
 
     pub fn draw_box_clipped(&mut self, rect: Rect, style: BoxStyle, clip: Clip) -> &mut Self {
         self.draw_box_with_clips(rect, style, [clip])
+    }
+
+    pub fn draw_overlay_box_with_clips(
+        &mut self,
+        rect: Rect,
+        style: BoxStyle,
+        clips: impl IntoIterator<Item = Clip>,
+    ) -> &mut Self {
+        self.commands.push(DrawCommand::OverlayBox {
+            rect,
+            style,
+            clips: clips.into_iter().collect(),
+        });
+        self
     }
 
     pub fn draw_text(

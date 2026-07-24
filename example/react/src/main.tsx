@@ -1,34 +1,50 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "@burokku/react";
 
-function OverflowBar({ mode }: { mode: "hidden" | "clip" }) {
-  const colors =
-    mode === "hidden"
-      ? ["#2850dc", "#4f72e6", "#7e99ef", "#a9baf5"]
-      : ["#7c3aed", "#965cef", "#af7cf4", "#c7a5f8"];
+function ScrollablePanel() {
+  const colors = ["#e8efff", "#eee9ff", "#e1f7ef", "#fff1dc", "#ffe8ee", "#e8f4ff"];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: 184, gap: 7 }}>
-      <span style={{ color: "#526071", fontSize: 13, lineHeight: "18px", fontWeight: 700 }}>
-        overflow: {mode}
-      </span>
+    <div
+      style={{
+        display: "flex",
+        width: 386,
+        height: 130,
+        overflow: "auto",
+        backgroundColor: "#eef2f7",
+        borderColor: "#c5cfdd",
+        borderWidth: 2,
+        borderRadius: 12,
+      }}
+    >
       <div
         style={{
           display: "flex",
-          width: 180,
-          height: 24,
-          overflow: mode,
-          backgroundColor: "#dce3ee",
-          borderColor: "#c5cfdd",
-          borderWidth: 2,
-          borderRadius: 12,
+          flexDirection: "column",
+          width: 520,
+          padding: 8,
+          gap: 6,
+          flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", width: 260, height: 24, flexShrink: 0 }}>
-          {colors.map((color) => (
-            <div key={color} style={{ width: 65, height: 24, flexShrink: 0, backgroundColor: color }} />
-          ))}
-        </div>
+        {colors.map((color, index) => (
+          <div
+            key={color}
+            style={{
+              display: "flex",
+              width: 500,
+              height: 38,
+              padding: 10,
+              flexShrink: 0,
+              backgroundColor: color,
+              borderRadius: 8,
+            }}
+          >
+            <span style={{ color: "#263246", fontSize: 14, lineHeight: "18px", fontWeight: 700 }}>
+              Scroll item {index + 1} · drag either thumb or use the mouse wheel
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -102,12 +118,9 @@ function App() {
         }}
       >
         <span style={{ color: "#18202b", fontSize: 16, lineHeight: "22px", fontWeight: 700 }}>
-          Descendant clipping
+          Usable scroll container
         </span>
-        <div style={{ display: "flex", flexDirection: "row", gap: 10 }}>
-          <OverflowBar mode="hidden" />
-          <OverflowBar mode="clip" />
-        </div>
+        <ScrollablePanel />
       </div>
     </div>
   );

@@ -5,7 +5,7 @@
 - [x] Apply `z-index` when ordering children for painting and hit testing.
 - [x] Implement stacking contexts, including `isolation: isolate`.
 - [x] Clip descendants for `overflow: hidden` and `overflow: clip`.
-- [ ] Implement scroll containers and scrollbars for `overflow: auto` and `overflow: scroll`.
+- [x] Implement scroll containers and scrollbars for `overflow: auto` and `overflow: scroll`.
 - [ ] Preserve and paint per-side border widths instead of using the largest width for every side.
 - [ ] Support per-side border colors and styles.
 - [ ] Propagate Glyphon text baselines into Taffy so baseline alignment is accurate.

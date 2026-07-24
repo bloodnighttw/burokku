@@ -16,6 +16,7 @@ pub(super) struct ShapeRenderer {
     clip_capacity: u64,
     instances: Vec<ShapeInstance>,
     clips: Vec<GpuClip>,
+    overlay_start: usize,
 }
 
 impl ShapeRenderer {
@@ -78,6 +79,7 @@ impl ShapeRenderer {
             clip_capacity,
             instances: Vec::new(),
             clips: Vec::new(),
+            overlay_start: 0,
         }
     }
 
@@ -98,27 +100,41 @@ impl ShapeRenderer {
         );
         self.instances.clear();
         self.clips.clear();
-        for command in canvas.commands() {
-            let DrawCommand::Box { rect, style, clips } = command else {
-                continue;
-            };
-            if rect.width <= 0.0
-                || rect.height <= 0.0
-                || clips
-                    .iter()
-                    .any(|clip| clip.rect.width <= 0.0 || clip.rect.height <= 0.0)
-            {
-                continue;
+        for overlay in [false, true] {
+            if overlay {
+                self.overlay_start = self.instances.len();
             }
+            for command in canvas.commands() {
+                let shape = match command {
+                    DrawCommand::Box { rect, style, clips } if !overlay => {
+                        Some((*rect, *style, clips.as_slice()))
+                    }
+                    DrawCommand::OverlayBox { rect, style, clips } if overlay => {
+                        Some((*rect, *style, clips.as_slice()))
+                    }
+                    _ => None,
+                };
+                let Some((rect, style, clips)) = shape else {
+                    continue;
+                };
+                if rect.width <= 0.0
+                    || rect.height <= 0.0
+                    || clips
+                        .iter()
+                        .any(|clip| clip.rect.width <= 0.0 || clip.rect.height <= 0.0)
+                {
+                    continue;
+                }
 
-            let clip_start = self.clips.len() as u32;
-            self.clips.extend(clips.iter().copied().map(GpuClip::new));
-            self.instances.push(ShapeInstance::new(
-                *rect,
-                *style,
-                clip_start,
-                clips.len() as u32,
-            ));
+                let clip_start = self.clips.len() as u32;
+                self.clips.extend(clips.iter().copied().map(GpuClip::new));
+                self.instances.push(ShapeInstance::new(
+                    rect,
+                    style,
+                    clip_start,
+                    clips.len() as u32,
+                ));
+            }
         }
         if self.instances.is_empty() {
             return;
@@ -159,14 +175,27 @@ impl ShapeRenderer {
         }
     }
 
-    pub fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.instances.is_empty() {
+    pub fn draw_base<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
+        self.draw_range(pass, 0, self.overlay_start);
+    }
+
+    pub fn draw_overlay<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
+        self.draw_range(pass, self.overlay_start, self.instances.len());
+    }
+
+    fn draw_range<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        start: usize,
+        end: usize,
+    ) {
+        if start >= end {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        pass.draw(0..6, 0..self.instances.len() as u32);
+        pass.draw(0..6, start as u32..end as u32);
     }
 }
 

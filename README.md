@@ -121,8 +121,10 @@ render(() => <div style={{ padding: "24px" }}>Hello</div>, document.body);
 ```
 
 The currently supported visual CSS subset is flex/block display, width and
-height constraints, gap, padding, margin, hidden/clip overflow, background and
-text color, border, outline, radius, and basic font properties.
+height constraints, gap, padding, margin, clipped and scrollable overflow,
+background and text color, border, outline, radius, and basic font properties.
+Scrollable boxes respond to mouse-wheel input, scrollbar track clicks, and
+thumb dragging.
 
 Build and run the Vite example with:
 
