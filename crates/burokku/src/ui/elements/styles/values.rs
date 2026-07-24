@@ -13,11 +13,11 @@ pub(crate) enum Position {
 /// The supported CSS border line styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum BorderStyle {
+    #[default]
     None,
     Hidden,
     Dotted,
     Dashed,
-    #[default]
     Solid,
     Double,
     Groove,

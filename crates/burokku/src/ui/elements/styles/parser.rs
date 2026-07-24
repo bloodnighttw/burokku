@@ -859,6 +859,33 @@ mod tests {
     }
 
     #[test]
+    fn border_style_defaults_and_clears_to_none() {
+        let mut style = Style::default();
+        assert_eq!(
+            [
+                style.border_top_style,
+                style.border_right_style,
+                style.border_bottom_style,
+                style.border_left_style,
+            ],
+            [BorderStyle::None; 4]
+        );
+
+        set_style(&mut style, "border-style", Some("solid")).unwrap();
+        set_style(&mut style, "border-style", None).unwrap();
+
+        assert_eq!(
+            [
+                style.border_top_style,
+                style.border_right_style,
+                style.border_bottom_style,
+                style.border_left_style,
+            ],
+            [BorderStyle::None; 4]
+        );
+    }
+
+    #[test]
     fn clears_properties_to_their_initial_values() {
         let mut style = Style::default();
         set_style(&mut style, "flex-shrink", Some("0")).unwrap();
