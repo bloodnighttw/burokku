@@ -232,43 +232,122 @@
     set id(value) { this.setAttribute("id", value); }
     get innerHTML() { return this.textContent; }
     set innerHTML(value) { this.textContent = value; }
-    focus() { document.activeElement = this; }
-    blur() { if (document.activeElement === this) document.activeElement = document.body; }
+    focus() {
+      if (this.disabled) return;
+      if (document.activeElement === this) return;
+      document.activeElement?.removeAttribute?.("data-burokku-focused");
+      document.activeElement = this;
+      this.setAttribute("data-burokku-focused", "");
+    }
+    blur() {
+      if (document.activeElement !== this) return;
+      this.removeAttribute("data-burokku-focused");
+      document.activeElement = document.body;
+    }
     querySelector() { return null; }
   }
 
   class HTMLElement extends Element {}
   class HTMLButtonElement extends HTMLElement {
     get disabled() { return this.hasAttribute("disabled"); }
-    set disabled(value) { value ? this.setAttribute("disabled", "") : this.removeAttribute("disabled"); }
+    set disabled(value) {
+      if (value) {
+        this.blur();
+        this.setAttribute("disabled", "");
+      } else {
+        this.removeAttribute("disabled");
+      }
+    }
   }
   class HTMLOptionElement extends HTMLElement {
     get disabled() { return this.hasAttribute("disabled"); }
     set disabled(value) { value ? this.setAttribute("disabled", "") : this.removeAttribute("disabled"); }
     get selected() {
-      if (this.hasAttribute("selected")) return true;
       const select = this.parentElement;
-      return select instanceof HTMLSelectElement
-        && !select.children.some(option => option.hasAttribute("selected"))
-        && select.children.find(option => option instanceof HTMLOptionElement) === this;
+      if (select instanceof HTMLSelectElement) return select.__selectedOptions().includes(this);
+      if (this.hasAttribute("data-burokku-option-explicit")) {
+        return this.hasAttribute("data-burokku-selected");
+      }
+      return this.hasAttribute("selected");
     }
-    set selected(value) { value ? this.setAttribute("selected", "") : this.removeAttribute("selected"); }
+    set selected(value) {
+      const select = this.parentElement;
+      if (select instanceof HTMLSelectElement) {
+        if (select.multiple) {
+          select.__markSelectionExplicit();
+          value
+            ? this.setAttribute("data-burokku-selected", "")
+            : this.removeAttribute("data-burokku-selected");
+        } else if (value) {
+          select.__setSelection(this);
+        } else if (this.selected) {
+          select.__setSelection(null);
+        }
+      } else {
+        this.setAttribute("data-burokku-option-explicit", "");
+        value
+          ? this.setAttribute("data-burokku-selected", "")
+          : this.removeAttribute("data-burokku-selected");
+      }
+    }
     get value() { return this.getAttribute("value") ?? this.textContent; }
     set value(value) { this.setAttribute("value", value); }
   }
   class HTMLSelectElement extends HTMLElement {
     get disabled() { return this.hasAttribute("disabled"); }
-    set disabled(value) { value ? this.setAttribute("disabled", "") : this.removeAttribute("disabled"); }
-    get options() { return this.children.filter(child => child instanceof HTMLOptionElement); }
-    get selectedIndex() { return this.options.findIndex(option => option.selected); }
-    set selectedIndex(index) {
-      const selected = this.options[Number(index)];
-      for (const option of this.options) option.selected = option === selected;
+    set disabled(value) {
+      if (value) {
+        this.blur();
+        this.setAttribute("disabled", "");
+      } else {
+        this.removeAttribute("disabled");
+      }
     }
-    get value() { return this.options.find(option => option.selected)?.value ?? ""; }
+    get multiple() { return this.hasAttribute("multiple"); }
+    set multiple(value) {
+      if (value) {
+        this.setAttribute("multiple", "");
+      } else {
+        const selected = this.__selectedOptions().at(-1) ?? null;
+        this.removeAttribute("multiple");
+        if (this.hasAttribute("data-burokku-selection-explicit")) this.__setSelection(selected);
+      }
+    }
+    get options() { return this.children.filter(child => child instanceof HTMLOptionElement); }
+    __markSelectionExplicit() {
+      this.setAttribute("data-burokku-selection-explicit", "");
+    }
+    __selectedOptions() {
+      if (this.hasAttribute("data-burokku-selection-explicit")) {
+        const selected = this.options.filter(option => option.hasAttribute("data-burokku-selected"));
+        return this.multiple || selected.length === 0 ? selected : [selected[selected.length - 1]];
+      }
+      const selected = this.options.filter(option => option.hasAttribute("data-burokku-selected")
+        || (!option.hasAttribute("data-burokku-option-explicit") && option.hasAttribute("selected")));
+      if (this.multiple) return selected;
+      if (selected.length) return [selected[selected.length - 1]];
+      const fallback = this.options.find(option => !option.disabled) ?? this.options[0];
+      return fallback ? [fallback] : [];
+    }
+    __setSelection(selected) {
+      this.__markSelectionExplicit();
+      for (const option of this.options) {
+        if (option === selected) option.setAttribute("data-burokku-selected", "");
+        else option.removeAttribute("data-burokku-selected");
+      }
+    }
+    get selectedIndex() {
+      const selected = this.__selectedOptions()[0];
+      return selected ? this.options.indexOf(selected) : -1;
+    }
+    set selectedIndex(index) {
+      const selected = this.options[Number(index)] ?? null;
+      this.__setSelection(selected);
+    }
+    get value() { return this.__selectedOptions()[0]?.value ?? ""; }
     set value(value) {
-      const selected = this.options.find(option => option.value === String(value));
-      for (const option of this.options) option.selected = option === selected;
+      const selected = this.options.find(option => option.value === String(value)) ?? null;
+      this.__setSelection(selected);
     }
   }
   class Text extends Node {

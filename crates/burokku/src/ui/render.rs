@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BorderSide, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, CornerSize, Outline,
-    Rect, TextDecorationLine, TextRunMetrics, TextShadow, TextStyle, TextSystem, Transform,
+    Border, BorderSide, BorderStyle as RenderBorderStyle, BoxShadow, BoxStyle, Canvas, Clip, Color,
+    CornerRadius, CornerSize, Outline, Rect, TextDecorationLine, TextRunMetrics, TextShadow,
+    TextStyle, TextSystem, Transform,
 };
 
 use super::{
@@ -126,8 +127,8 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
                         clips.iter().copied(),
                     );
                 }
-                if let Some(NativeAppearance::Select { color }) = native_appearance {
-                    paint_select_indicator(bounds, *color, scale_factor, &clips, canvas);
+                if let Some(appearance) = native_appearance {
+                    paint_native_control(bounds, *appearance, scale_factor, &clips, canvas);
                 }
             }
             LayoutKind::Text {
@@ -187,6 +188,122 @@ fn paint_text_decorations(
             );
         }
     }
+}
+
+fn paint_native_control(
+    bounds: Rect,
+    appearance: NativeAppearance,
+    scale_factor: f32,
+    clips: &[Clip],
+    canvas: &mut Canvas,
+) {
+    let (disabled, focused, active, default_borders, border_widths, border_colors) = match appearance
+    {
+        NativeAppearance::Button {
+            disabled,
+            focused,
+            active,
+            default_borders,
+            border_widths,
+            border_colors,
+        } => (
+            disabled,
+            focused,
+            active,
+            default_borders,
+            border_widths,
+            border_colors,
+        ),
+        NativeAppearance::Select {
+            disabled,
+            focused,
+            default_borders,
+            border_widths,
+            border_colors,
+            ..
+        } => (
+            disabled,
+            focused,
+            false,
+            default_borders,
+            border_widths,
+            border_colors,
+        ),
+    };
+
+    paint_native_border(
+        bounds,
+        default_borders,
+        border_widths,
+        border_colors,
+        scale_factor,
+        clips,
+        canvas,
+    );
+
+    if active || disabled || focused {
+        let overlay = BoxStyle {
+            background: if active {
+                Color::from_rgba8(0, 0, 0, 20)
+            } else if disabled {
+                Color::from_rgba8(255, 255, 255, 35)
+            } else {
+                Color::TRANSPARENT
+            },
+            corner_radius: CornerRadius::all(3.0 * scale_factor),
+            outline: focused.then(|| {
+                Outline::new(
+                    2.0 * scale_factor,
+                    1.0 * scale_factor,
+                    Color::from_rgba8(38, 132, 255, 255),
+                )
+            }),
+            ..BoxStyle::default()
+        };
+        canvas.draw_overlay_box_with_clips(bounds, overlay, clips.iter().copied());
+    }
+
+    if let NativeAppearance::Select {
+        color, multiple, ..
+    } = appearance
+    {
+        if !multiple {
+            paint_select_indicator(bounds, color, scale_factor, clips, canvas);
+        }
+    }
+}
+
+fn paint_native_border(
+    bounds: Rect,
+    sides: [bool; 4],
+    widths: [f32; 4],
+    colors: [Color; 4],
+    scale_factor: f32,
+    clips: &[Clip],
+    canvas: &mut Canvas,
+) {
+    let widths: [f32; 4] = std::array::from_fn(|index| {
+        if sides[index] {
+            widths[index] * scale_factor
+        } else {
+            0.0
+        }
+    });
+    if widths.iter().all(|width| *width <= 0.0) {
+        return;
+    }
+    let border = Border::sides(
+        BorderSide::new(widths[0], colors[0], RenderBorderStyle::Solid),
+        BorderSide::new(widths[1], colors[1], RenderBorderStyle::Solid),
+        BorderSide::new(widths[2], colors[2], RenderBorderStyle::Solid),
+        BorderSide::new(widths[3], colors[3], RenderBorderStyle::Solid),
+    );
+    let style = BoxStyle {
+        corner_radius: CornerRadius::all(3.0 * scale_factor),
+        border: Some(border),
+        ..BoxStyle::default()
+    };
+    canvas.draw_overlay_box_with_clips(bounds, style, clips.iter().copied());
 }
 
 fn paint_select_indicator(
@@ -488,6 +605,54 @@ mod tests {
         let canvas = build_canvas(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
 
         assert!(canvas.commands().iter().any(
+            |command| matches!(command, render::DrawCommand::Text { text, .. } if text == "▾")
+        ));
+    }
+
+    #[test]
+    fn native_button_appearance_paints_borders_and_interaction_states() {
+        let mut document = Document::new();
+        let button = document.create_node(ElementKind::Button);
+        document
+            .set_attribute(button, "data-burokku-focused", Some(""))
+            .unwrap();
+        document
+            .set_attribute(button, "aria-pressed", Some("true"))
+            .unwrap();
+        document.insert(BODY_ID, button, None).unwrap();
+
+        let canvas = build_canvas(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+        let native_overlays = canvas
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, render::DrawCommand::OverlayBox { .. }))
+            .count();
+        assert_eq!(native_overlays, 2);
+        assert!(canvas.commands().iter().any(|command| {
+            matches!(
+                command,
+                render::DrawCommand::OverlayBox { style, .. }
+                    if style.outline.is_some() && style.background.alpha > 0.0
+            )
+        }));
+    }
+
+    #[test]
+    fn multiple_selects_do_not_paint_a_closed_dropdown_indicator() {
+        let mut document = Document::new();
+        let select = document.create_node(ElementKind::Select);
+        let option = document.create_node(ElementKind::Option);
+        let text = document.create_node(ElementKind::Text("Choice".into()));
+        document
+            .set_attribute(select, "multiple", Some(""))
+            .unwrap();
+        document.insert(BODY_ID, select, None).unwrap();
+        document.insert(select, option, None).unwrap();
+        document.insert(option, text, None).unwrap();
+
+        let canvas = build_canvas(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+
+        assert!(!canvas.commands().iter().any(
             |command| matches!(command, render::DrawCommand::Text { text, .. } if text == "▾")
         ));
     }
