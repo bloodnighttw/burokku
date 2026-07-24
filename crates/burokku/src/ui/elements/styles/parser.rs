@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
 use super::{
-    AlignContent, AlignItems, BoxSizing, Color, Display, FlexDirection, FlexWrap, Isolation,
-    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, Position,
-    SizeValue, Style, ZIndex,
+    AlignContent, AlignItems, BorderStyle, BoxSizing, Color, CornerRadiusValue, Display,
+    FlexDirection, FlexWrap, Isolation, LengthPercentageValue, LengthValue, LineHeightValue,
+    MaxSizeValue, Overflow, Position, SizeValue, Style, ZIndex,
 };
 use thiserror::Error;
 
@@ -58,8 +58,10 @@ pub(crate) fn set_style(
         }
         "position" => {
             style.position = match value {
-                "relative" | "static" => Position::Relative,
-                "absolute" | "fixed" => Position::Absolute,
+                "static" => Position::Static,
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
                 _ => return invalid(name, value),
             };
         }
@@ -184,26 +186,48 @@ pub(crate) fn set_style(
 
         "background-color" => color!(background_color),
         "color" => color!(color),
-        "border-color" => color!(border_color),
+        "border-color" => {
+            let [top, right, bottom, left] = parse_box_colors(name, value)?;
+            style.border_top_color = Some(top);
+            style.border_right_color = Some(right);
+            style.border_bottom_color = Some(bottom);
+            style.border_left_color = Some(left);
+        }
+        "border-top-color" => color!(border_top_color),
+        "border-right-color" => color!(border_right_color),
+        "border-bottom-color" => color!(border_bottom_color),
+        "border-left-color" => color!(border_left_color),
+        "border-style" => {
+            let [top, right, bottom, left] =
+                parse_box_values(name, value, |part| parse_border_style(name, part))?;
+            style.border_top_style = top;
+            style.border_right_style = right;
+            style.border_bottom_style = bottom;
+            style.border_left_style = left;
+        }
+        "border-top-style" => style.border_top_style = parse_border_style(name, value)?,
+        "border-right-style" => style.border_right_style = parse_border_style(name, value)?,
+        "border-bottom-style" => style.border_bottom_style = parse_border_style(name, value)?,
+        "border-left-style" => style.border_left_style = parse_border_style(name, value)?,
         "border-radius" => {
             let [top_left, top_right, bottom_right, bottom_left] =
-                parse_box_length_percentages(name, value, false)?;
+                parse_border_radius(name, value)?;
             style.border_top_left_radius = top_left;
             style.border_top_right_radius = top_right;
             style.border_bottom_right_radius = bottom_right;
             style.border_bottom_left_radius = bottom_left;
         }
         "border-top-left-radius" => {
-            style.border_top_left_radius = parse_length_percentage(name, value, false)?
+            style.border_top_left_radius = parse_corner_radius(name, value)?
         }
         "border-top-right-radius" => {
-            style.border_top_right_radius = parse_length_percentage(name, value, false)?
+            style.border_top_right_radius = parse_corner_radius(name, value)?
         }
         "border-bottom-right-radius" => {
-            style.border_bottom_right_radius = parse_length_percentage(name, value, false)?
+            style.border_bottom_right_radius = parse_corner_radius(name, value)?
         }
         "border-bottom-left-radius" => {
-            style.border_bottom_left_radius = parse_length_percentage(name, value, false)?
+            style.border_bottom_left_radius = parse_corner_radius(name, value)?
         }
         "outline-color" => color!(outline_color),
         "outline-width" => length!(outline_width, false),
@@ -306,7 +330,26 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
         "justify-content" => reset!(justify_content),
         "background-color" => reset!(background_color),
         "color" => reset!(color),
-        "border-color" => reset!(border_color),
+        "border-color" => reset_box!(
+            border_top_color,
+            border_right_color,
+            border_bottom_color,
+            border_left_color
+        ),
+        "border-top-color" => reset!(border_top_color),
+        "border-right-color" => reset!(border_right_color),
+        "border-bottom-color" => reset!(border_bottom_color),
+        "border-left-color" => reset!(border_left_color),
+        "border-style" => reset_box!(
+            border_top_style,
+            border_right_style,
+            border_bottom_style,
+            border_left_style
+        ),
+        "border-top-style" => reset!(border_top_style),
+        "border-right-style" => reset!(border_right_style),
+        "border-bottom-style" => reset!(border_bottom_style),
+        "border-left-style" => reset!(border_left_style),
         "border-radius" => reset_box!(
             border_top_left_radius,
             border_top_right_radius,
@@ -451,6 +494,34 @@ fn parse_box_sizes(
     parse_box_values(name, value, |part| parse_size(name, part, allow_negative))
 }
 
+fn parse_box_colors(name: &str, value: &str) -> Result<[Color; 4], StyleError> {
+    parse_box_values(name, value, |part| parse_color(name, part))
+}
+
+fn parse_border_radius(name: &str, value: &str) -> Result<[CornerRadiusValue; 4], StyleError> {
+    let mut parts = value.split('/');
+    let horizontal = parts.next().unwrap_or_default().trim();
+    let vertical = parts.next().map(str::trim);
+    if parts.next().is_some() || horizontal.is_empty() || vertical.is_some_and(str::is_empty) {
+        return invalid(name, value);
+    }
+    let horizontal = parse_box_length_percentages(name, horizontal, false)?;
+    let vertical = match vertical {
+        Some(vertical) => parse_box_length_percentages(name, vertical, false)?,
+        None => horizontal,
+    };
+    Ok(std::array::from_fn(|index| {
+        CornerRadiusValue::new(horizontal[index], vertical[index])
+    }))
+}
+
+fn parse_corner_radius(name: &str, value: &str) -> Result<CornerRadiusValue, StyleError> {
+    let (horizontal, vertical) = one_or_two(name, value, |name, part| {
+        parse_length_percentage(name, part, false)
+    })?;
+    Ok(CornerRadiusValue::new(horizontal, vertical))
+}
+
 fn parse_box_values<T: Copy>(
     name: &str,
     value: &str,
@@ -493,6 +564,22 @@ fn parse_overflow(name: &str, value: &str) -> Result<Overflow, StyleError> {
         "clip" => Ok(Overflow::Clip),
         "auto" => Ok(Overflow::Auto),
         "scroll" => Ok(Overflow::Scroll),
+        _ => invalid(name, value),
+    }
+}
+
+fn parse_border_style(name: &str, value: &str) -> Result<BorderStyle, StyleError> {
+    match value {
+        "none" => Ok(BorderStyle::None),
+        "hidden" => Ok(BorderStyle::Hidden),
+        "dotted" => Ok(BorderStyle::Dotted),
+        "dashed" => Ok(BorderStyle::Dashed),
+        "solid" => Ok(BorderStyle::Solid),
+        "double" => Ok(BorderStyle::Double),
+        "groove" => Ok(BorderStyle::Groove),
+        "ridge" => Ok(BorderStyle::Ridge),
+        "inset" => Ok(BorderStyle::Inset),
+        "outset" => Ok(BorderStyle::Outset),
         _ => invalid(name, value),
     }
 }
@@ -679,19 +766,96 @@ mod tests {
         );
         assert_eq!(style.row_gap, LengthPercentageValue::Px(8.0));
         assert_eq!(style.column_gap, LengthPercentageValue::Px(12.0));
-        assert_eq!(style.border_top_left_radius, LengthPercentageValue::Px(2.0));
+        assert_eq!(
+            style.border_top_left_radius,
+            CornerRadiusValue::all(LengthPercentageValue::Px(2.0))
+        );
         assert_eq!(
             style.border_top_right_radius,
-            LengthPercentageValue::Px(4.0)
+            CornerRadiusValue::all(LengthPercentageValue::Px(4.0))
         );
         assert_eq!(
             style.border_bottom_right_radius,
-            LengthPercentageValue::Px(2.0)
+            CornerRadiusValue::all(LengthPercentageValue::Px(2.0))
         );
         assert_eq!(
             style.border_bottom_left_radius,
-            LengthPercentageValue::Px(4.0)
+            CornerRadiusValue::all(LengthPercentageValue::Px(4.0))
         );
+    }
+
+    #[test]
+    fn parses_per_side_border_colors_styles_and_elliptical_radii() {
+        let mut style = Style::default();
+
+        set_style(
+            &mut style,
+            "border-color",
+            Some("red green blue transparent"),
+        )
+        .unwrap();
+        set_style(
+            &mut style,
+            "border-style",
+            Some("solid dashed dotted double"),
+        )
+        .unwrap();
+        set_style(
+            &mut style,
+            "border-radius",
+            Some("10px 20% 30px / 5px 15% 25px 35%"),
+        )
+        .unwrap();
+
+        assert_eq!(style.border_top_color, Some([255, 0, 0, 255]));
+        assert_eq!(style.border_right_color, Some([0, 128, 0, 255]));
+        assert_eq!(style.border_bottom_color, Some([0, 0, 255, 255]));
+        assert_eq!(style.border_left_color, Some([0, 0, 0, 0]));
+        assert_eq!(
+            [
+                style.border_top_style,
+                style.border_right_style,
+                style.border_bottom_style,
+                style.border_left_style,
+            ],
+            [
+                BorderStyle::Solid,
+                BorderStyle::Dashed,
+                BorderStyle::Dotted,
+                BorderStyle::Double,
+            ]
+        );
+        assert_eq!(
+            style.border_top_left_radius,
+            CornerRadiusValue::new(
+                LengthPercentageValue::Px(10.0),
+                LengthPercentageValue::Px(5.0),
+            )
+        );
+        assert_eq!(
+            style.border_bottom_left_radius,
+            CornerRadiusValue::new(
+                LengthPercentageValue::Percent(20.0),
+                LengthPercentageValue::Percent(35.0),
+            )
+        );
+        assert!(set_style(&mut style, "border-radius", Some("1px / 2px / 3px")).is_err());
+    }
+
+    #[test]
+    fn preserves_all_four_position_values() {
+        let mut style = Style::default();
+        assert_eq!(style.position, Position::Static);
+
+        for (value, expected) in [
+            ("relative", Position::Relative),
+            ("absolute", Position::Absolute),
+            ("fixed", Position::Fixed),
+            ("static", Position::Static),
+        ] {
+            set_style(&mut style, "position", Some(value)).unwrap();
+            assert_eq!(style.position, expected);
+        }
     }
 
     #[test]

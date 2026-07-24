@@ -7,9 +7,9 @@ pub(crate) use parser::{set_style, StyleError};
 pub(crate) use style::{Color, Style};
 pub(crate) use taffy::style::{
     AlignContent, AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap,
-    JustifyContent, Position,
+    JustifyContent,
 };
 pub(crate) use values::{
-    Isolation, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow,
-    SizeValue, ZIndex,
+    BorderStyle, CornerRadiusValue, Isolation, LengthPercentageValue, LengthValue, LineHeightValue,
+    MaxSizeValue, Overflow, Position, SizeValue, ZIndex,
 };

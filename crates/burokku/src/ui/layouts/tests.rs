@@ -11,6 +11,7 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
         height: 20.0,
         clips: Vec::new(),
         scroll: None,
+        is_fixed: false,
         kind: LayoutKind::Text {
             text: "Burokku".into(),
             style: TextStyle::default(),
@@ -27,6 +28,7 @@ fn box_layout(element_id: u64, stacking_layer: StackingLayer, children: Vec<Layo
         height: 100.0,
         clips: Vec::new(),
         scroll: None,
+        is_fixed: false,
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
             stacking_layer,
@@ -59,6 +61,7 @@ fn hit_testing_returns_the_topmost_child() {
         height: 200.0,
         clips: Vec::new(),
         scroll: None,
+        is_fixed: false,
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
             stacking_layer: StackingLayer::default(),

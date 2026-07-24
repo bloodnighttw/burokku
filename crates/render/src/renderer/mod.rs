@@ -206,7 +206,10 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Border, BoxStyle, Clip, Color, CornerRadius, Outline, Rect, TextStyle};
+    use crate::{
+        Border, BorderSide, BorderStyle, BoxStyle, Clip, Color, CornerRadius, CornerSize, Outline,
+        Rect, TextStyle,
+    };
 
     #[tokio::test(flavor = "current_thread")]
     async fn renders_box_border_outline_text_and_readback() {
@@ -367,6 +370,91 @@ mod tests {
             is_background(26, 32),
             "left border should stop after sixteen pixels"
         );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paints_per_side_border_colors_and_line_styles() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::WHITE,
+                border: Some(Border::sides(
+                    BorderSide::new(8.0, Color::from_rgba8(255, 0, 0, 255), BorderStyle::Dashed),
+                    BorderSide::new(8.0, Color::from_rgba8(0, 255, 0, 255), BorderStyle::Solid),
+                    BorderSide::new(8.0, Color::from_rgba8(0, 0, 255, 255), BorderStyle::Double),
+                    BorderSide::new(8.0, Color::BLACK, BorderStyle::Dotted),
+                )),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen per-side border style render");
+
+        let top_dash = image.pixel(32, 10).expect("top dash");
+        assert!(top_dash[0] > 200 && top_dash[1] < 60 && top_dash[2] < 60);
+        assert_eq!(image.pixel(48, 10), Some([255, 255, 255, 255]));
+        let right = image.pixel(52, 32).expect("right border");
+        assert!(right[1] > 200 && right[0] < 60 && right[2] < 60);
+        let bottom_outer = image.pixel(32, 54).expect("double outer line");
+        assert!(bottom_outer[2] > 200 && bottom_outer[0] < 60);
+        assert_eq!(image.pixel(32, 51), Some([255, 255, 255, 255]));
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paints_elliptical_corner_radii() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 32.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                corner_radius: CornerRadius::elliptical(
+                    CornerSize::new(20.0, 6.0),
+                    CornerSize::ZERO,
+                    CornerSize::ZERO,
+                    CornerSize::ZERO,
+                ),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen elliptical corner render");
+
+        assert_eq!(image.pixel(10, 10), Some([255, 255, 255, 255]));
+        let inside = image.pixel(10, 14).expect("inside ellipse");
+        assert!(inside[0] > 180 && inside[1] < 80 && inside[2] < 90);
         drop(adapter);
     }
 

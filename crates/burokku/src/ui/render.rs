@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextStyle, TextSystem,
+    Border, BorderSide, BoxStyle, Canvas, Clip, Color, CornerRadius, CornerSize, Outline, Rect,
+    TextStyle, TextSystem,
 };
 
 use super::{
@@ -212,11 +213,11 @@ fn scaled_rect(rect: Rect, scale_factor: f32) -> Rect {
 fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
     Clip::new(
         scaled_rect(clip.rect, scale_factor),
-        CornerRadius::new(
-            clip.corner_radius.top_left * scale_factor,
-            clip.corner_radius.top_right * scale_factor,
-            clip.corner_radius.bottom_right * scale_factor,
-            clip.corner_radius.bottom_left * scale_factor,
+        CornerRadius::elliptical(
+            scaled_corner(clip.corner_radius.top_left, scale_factor),
+            scaled_corner(clip.corner_radius.top_right, scale_factor),
+            scaled_corner(clip.corner_radius.bottom_right, scale_factor),
+            scaled_corner(clip.corner_radius.bottom_left, scale_factor),
         ),
     )
 }
@@ -224,19 +225,18 @@ fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
 fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
     BoxStyle {
         background: style.background,
-        corner_radius: CornerRadius::new(
-            style.corner_radius.top_left * scale_factor,
-            style.corner_radius.top_right * scale_factor,
-            style.corner_radius.bottom_right * scale_factor,
-            style.corner_radius.bottom_left * scale_factor,
+        corner_radius: CornerRadius::elliptical(
+            scaled_corner(style.corner_radius.top_left, scale_factor),
+            scaled_corner(style.corner_radius.top_right, scale_factor),
+            scaled_corner(style.corner_radius.bottom_right, scale_factor),
+            scaled_corner(style.corner_radius.bottom_left, scale_factor),
         ),
         border: style.border.map(|border| {
-            Border::per_side(
-                border.top_width * scale_factor,
-                border.right_width * scale_factor,
-                border.bottom_width * scale_factor,
-                border.left_width * scale_factor,
-                border.color,
+            Border::sides(
+                scaled_border_side(border.top, scale_factor),
+                scaled_border_side(border.right, scale_factor),
+                scaled_border_side(border.bottom, scale_factor),
+                scaled_border_side(border.left, scale_factor),
             )
         }),
         outline: style.outline.map(|outline| {
@@ -247,6 +247,14 @@ fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
             )
         }),
     }
+}
+
+fn scaled_corner(corner: CornerSize, scale_factor: f32) -> CornerSize {
+    CornerSize::new(corner.x * scale_factor, corner.y * scale_factor)
+}
+
+fn scaled_border_side(side: BorderSide, scale_factor: f32) -> BorderSide {
+    BorderSide::new(side.width * scale_factor, side.color, side.style)
 }
 
 fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
@@ -317,7 +325,7 @@ mod tests {
 
         assert_eq!((rect.width, rect.height), (212.0, 108.0));
         assert_eq!(style.border.expect("border").widths(), [2.0, 4.0, 6.0, 8.0]);
-        assert_eq!(style.corner_radius.top_left, 8.0);
+        assert_eq!(style.corner_radius.top_left, CornerSize::all(8.0));
     }
 
     #[test]
