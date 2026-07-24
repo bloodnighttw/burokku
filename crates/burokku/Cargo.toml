@@ -6,6 +6,7 @@ description = "Burokku JavaScript runtime application"
 license = "MIT"
 
 [dependencies]
+arc-swap = "1"
 render = { path = "../render" }
 runtime = { path = "../runtime" }
 taffy = "0.11"

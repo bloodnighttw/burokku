@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
+
 use super::{Document, DocumentError, ElementKind};
 
 #[derive(Clone, Debug)]
@@ -9,7 +11,12 @@ pub struct UiStore {
 
 #[derive(Debug)]
 struct UiStoreInner {
-    state: Mutex<UiState>,
+    // The document and its version are published together so readers cannot
+    // observe a version from one update and a document from another.
+    state: ArcSwap<UiState>,
+    // Readers never acquire this lock; it only prevents concurrent writers
+    // from replacing each other's updates.
+    writer: Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -28,32 +35,35 @@ impl UiStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(UiStoreInner {
-                state: Mutex::new(UiState {
+                state: ArcSwap::from_pointee(UiState {
                     document: Arc::new(Document::new()),
                     version: 0,
                 }),
+                writer: Mutex::new(()),
             }),
         }
     }
 
     pub fn snapshot(&self) -> Arc<Document> {
-        Arc::clone(&self.state().document)
+        Arc::clone(&self.inner.state.load().document)
     }
 
     pub fn snapshot_with_version(&self) -> (u64, Arc<Document>) {
-        let state = self.state();
+        let state = self.inner.state.load();
         (state.version, Arc::clone(&state.document))
     }
 
     pub fn snapshot_if_changed(&self, version: u64) -> Option<(u64, Arc<Document>)> {
-        let state = self.state();
+        let state = self.inner.state.load();
         (state.version != version).then(|| (state.version, Arc::clone(&state.document)))
     }
 
     pub fn create_node(&self, kind: ElementKind) -> u64 {
-        let mut state = self.state();
-        let id = Arc::make_mut(&mut state.document).create_node(kind);
-        state.changed();
+        let _writer = self.writer();
+        let state = self.inner.state.load_full();
+        let mut document = (*state.document).clone();
+        let id = document.create_node(kind);
+        self.publish(&state, document);
         id
     }
 
@@ -78,27 +88,30 @@ impl UiStore {
         self.mutate(|document| document.remove(parent, child))
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, UiState> {
+    fn writer(&self) -> std::sync::MutexGuard<'_, ()> {
         self.inner
-            .state
+            .writer
             .lock()
-            .expect("the UI document lock is not poisoned")
+            .expect("the UI document writer lock is not poisoned")
     }
 
     fn mutate(
         &self,
         mutation: impl FnOnce(&mut Document) -> Result<(), DocumentError>,
     ) -> Result<(), DocumentError> {
-        let mut state = self.state();
-        mutation(Arc::make_mut(&mut state.document))?;
-        state.changed();
+        let _writer = self.writer();
+        let state = self.inner.state.load_full();
+        let mut document = (*state.document).clone();
+        mutation(&mut document)?;
+        self.publish(&state, document);
         Ok(())
     }
-}
 
-impl UiState {
-    fn changed(&mut self) {
-        self.version = self.version.wrapping_add(1);
+    fn publish(&self, previous: &UiState, document: Document) {
+        self.inner.state.store(Arc::new(UiState {
+            document: Arc::new(document),
+            version: previous.version.wrapping_add(1),
+        }));
     }
 }
 
@@ -150,5 +163,22 @@ mod tests {
             after.node(text).unwrap().kind,
             ElementKind::Text("after".into())
         );
+    }
+
+    #[test]
+    fn snapshots_do_not_wait_for_the_writer_lock() {
+        let store = UiStore::new();
+        let _writer = store.writer();
+        let reader = store.clone();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+
+        let reader_thread = std::thread::spawn(move || {
+            snapshot_tx.send(reader.snapshot_with_version()).unwrap();
+        });
+
+        snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("snapshot reads must not acquire the writer lock");
+        reader_thread.join().unwrap();
     }
 }
