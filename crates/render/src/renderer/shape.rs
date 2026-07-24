@@ -279,16 +279,17 @@ struct ShapeInstance {
     background: [f32; 4],
     border_color: [f32; 4],
     outline_color: [f32; 4],
-    border_width: f32,
+    border_widths: [f32; 4],
     outline_width: f32,
     outline_offset: f32,
-    _padding: f32,
     clip_range: [u32; 2],
 }
 
 impl ShapeInstance {
     fn new(rect: Rect, style: BoxStyle, clip_start: u32, clip_count: u32) -> Self {
-        let border = style.border.filter(|border| border.width > 0.0);
+        let border = style
+            .border
+            .filter(|border| border.widths().iter().any(|width| *width > 0.0));
         let outline = style.outline.filter(|outline| outline.width > 0.0);
         Self {
             center: [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5],
@@ -301,29 +302,33 @@ impl ShapeInstance {
             outline_color: outline
                 .map_or(Color::TRANSPARENT, |outline| outline.color)
                 .components(),
-            border_width: border.map_or(0.0, |border| {
-                border.width.clamp(0.0, rect.width.min(rect.height) * 0.5)
+            border_widths: border.map_or([0.0; 4], |border| {
+                let [top, right, bottom, left] = border.widths();
+                [
+                    top.clamp(0.0, rect.height),
+                    right.clamp(0.0, rect.width),
+                    bottom.clamp(0.0, rect.height),
+                    left.clamp(0.0, rect.width),
+                ]
             }),
             outline_width: outline.map_or(0.0, |outline| outline.width.max(0.0)),
             outline_offset: outline.map_or(0.0, |outline| outline.offset.max(0.0)),
-            _padding: 0.0,
             clip_range: [clip_start, clip_count],
         }
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
+        const ATTRIBUTES: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
             3 => Float32x4,
             4 => Float32x4,
             5 => Float32x4,
-            6 => Float32,
+            6 => Float32x4,
             7 => Float32,
             8 => Float32,
-            9 => Float32,
-            10 => Uint32x2
+            9 => Uint32x2
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -351,5 +356,27 @@ impl GpuClip {
             half_size: [clip.rect.width * 0.5, clip.rect.height * 0.5],
             radii: clip.corner_radius.normalized(clip.rect),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Border;
+
+    #[test]
+    fn shape_instance_preserves_and_clamps_each_border_width() {
+        let instance = ShapeInstance::new(
+            Rect::new(0.0, 0.0, 30.0, 20.0),
+            BoxStyle {
+                border: Some(Border::per_side(-1.0, 40.0, 8.0, 12.0, Color::BLACK)),
+                ..BoxStyle::default()
+            },
+            3,
+            2,
+        );
+
+        assert_eq!(instance.border_widths, [0.0, 30.0, 8.0, 12.0]);
+        assert_eq!(instance.clip_range, [3, 2]);
     }
 }

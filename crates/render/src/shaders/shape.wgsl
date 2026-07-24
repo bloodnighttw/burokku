@@ -22,11 +22,10 @@ struct Instance {
     @location(3) background: vec4<f32>,
     @location(4) border_color: vec4<f32>,
     @location(5) outline_color: vec4<f32>,
-    @location(6) border_width: f32,
+    @location(6) border_widths: vec4<f32>,
     @location(7) outline_width: f32,
     @location(8) outline_offset: f32,
-    @location(9) _padding: f32,
-    @location(10) clip_range: vec2<u32>,
+    @location(9) clip_range: vec2<u32>,
 }
 
 struct VertexOutput {
@@ -37,8 +36,10 @@ struct VertexOutput {
     @location(3) @interpolate(flat) background: vec4<f32>,
     @location(4) @interpolate(flat) border_color: vec4<f32>,
     @location(5) @interpolate(flat) outline_color: vec4<f32>,
-    @location(6) @interpolate(flat) widths: vec3<f32>,
-    @location(7) @interpolate(flat) clip_range: vec2<u32>,
+    @location(6) @interpolate(flat) border_widths: vec4<f32>,
+    @location(7) @interpolate(flat) outline_width: f32,
+    @location(8) @interpolate(flat) outline_offset: f32,
+    @location(9) @interpolate(flat) clip_range: vec2<u32>,
 }
 
 @vertex
@@ -64,7 +65,9 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
     output.background = instance.background;
     output.border_color = instance.border_color;
     output.outline_color = instance.outline_color;
-    output.widths = vec3(instance.border_width, instance.outline_width, instance.outline_offset);
+    output.border_widths = instance.border_widths;
+    output.outline_width = instance.outline_width;
+    output.outline_offset = instance.outline_offset;
     output.clip_range = instance.clip_range;
     return output;
 }
@@ -115,19 +118,45 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let border_width = max(input.widths.x, 0.0);
-    let outline_width = max(input.widths.y, 0.0);
-    let outline_offset = max(input.widths.z, 0.0);
+    let border_widths = max(input.border_widths, vec4(0.0));
+    let outline_width = max(input.outline_width, 0.0);
+    let outline_offset = max(input.outline_offset, 0.0);
     let base_distance = rounded_box_distance(input.local_position, input.half_size, input.radii);
     let antialias = max(fwidth(base_distance), 0.75);
     let base_coverage = 1.0 - smoothstep(-antialias, antialias, base_distance);
 
-    let inner_half_size = max(input.half_size - vec2(border_width), vec2(0.0));
-    let inner_radii = max(input.radii - vec4(border_width), vec4(0.0));
-    let inner_distance = rounded_box_distance(input.local_position, inner_half_size, inner_radii);
+    let top_width = border_widths.x;
+    let right_width = border_widths.y;
+    let bottom_width = border_widths.z;
+    let left_width = border_widths.w;
+    let inner_center = vec2(
+        (left_width - right_width) * 0.5,
+        (top_width - bottom_width) * 0.5,
+    );
+    let inner_half_size = max(
+        input.half_size - vec2(
+            (left_width + right_width) * 0.5,
+            (top_width + bottom_width) * 0.5,
+        ),
+        vec2(0.0),
+    );
+    let inner_radii = max(
+        input.radii - vec4(
+            max(left_width, top_width),
+            max(right_width, top_width),
+            max(right_width, bottom_width),
+            max(left_width, bottom_width),
+        ),
+        vec4(0.0),
+    );
+    let inner_distance = rounded_box_distance(
+        input.local_position - inner_center,
+        inner_half_size,
+        inner_radii,
+    );
     let inner_coverage = 1.0 - smoothstep(-antialias, antialias, inner_distance);
     var base_color = input.background;
-    if border_width > 0.0 {
+    if any(border_widths > vec4(0.0)) {
         base_color = mix(input.border_color, input.background, inner_coverage);
     }
     base_color.a *= base_coverage;

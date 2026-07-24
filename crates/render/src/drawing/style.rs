@@ -2,14 +2,42 @@ use super::{Color, CornerRadius};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Border {
-    /// Width drawn inside the box edge.
-    pub width: f32,
+    /// Widths drawn inside the box edge.
+    pub top_width: f32,
+    pub right_width: f32,
+    pub bottom_width: f32,
+    pub left_width: f32,
     pub color: Color,
 }
 
 impl Border {
     pub const fn new(width: f32, color: Color) -> Self {
-        Self { width, color }
+        Self::per_side(width, width, width, width, color)
+    }
+
+    pub const fn per_side(
+        top_width: f32,
+        right_width: f32,
+        bottom_width: f32,
+        left_width: f32,
+        color: Color,
+    ) -> Self {
+        Self {
+            top_width,
+            right_width,
+            bottom_width,
+            left_width,
+            color,
+        }
+    }
+
+    pub const fn widths(self) -> [f32; 4] {
+        [
+            self.top_width,
+            self.right_width,
+            self.bottom_width,
+            self.left_width,
+        ]
     }
 }
 

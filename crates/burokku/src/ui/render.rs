@@ -230,9 +230,15 @@ fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
             style.corner_radius.bottom_right * scale_factor,
             style.corner_radius.bottom_left * scale_factor,
         ),
-        border: style
-            .border
-            .map(|border| Border::new(border.width * scale_factor, border.color)),
+        border: style.border.map(|border| {
+            Border::per_side(
+                border.top_width * scale_factor,
+                border.right_width * scale_factor,
+                border.bottom_width * scale_factor,
+                border.left_width * scale_factor,
+                border.color,
+            )
+        }),
         outline: style.outline.map(|outline| {
             Outline::new(
                 outline.width * scale_factor,
@@ -297,7 +303,7 @@ mod tests {
         document.set_style(card, "width", Some("100px")).unwrap();
         document.set_style(card, "height", Some("50px")).unwrap();
         document
-            .set_style(card, "border-width", Some("2px"))
+            .set_style(card, "border-width", Some("1px 2px 3px 4px"))
             .unwrap();
         document
             .set_style(card, "border-radius", Some("4px"))
@@ -309,8 +315,8 @@ mod tests {
             panic!("card should produce a box command");
         };
 
-        assert_eq!((rect.width, rect.height), (208.0, 108.0));
-        assert_eq!(style.border.expect("border").width, 4.0);
+        assert_eq!((rect.width, rect.height), (212.0, 108.0));
+        assert_eq!(style.border.expect("border").widths(), [2.0, 4.0, 6.0, 8.0]);
         assert_eq!(style.corner_radius.top_left, 8.0);
     }
 
