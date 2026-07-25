@@ -5,7 +5,7 @@ use std::{
 
 use glyphon::{Buffer, Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, Viewport};
 
-use crate::{Canvas, Clip, Color, DrawCommand, Rect, TextStyle, TextSystem};
+use crate::{Canvas, Clip, Color, DrawCommand, Rect, TextSpan, TextStyle, TextSystem};
 
 use super::{RenderError, SurfaceSize};
 
@@ -20,6 +20,7 @@ pub(super) struct TextRenderer {
 
 struct CachedText {
     text: String,
+    spans: Vec<TextSpan>,
     style: TextStyle,
     width: f32,
     height: f32,
@@ -77,27 +78,30 @@ impl TextRenderer {
                 DrawCommand::Text {
                     bounds,
                     text,
+                    spans,
                     style,
                     clips,
-                } if bounds.width > 0.0 && bounds.height > 0.0 && !text.is_empty() => {
-                    Some((*bounds, clips.as_slice(), text.as_str(), style))
-                }
+                } if bounds.width > 0.0 && bounds.height > 0.0 && !text.is_empty() => Some((
+                    *bounds,
+                    clips.as_slice(),
+                    text.as_str(),
+                    spans.as_slice(),
+                    style,
+                )),
                 _ => None,
             })
             .collect();
         self.placements.clear();
         self.placements.reserve(commands.len());
         let buffers_match_in_order = self.buffers.len() == commands.len()
-            && self
-                .buffers
-                .iter()
-                .zip(&commands)
-                .all(|(cached, (bounds, _, text, style))| {
-                    cached.matches(text, style, bounds.width, bounds.height)
-                });
+            && self.buffers.iter().zip(&commands).all(
+                |(cached, (bounds, _, text, spans, style))| {
+                    cached.matches(text, spans, style, bounds.width, bounds.height)
+                },
+            );
         if buffers_match_in_order {
             self.placements.extend(commands.iter().enumerate().map(
-                |(buffer_index, (bounds, clips, _, style))| TextPlacement {
+                |(buffer_index, (bounds, clips, _, _, style))| TextPlacement {
                     buffer_index,
                     bounds: *bounds,
                     clips: clips.to_vec(),
@@ -113,25 +117,27 @@ impl TextRenderer {
                     .push(cached);
             }
             self.buffers.reserve(commands.len());
-            for (bounds, clips, text, style) in commands {
-                let fingerprint = text_layout_fingerprint(text, style, bounds.width, bounds.height);
+            for (bounds, clips, text, spans, style) in commands {
+                let fingerprint =
+                    text_layout_fingerprint(text, spans, style, bounds.width, bounds.height);
                 let cached = previous_buffers
                     .get_mut(&fingerprint)
                     .and_then(|candidates| {
                         candidates
                             .iter()
                             .position(|cached| {
-                                cached.matches(text, style, bounds.width, bounds.height)
+                                cached.matches(text, spans, style, bounds.width, bounds.height)
                             })
                             .map(|index| candidates.swap_remove(index))
                     })
                     .unwrap_or_else(|| CachedText {
                         text: text.to_owned(),
+                        spans: spans.to_vec(),
                         style: style.clone(),
                         width: bounds.width,
                         height: bounds.height,
-                        buffer: text_system.layout_buffer(
-                            text,
+                        buffer: text_system.layout_rich_buffer(
+                            spans,
                             style,
                             Some(bounds.width),
                             Some(bounds.height),
@@ -181,20 +187,38 @@ impl TextRenderer {
 }
 
 impl CachedText {
-    fn matches(&self, text: &str, style: &TextStyle, width: f32, height: f32) -> bool {
+    fn matches(
+        &self,
+        text: &str,
+        spans: &[TextSpan],
+        style: &TextStyle,
+        width: f32,
+        height: f32,
+    ) -> bool {
         self.text == text
+            && self.spans.len() == spans.len()
+            && self.spans.iter().zip(spans).all(|(left, right)| {
+                left.text == right.text && text_layout_style_matches(&left.style, &right.style)
+            })
             && self.width == width
             && self.height == height
             && text_layout_style_matches(&self.style, style)
     }
 
     fn fingerprint(&self) -> u64 {
-        text_layout_fingerprint(&self.text, &self.style, self.width, self.height)
+        text_layout_fingerprint(
+            &self.text,
+            &self.spans,
+            &self.style,
+            self.width,
+            self.height,
+        )
     }
 }
 
 fn text_layout_style_matches(left: &TextStyle, right: &TextStyle) -> bool {
-    left.font_size == right.font_size
+    left.color == right.color
+        && left.font_size == right.font_size
         && left.line_height == right.line_height
         && left.font_weight == right.font_weight
         && left.font_families == right.font_families
@@ -205,21 +229,36 @@ fn text_layout_style_matches(left: &TextStyle, right: &TextStyle) -> bool {
         && left.wrap == right.wrap
 }
 
-fn text_layout_fingerprint(text: &str, style: &TextStyle, width: f32, height: f32) -> u64 {
+fn text_layout_fingerprint(
+    text: &str,
+    spans: &[TextSpan],
+    style: &TextStyle,
+    width: f32,
+    height: f32,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
-    style.font_size.to_bits().hash(&mut hasher);
-    style.line_height.to_bits().hash(&mut hasher);
-    style.font_weight.hash(&mut hasher);
-    style.font_families.hash(&mut hasher);
-    style.font_style.hash(&mut hasher);
-    style.text_align.hash(&mut hasher);
-    style.letter_spacing.to_bits().hash(&mut hasher);
-    style.word_spacing.to_bits().hash(&mut hasher);
-    style.wrap.hash(&mut hasher);
+    hash_text_layout_style(style, &mut hasher);
+    for span in spans {
+        span.text.hash(&mut hasher);
+        hash_text_layout_style(&span.style, &mut hasher);
+    }
     width.to_bits().hash(&mut hasher);
     height.to_bits().hash(&mut hasher);
     hasher.finish()
+}
+
+fn hash_text_layout_style(style: &TextStyle, hasher: &mut DefaultHasher) {
+    style.color.rgba8().hash(hasher);
+    style.font_size.to_bits().hash(hasher);
+    style.line_height.to_bits().hash(hasher);
+    style.font_weight.hash(hasher);
+    style.font_families.hash(hasher);
+    style.font_style.hash(hasher);
+    style.text_align.hash(hasher);
+    style.letter_spacing.to_bits().hash(hasher);
+    style.word_spacing.to_bits().hash(hasher);
+    style.wrap.hash(hasher);
 }
 
 fn clipped_bounds(mut bounds: Rect, clips: &[Clip], size: SurfaceSize) -> TextBounds {
@@ -244,7 +283,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_layout_cache_ignores_paint_only_color_changes() {
+    fn text_layout_cache_detects_rich_text_color_changes() {
         let left = TextStyle {
             color: Color::BLACK,
             ..TextStyle::default()
@@ -254,7 +293,7 @@ mod tests {
             ..left.clone()
         };
 
-        assert!(text_layout_style_matches(&left, &right));
+        assert!(!text_layout_style_matches(&left, &right));
     }
 
     #[test]

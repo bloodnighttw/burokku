@@ -1,4 +1,4 @@
-use super::{BoxStyle, Clip, Color, Rect, TextStyle};
+use super::{BoxStyle, Clip, Color, Rect, TextSpan, TextStyle};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawCommand {
@@ -15,6 +15,7 @@ pub enum DrawCommand {
     Text {
         bounds: Rect,
         text: String,
+        spans: Vec<TextSpan>,
         style: TextStyle,
         clips: Vec<Clip>,
     },
@@ -92,9 +93,23 @@ impl Canvas {
         style: TextStyle,
         clips: impl IntoIterator<Item = Clip>,
     ) -> &mut Self {
+        let text = text.into();
+        self.draw_rich_text_with_clips(bounds, [TextSpan::new(text, style.clone())], style, clips)
+    }
+
+    pub fn draw_rich_text_with_clips(
+        &mut self,
+        bounds: Rect,
+        spans: impl IntoIterator<Item = TextSpan>,
+        style: TextStyle,
+        clips: impl IntoIterator<Item = Clip>,
+    ) -> &mut Self {
+        let spans: Vec<_> = spans.into_iter().collect();
+        let text = spans.iter().map(|span| span.text.as_str()).collect();
         self.commands.push(DrawCommand::Text {
             bounds,
-            text: text.into(),
+            text,
+            spans,
             style,
             clips: clips.into_iter().collect(),
         });

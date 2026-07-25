@@ -39,7 +39,15 @@ function ScrollablePanel() {
               "border-radius": "8px",
             }}
           >
-            <span style={{ color: "#263246", "font-size": "14px", "line-height": "18px", "font-weight": 700 }}>
+            <span
+              style={{
+                color: "#263246",
+                "font-size": "14px",
+                "line-height": "18px",
+                "font-weight": 700,
+                "white-space": "nowrap",
+              }}
+            >
               Scroll item {index + 1} · drag either thumb or use the mouse wheel
             </span>
           </div>
@@ -151,7 +159,7 @@ function ExampleCard(props: { title: string; children: JSX.Element }) {
   );
 }
 
-function TypographyExamples() {
+function TypographyExamples(props: { remaining: number }) {
   const panelStyle = {
     display: "flex",
     "flex-direction": "column",
@@ -260,28 +268,41 @@ function TypographyExamples() {
           </span>
         </div>
         <div style={panelStyle}>
-          <span style={labelStyle}>OVERFLOW-WRAP · WORD-BREAK</span>
+          <span style={labelStyle}>INLINE SPANS · REACTIVE TEXT</span>
           <span
             style={{
-              width: "100%",
+              width: "190px",
               color: "#334155",
               "font-size": "14px",
               "line-height": "20px",
               "overflow-wrap": "anywhere",
             }}
           >
-            a-very-long-unbroken-identifier-can-wrap-anywhere
+            build/
+            <span style={{ color: "#7c3aed", "font-weight": 700 }}>
+              a-very-long-styled-identifier
+            </span>
+            /
+            <span
+              style={{
+                color: props.remaining === 0 ? "#059669" : "#ea580c",
+                "font-weight": 700,
+                "text-decoration": "underline",
+              }}
+            >
+              {props.remaining}
+            </span>
           </span>
           <span
             style={{
-              width: "100%",
+              width: "150px",
               color: "#64748b",
               "font-size": "13px",
               "line-height": "18px",
               "word-break": "break-all",
             }}
           >
-            word-break: break-all
+            mode:<span style={{ color: "#0369a1" }}>break-all-in-one-flow</span>
           </span>
         </div>
       </div>
@@ -310,6 +331,7 @@ function App() {
         width: "720px",
         padding: "24px",
         gap: "16px",
+        "font-family": '"Helvetica Neue", Arial, sans-serif',
         "background-color": "#f5f7fa",
         "border-color": "#cbd2dc",
         "border-width": "1px",
@@ -369,7 +391,7 @@ function App() {
           <GridExample />
         </ExampleCard>
       </div>
-      <TypographyExamples />
+      <TypographyExamples remaining={remaining()} />
     </div>
   );
 }

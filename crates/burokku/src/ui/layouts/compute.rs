@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use render::{
     Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, FontStyle, Outline,
     Rect as RenderRect, TextAlign, TextConstraints, TextDecorationLine, TextOverflowWrap,
-    TextRunMetrics, TextStyle, TextSystem, TextWhiteSpace, TextWordBreak, TextWrap,
+    TextRunMetrics, TextSpan, TextStyle, TextSystem, TextWhiteSpace, TextWordBreak, TextWrap,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -105,6 +105,14 @@ fn add_element(
         .node(element_id)
         .expect("element child IDs are validated when inserted");
     let text_style = merge_text_style(inherited_text_style, &element.style);
+    let inline_spans = if matches!(element.kind, ElementKind::Span)
+        && matches!(element.style.display, Display::Block)
+        && should_collect_inline_spans(document, &element.children)
+    {
+        collect_inline_spans(document, element_id, &text_style)
+    } else {
+        None
+    };
     let node_id = nodes.len();
     nodes.push(LayoutNode {
         element_id,
@@ -112,6 +120,8 @@ fn add_element(
         style: to_taffy_style(&element.kind, &element.style),
         paint_style: element.style.clone(),
         text_style: text_style.clone(),
+        inline_spans: inline_spans.clone(),
+        rendered_spans: Vec::new(),
         children: Vec::with_capacity(element.children.len()),
         cache: Cache::new(),
         layout: TaffyLayout::new(),
@@ -120,11 +130,15 @@ fn add_element(
         text_runs: Vec::new(),
     });
 
-    let children = element
-        .children
-        .iter()
-        .map(|child| add_element(nodes, document, *child, &text_style))
-        .collect::<Vec<_>>();
+    let children = if inline_spans.is_some() {
+        Vec::new()
+    } else {
+        element
+            .children
+            .iter()
+            .map(|child| add_element(nodes, document, *child, &text_style))
+            .collect::<Vec<_>>()
+    };
     let mut children = children;
     if matches!(element.style.display, Display::Flex | Display::Grid) {
         children.sort_by_key(|child| nodes[*child].paint_style.order);
@@ -133,12 +147,64 @@ fn add_element(
     node_id
 }
 
+fn should_collect_inline_spans(document: &Document, children: &[u64]) -> bool {
+    let mut fragment_count = 0;
+    let mut has_nested_span = false;
+    for child_id in children {
+        let Ok(child) = document.node(*child_id) else {
+            continue;
+        };
+        match &child.kind {
+            ElementKind::Text(text) if !text.is_empty() => fragment_count += 1,
+            ElementKind::Span if child.style.display == Display::Block => {
+                fragment_count += 1;
+                has_nested_span = true;
+            }
+            _ => {}
+        }
+    }
+    has_nested_span || fragment_count > 1
+}
+
+fn collect_inline_spans(
+    document: &Document,
+    element_id: u64,
+    text_style: &TextStyle,
+) -> Option<Vec<TextSpan>> {
+    let element = document
+        .node(element_id)
+        .expect("inline span descendants are validated when inserted");
+    let mut spans = Vec::new();
+    for child_id in &element.children {
+        let child = document
+            .node(*child_id)
+            .expect("inline span descendants are validated when inserted");
+        match &child.kind {
+            ElementKind::Text(text) => {
+                if !text.is_empty() {
+                    spans.push(TextSpan::new(text, text_style.clone()));
+                }
+            }
+            ElementKind::Comment(_) => {}
+            ElementKind::Span if child.style.display == Display::None => {}
+            ElementKind::Span if child.style.display == Display::Block => {
+                let child_style = merge_text_style(text_style, &child.style);
+                spans.extend(collect_inline_spans(document, *child_id, &child_style)?);
+            }
+            _ => return None,
+        }
+    }
+    (!spans.is_empty()).then_some(spans)
+}
+
 struct LayoutNode {
     element_id: u64,
     kind: ElementKind,
     style: TaffyStyle,
     paint_style: ElementStyle,
     text_style: TextStyle,
+    inline_spans: Option<Vec<TextSpan>>,
+    rendered_spans: Vec<TextSpan>,
     children: Vec<usize>,
     cache: Cache,
     layout: TaffyLayout,
@@ -167,7 +233,8 @@ impl ElementLayoutTree<'_> {
         let output = compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             let index = usize::from(node_id);
             let display = tree.nodes[index].style.display;
-            let is_text = matches!(tree.nodes[index].kind, ElementKind::Text(_));
+            let is_text = matches!(tree.nodes[index].kind, ElementKind::Text(_))
+                || tree.nodes[index].inline_spans.is_some();
             let has_children = !tree.nodes[index].children.is_empty();
 
             match (display, is_text, has_children) {
@@ -214,10 +281,17 @@ impl ElementLayoutTree<'_> {
         let index = usize::from(node_id);
         let style = self.nodes[index].style.clone();
         let text_style = self.nodes[index].text_style.clone();
-        let text = match &self.nodes[index].kind {
-            ElementKind::Text(text) => text.clone(),
-            _ => unreachable!("only text elements use text measurement"),
+        let spans = match &self.nodes[index].inline_spans {
+            Some(spans) => normalize_text_spans(spans, text_style.white_space),
+            None => match &self.nodes[index].kind {
+                ElementKind::Text(text) => vec![TextSpan::new(
+                    normalize_white_space(text, text_style.white_space),
+                    text_style.clone(),
+                )],
+                _ => unreachable!("only text flows use text measurement"),
+            },
         };
+        self.nodes[index].rendered_spans = spans.clone();
 
         let mut first_baseline = None;
         let mut output = compute_leaf_layout(
@@ -234,10 +308,9 @@ impl ElementLayoutTree<'_> {
                         AvailableSpace::MaxContent => TextConstraints::UNCONSTRAINED,
                     }
                 };
-                let text = normalize_white_space(&text, text_style.white_space);
-                let measured = self
-                    .text_system
-                    .layout_metrics(&text, &text_style, constraints);
+                let measured =
+                    self.text_system
+                        .layout_rich_metrics(&spans, &text_style, constraints);
                 first_baseline = Some(measured.text.first_baseline);
                 self.nodes[index].text_line_count = measured.text.line_count;
                 self.nodes[index].text_runs = measured.runs;
@@ -270,102 +343,114 @@ impl ElementLayoutTree<'_> {
         if let Some(clip) = own_clip {
             descendant_clips.push(clip);
         }
-        let (kind, scroll) = match &data.kind {
-            ElementKind::Text(text) => (
+        let is_text_flow = matches!(data.kind, ElementKind::Text(_)) || data.inline_spans.is_some();
+        let (kind, scroll) = if is_text_flow {
+            (
                 LayoutKind::Text {
-                    text: normalize_white_space(text, data.text_style.white_space),
+                    text: data
+                        .rendered_spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect(),
+                    spans: data.rendered_spans.clone(),
                     style: data.text_style.clone(),
                     line_count: data.text_line_count,
                     runs: data.text_runs.clone(),
                 },
                 None,
-            ),
-            ElementKind::Comment(_)
-            | ElementKind::Button
-            | ElementKind::Div
-            | ElementKind::Heading(_)
-            | ElementKind::Image
-            | ElementKind::Select
-            | ElementKind::Span
-            | ElementKind::Body
-            | ElementKind::Other(_) => {
-                let scrolls_x = matches!(
-                    data.paint_style.overflow_x,
-                    ElementOverflow::Auto | ElementOverflow::Scroll
-                );
-                let scrolls_y = matches!(
-                    data.paint_style.overflow_y,
-                    ElementOverflow::Auto | ElementOverflow::Scroll
-                );
-                let requested = self
-                    .scroll_offsets
-                    .get(&data.element_id)
-                    .copied()
-                    .unwrap_or(ScrollOffset::ZERO);
-                let mut offset = ScrollOffset::new(
-                    if scrolls_x { requested.x.max(0.0) } else { 0.0 },
-                    if scrolls_y { requested.y.max(0.0) } else { 0.0 },
-                );
-                let child_parent = Point {
-                    x: location.x - offset.x,
-                    y: location.y - offset.y,
-                };
-                let mut children: Vec<_> = data
-                    .children
-                    .iter()
-                    .map(|child| self.to_layout(*child, child_parent, &descendant_clips, viewport))
-                    .collect();
-                let scroll_viewport = padding_box(data, location, width, height);
-                let (content_width, content_height) =
-                    scroll_content_size(&children, scroll_viewport, offset);
-                let max_offset = ScrollOffset::new(
-                    if scrolls_x {
-                        (content_width - scroll_viewport.width).max(0.0)
-                    } else {
-                        0.0
-                    },
-                    if scrolls_y {
-                        (content_height - scroll_viewport.height).max(0.0)
-                    } else {
-                        0.0
-                    },
-                );
-                let clamped =
-                    ScrollOffset::new(offset.x.min(max_offset.x), offset.y.min(max_offset.y));
-                if clamped != offset {
-                    offset = clamped;
+            )
+        } else {
+            match &data.kind {
+                ElementKind::Comment(_)
+                | ElementKind::Button
+                | ElementKind::Div
+                | ElementKind::Heading(_)
+                | ElementKind::Image
+                | ElementKind::Select
+                | ElementKind::Span
+                | ElementKind::Body
+                | ElementKind::Other(_) => {
+                    let scrolls_x = matches!(
+                        data.paint_style.overflow_x,
+                        ElementOverflow::Auto | ElementOverflow::Scroll
+                    );
+                    let scrolls_y = matches!(
+                        data.paint_style.overflow_y,
+                        ElementOverflow::Auto | ElementOverflow::Scroll
+                    );
+                    let requested = self
+                        .scroll_offsets
+                        .get(&data.element_id)
+                        .copied()
+                        .unwrap_or(ScrollOffset::ZERO);
+                    let mut offset = ScrollOffset::new(
+                        if scrolls_x { requested.x.max(0.0) } else { 0.0 },
+                        if scrolls_y { requested.y.max(0.0) } else { 0.0 },
+                    );
                     let child_parent = Point {
                         x: location.x - offset.x,
                         y: location.y - offset.y,
                     };
-                    children = data
+                    let mut children: Vec<_> = data
                         .children
                         .iter()
                         .map(|child| {
                             self.to_layout(*child, child_parent, &descendant_clips, viewport)
                         })
                         .collect();
-                }
-                let scroll = (scrolls_x || scrolls_y).then(|| {
-                    scroll_container(
-                        scroll_viewport,
-                        own_clip.expect("scroll containers establish an overflow clip"),
-                        content_width,
-                        content_height,
-                        offset,
-                        max_offset,
-                        data.paint_style.overflow_x == ElementOverflow::Scroll,
-                        data.paint_style.overflow_y == ElementOverflow::Scroll,
+                    let scroll_viewport = padding_box(data, location, width, height);
+                    let (content_width, content_height) =
+                        scroll_content_size(&children, scroll_viewport, offset);
+                    let max_offset = ScrollOffset::new(
+                        if scrolls_x {
+                            (content_width - scroll_viewport.width).max(0.0)
+                        } else {
+                            0.0
+                        },
+                        if scrolls_y {
+                            (content_height - scroll_viewport.height).max(0.0)
+                        } else {
+                            0.0
+                        },
+                    );
+                    let clamped =
+                        ScrollOffset::new(offset.x.min(max_offset.x), offset.y.min(max_offset.y));
+                    if clamped != offset {
+                        offset = clamped;
+                        let child_parent = Point {
+                            x: location.x - offset.x,
+                            y: location.y - offset.y,
+                        };
+                        children = data
+                            .children
+                            .iter()
+                            .map(|child| {
+                                self.to_layout(*child, child_parent, &descendant_clips, viewport)
+                            })
+                            .collect();
+                    }
+                    let scroll = (scrolls_x || scrolls_y).then(|| {
+                        scroll_container(
+                            scroll_viewport,
+                            own_clip.expect("scroll containers establish an overflow clip"),
+                            content_width,
+                            content_height,
+                            offset,
+                            max_offset,
+                            data.paint_style.overflow_x == ElementOverflow::Scroll,
+                            data.paint_style.overflow_y == ElementOverflow::Scroll,
+                        )
+                    });
+                    (
+                        LayoutKind::Box {
+                            style: box_style(&data.paint_style, width, height),
+                            stacking_layer: StackingLayer::from_style(&data.paint_style),
+                            children,
+                        },
+                        scroll,
                     )
-                });
-                (
-                    LayoutKind::Box {
-                        style: box_style(&data.paint_style, width, height),
-                        stacking_layer: StackingLayer::from_style(&data.paint_style),
-                        children,
-                    },
-                    scroll,
-                )
+                }
+                ElementKind::Text(_) => unreachable!("text nodes are handled as text flows"),
             }
         };
 
@@ -1017,6 +1102,52 @@ fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String {
     }
 }
 
+fn normalize_text_spans(spans: &[TextSpan], mode: TextWhiteSpace) -> Vec<TextSpan> {
+    if matches!(
+        mode,
+        TextWhiteSpace::Pre | TextWhiteSpace::PreWrap | TextWhiteSpace::BreakSpaces
+    ) {
+        return spans.to_vec();
+    }
+
+    let preserve_newlines = mode == TextWhiteSpace::PreLine;
+    let mut result = Vec::new();
+    let mut pending_space = None;
+    let mut has_text = false;
+    let mut ends_with_newline = false;
+
+    for span in spans {
+        for character in span.text.chars() {
+            if character == '\n' && preserve_newlines {
+                append_styled_character(&mut result, '\n', &span.style);
+                pending_space = None;
+                has_text = true;
+                ends_with_newline = true;
+            } else if character.is_whitespace() {
+                if has_text && !ends_with_newline && pending_space.is_none() {
+                    pending_space = Some(span.style.clone());
+                }
+            } else {
+                if let Some(space_style) = pending_space.take() {
+                    append_styled_character(&mut result, ' ', &space_style);
+                }
+                append_styled_character(&mut result, character, &span.style);
+                has_text = true;
+                ends_with_newline = false;
+            }
+        }
+    }
+    result
+}
+
+fn append_styled_character(spans: &mut Vec<TextSpan>, character: char, style: &TextStyle) {
+    if let Some(last) = spans.last_mut().filter(|span| span.style == *style) {
+        last.text.push(character);
+    } else {
+        spans.push(TextSpan::new(character.to_string(), style.clone()));
+    }
+}
+
 fn collapse_white_space(text: &str, preserve_newlines: bool) -> String {
     let mut result = String::with_capacity(text.len());
     let mut pending_space = false;
@@ -1237,6 +1368,111 @@ mod tests {
         assert_eq!(style.text_align, TextAlign::Right);
         assert_eq!(style.letter_spacing, 2.0);
         assert_eq!(style.word_spacing, 4.0);
+    }
+
+    #[test]
+    fn nested_spans_share_inline_layout_and_keep_individual_styles() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::Span);
+        let leading = document.create_node(ElementKind::Text("Hello  ".into()));
+        let emphasized = document.create_node(ElementKind::Span);
+        let emphasized_text = document.create_node(ElementKind::Text("world".into()));
+        let reactive = document.create_node(ElementKind::Text(" 1".into()));
+        document.set_style(line, "width", Some("70px")).unwrap();
+        document
+            .set_style(line, "overflow-wrap", Some("anywhere"))
+            .unwrap();
+        document
+            .set_style(emphasized, "color", Some("#7c3aed"))
+            .unwrap();
+        document
+            .set_style(emphasized, "font-weight", Some("700"))
+            .unwrap();
+        document.insert(BODY_ID, line, None).unwrap();
+        document.insert(line, leading, None).unwrap();
+        document.insert(line, emphasized, None).unwrap();
+        document.insert(emphasized, emphasized_text, None).unwrap();
+        document.insert(line, reactive, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let inline = &layout.children()[0];
+        let LayoutKind::Text {
+            text,
+            spans,
+            line_count,
+            ..
+        } = &inline.kind
+        else {
+            panic!("a text-only span tree should become one inline text layout");
+        };
+
+        assert_eq!(text, "Hello world 1");
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[1].text, "world");
+        assert_eq!(
+            spans[1].style.color,
+            Color::from_rgba8(0x7c, 0x3a, 0xed, 0xff)
+        );
+        assert_eq!(spans[1].style.font_weight, 700);
+        assert!(*line_count > 1);
+        assert!(inline.children().is_empty());
+
+        document.set_text(reactive, " 2".into()).unwrap();
+        let updated = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let LayoutKind::Text { text, .. } = &updated.children()[0].kind else {
+            panic!("updated inline content should remain one text layout");
+        };
+        assert_eq!(text, "Hello world 2");
+    }
+
+    #[test]
+    fn jsx_text_fragments_and_variables_share_a_nowrap_line() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::Span);
+        let prefix = document.create_node(ElementKind::Text("Scroll item ".into()));
+        let variable = document.create_node(ElementKind::Text("1".into()));
+        let suffix = document.create_node(ElementKind::Text(
+            " · drag either thumb or use the mouse wheel".into(),
+        ));
+        document.set_style(line, "width", Some("180px")).unwrap();
+        document
+            .set_style(line, "white-space", Some("nowrap"))
+            .unwrap();
+        document.insert(BODY_ID, line, None).unwrap();
+        document.insert(line, prefix, None).unwrap();
+        document.insert(line, variable, None).unwrap();
+        document.insert(line, suffix, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let LayoutKind::Text {
+            text,
+            spans,
+            style,
+            line_count,
+            ..
+        } = &layout.children()[0].kind
+        else {
+            panic!("adjacent JSX text fragments should become one inline text layout");
+        };
+
+        assert_eq!(
+            text,
+            "Scroll item 1 · drag either thumb or use the mouse wheel"
+        );
+        assert_eq!(spans.len(), 1);
+        assert_eq!(style.wrap, TextWrap::None);
+        assert_eq!(*line_count, 1);
+
+        document.set_text(variable, "2".into()).unwrap();
+        let updated = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let LayoutKind::Text {
+            text, line_count, ..
+        } = &updated.children()[0].kind
+        else {
+            panic!("the updated variable should remain in the inline text flow");
+        };
+        assert!(text.starts_with("Scroll item 2"));
+        assert_eq!(*line_count, 1);
     }
 
     #[test]

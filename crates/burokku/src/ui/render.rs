@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use render::{
     Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextDecorationLine,
-    TextRunMetrics, TextStyle, TextSystem,
+    TextRunMetrics, TextSpan, TextStyle, TextSystem,
 };
 
 use super::{
@@ -120,11 +120,17 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
                 }
             }
             LayoutKind::Text {
-                text, style, runs, ..
+                spans, style, runs, ..
             } => {
                 let scaled_style = scaled_text_style(style, scale_factor);
-                canvas.draw_text_with_clips(bounds, text, scaled_style.clone(), clips.clone());
-                paint_text_decorations(bounds, &scaled_style, runs, scale_factor, clips, canvas);
+                let scaled_spans = scaled_text_spans(spans, scale_factor);
+                canvas.draw_rich_text_with_clips(
+                    bounds,
+                    scaled_spans.clone(),
+                    scaled_style,
+                    clips.clone(),
+                );
+                paint_text_decorations(bounds, &scaled_spans, runs, scale_factor, clips, canvas);
             }
         }
     }
@@ -132,20 +138,23 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
 
 fn paint_text_decorations(
     bounds: Rect,
-    style: &TextStyle,
+    spans: &[TextSpan],
     runs: &[TextRunMetrics],
     scale_factor: f32,
     clips: impl IntoIterator<Item = Clip> + Clone,
     canvas: &mut Canvas,
 ) {
-    if style.text_decoration_line == TextDecorationLine::NONE {
-        return;
-    }
-    let decoration_style = BoxStyle {
-        background: style.text_decoration_color,
-        ..BoxStyle::default()
-    };
     for run in runs {
+        let Some(style) = spans.get(run.span_index).map(|span| &span.style) else {
+            continue;
+        };
+        if style.text_decoration_line == TextDecorationLine::NONE {
+            continue;
+        }
+        let decoration_style = BoxStyle {
+            background: style.text_decoration_color,
+            ..BoxStyle::default()
+        };
         for decoration in [
             style
                 .text_decoration_line
@@ -300,6 +309,13 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
     style
 }
 
+fn scaled_text_spans(spans: &[TextSpan], scale_factor: f32) -> Vec<TextSpan> {
+    spans
+        .iter()
+        .map(|span| TextSpan::new(&span.text, scaled_text_style(&span.style, scale_factor)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +396,47 @@ mod tests {
         assert!((rect.width - runs[0].width).abs() < 0.01);
         assert!(rect.x > 0.0);
         assert!(rect.width < 200.0);
+    }
+
+    #[test]
+    fn decorates_only_the_styled_inline_span() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::Span);
+        let before = document.create_node(ElementKind::Text("before ".into()));
+        let decorated = document.create_node(ElementKind::Span);
+        let decorated_text = document.create_node(ElementKind::Text("middle".into()));
+        let after = document.create_node(ElementKind::Text(" after".into()));
+        document
+            .set_style(decorated, "text-decoration", Some("underline #7c3aed"))
+            .unwrap();
+        document.insert(BODY_ID, line, None).unwrap();
+        document.insert(line, before, None).unwrap();
+        document.insert(line, decorated, None).unwrap();
+        document.insert(decorated, decorated_text, None).unwrap();
+        document.insert(line, after, None).unwrap();
+
+        let frame = build_frame(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+        let inline = &frame.layout.children()[0];
+        let LayoutKind::Text { spans, runs, .. } = &inline.kind else {
+            panic!("nested spans should produce one inline text layout");
+        };
+        let decorated_runs = runs.iter().filter(|run| run.span_index == 1).count();
+        let decorations: Vec<_> = frame
+            .canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                render::DrawCommand::OverlayBox { style, .. } => Some(style),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(spans.len(), 3);
+        assert!(decorated_runs > 0);
+        assert_eq!(decorations.len(), decorated_runs);
+        assert!(decorations
+            .iter()
+            .all(|style| style.background == Color::from_rgba8(0x7c, 0x3a, 0xed, 0xff)));
     }
 
     #[test]
