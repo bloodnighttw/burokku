@@ -1324,6 +1324,15 @@ impl LayoutPartialTree for ElementLayoutTree<'_> {
 
 impl CacheTree for ElementLayoutTree<'_> {
     fn cache_get(&self, node_id: NodeId, inputs: &LayoutInput) -> Option<LayoutOutput> {
+        // A cached final container layout does not restore the final layouts
+        // of its descendants. Intrinsic sizing can overwrite a text child's
+        // geometry after that entry was stored, leaving the parent at its
+        // final size but the text shaped and positioned for min-content.
+        // Re-run final layout passes so the retained descendant geometry
+        // always matches the container result that will be painted.
+        if inputs.run_mode == RunMode::PerformLayout {
+            return None;
+        }
         self.nodes[usize::from(node_id)].cache.get(inputs)
     }
 
@@ -2352,6 +2361,91 @@ mod tests {
             .first_baseline;
 
         assert!((small_layout.y + small_baseline - large_layout.y - large_baseline).abs() < 0.01);
+    }
+
+    #[test]
+    fn baseline_flex_items_keep_single_line_intrinsic_text_widths() {
+        let mut document = Document::new();
+        let gallery = document.create_node(ElementKind::Div);
+        let card = document.create_node(ElementKind::Div);
+        let row = document.create_node(ElementKind::Div);
+        let large_box = document.create_node(ElementKind::Span);
+        let small_box = document.create_node(ElementKind::Span);
+        let styled_box = document.create_node(ElementKind::Span);
+        let large = document.create_node(ElementKind::Text("Baseline".into()));
+        let small =
+            document.create_node(ElementKind::Text("aligned through Glyphon metrics".into()));
+        let styled = document.create_node(ElementKind::Text(
+            "Styled, centered, spaced and decorated text with font fallbacks".into(),
+        ));
+        document
+            .set_style(gallery, "display", Some("flex"))
+            .unwrap();
+        document
+            .set_style(gallery, "flex-direction", Some("column"))
+            .unwrap();
+        document.set_style(gallery, "width", Some("666px")).unwrap();
+        document.set_style(card, "display", Some("flex")).unwrap();
+        document
+            .set_style(card, "flex-direction", Some("column"))
+            .unwrap();
+        document.set_style(card, "gap", Some("12px")).unwrap();
+        document.set_style(card, "padding", Some("16px")).unwrap();
+        document.set_style(row, "display", Some("flex")).unwrap();
+        document
+            .set_style(row, "align-items", Some("baseline"))
+            .unwrap();
+        document.set_style(row, "gap", Some("10px")).unwrap();
+        document
+            .set_style(large_box, "font-size", Some("30px"))
+            .unwrap();
+        document
+            .set_style(large_box, "line-height", Some("normal"))
+            .unwrap();
+        document
+            .set_style(small_box, "font-size", Some("14px"))
+            .unwrap();
+        document
+            .set_style(small_box, "line-height", Some("normal"))
+            .unwrap();
+        document
+            .set_style(styled_box, "width", Some("610px"))
+            .unwrap();
+        document
+            .set_style(styled_box, "font-size", Some("16px"))
+            .unwrap();
+        document
+            .set_style(styled_box, "line-height", Some("24px"))
+            .unwrap();
+        document.insert(BODY_ID, gallery, None).unwrap();
+        document.insert(gallery, card, None).unwrap();
+        document.insert(card, row, None).unwrap();
+        document.insert(card, styled_box, None).unwrap();
+        document.insert(row, large_box, None).unwrap();
+        document.insert(row, small_box, None).unwrap();
+        document.insert(large_box, large, None).unwrap();
+        document.insert(small_box, small, None).unwrap();
+        document.insert(styled_box, styled, None).unwrap();
+
+        let layout = compute_layout(&document, 800.0, 600.0, &mut TextSystem::new());
+        let items = layout.children()[0].children()[0].children()[0].children();
+        let small_text = &items[1].children()[0];
+        let LayoutKind::Text { line_count, .. } = small_text.kind else {
+            panic!("small flex item should contain text");
+        };
+
+        assert_eq!(
+            line_count,
+            1,
+            "large item {}x{}, small item {}x{}, small text {}x{}",
+            items[0].width,
+            items[0].height,
+            items[1].width,
+            items[1].height,
+            small_text.width,
+            small_text.height
+        );
+        assert!(items[0].width + 10.0 + items[1].width < 634.0);
     }
 
     #[test]
