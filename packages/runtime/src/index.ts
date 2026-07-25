@@ -31,6 +31,17 @@ export type BurokkuStyle = Partial<{
   lineHeight: number | string;
   fontWeight: number | "normal" | "bold";
   fontFamily: string;
+  fontStyle: "normal" | "italic" | "oblique";
+  textAlign: "start" | "end" | "left" | "right" | "center" | "justify";
+  letterSpacing: number | string;
+  wordSpacing: number | string;
+  textDecoration: string;
+  textDecorationLine: "none" | string;
+  textDecorationColor: string;
+  whiteSpace: "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces";
+  overflowWrap: "normal" | "break-word" | "anywhere";
+  wordWrap: "normal" | "break-word" | "anywhere";
+  wordBreak: "normal" | "break-all" | "keep-all";
 }>;
 
 export type HostProps = Record<string, unknown> & {

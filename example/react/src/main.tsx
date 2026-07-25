@@ -154,6 +154,144 @@ function ExampleCard({ title, children }: { title: string; children: ReactNode }
   );
 }
 
+function TypographyExamples() {
+  const panelStyle = {
+    display: "flex",
+    flexDirection: "column",
+    width: 0,
+    minWidth: 0,
+    padding: 14,
+    gap: 8,
+    flexGrow: 1,
+    backgroundColor: "#ffffff",
+    borderColor: "#dce1e8",
+    borderWidth: 1,
+    borderRadius: 12,
+  } as const;
+
+  const labelStyle = {
+    color: "#526071",
+    fontSize: 13,
+    lineHeight: "18px",
+    fontWeight: 700,
+    letterSpacing: 0.8,
+  } as const;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <span
+        style={{
+          color: "#18202b",
+          fontSize: 20,
+          lineHeight: "26px",
+          fontWeight: 700,
+          letterSpacing: -0.3,
+        }}
+      >
+        Typography
+      </span>
+      <div style={{ display: "flex", gap: 12 }}>
+        <div style={panelStyle}>
+          <span style={labelStyle}>FONT STACK · STYLE · SPACING</span>
+          <span
+            style={{
+              color: "#312e81",
+              fontFamily: '"Charter", Georgia, serif',
+              fontSize: 22,
+              lineHeight: "30px",
+              fontStyle: "italic",
+              letterSpacing: 1,
+              wordSpacing: 5,
+            }}
+          >
+            Fallback fonts stay expressive.
+          </span>
+          <span
+            style={{
+              color: "#475569",
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: 13,
+              lineHeight: "19px",
+            }}
+          >
+            "JetBrains Mono", monospace
+          </span>
+        </div>
+        <div style={panelStyle}>
+          <span style={labelStyle}>ALIGNMENT · DECORATION</span>
+          <div
+            style={{
+              width: "100%",
+              color: "#0f766e",
+              fontSize: 17,
+              lineHeight: "25px",
+              fontWeight: 700,
+              textAlign: "center",
+              textDecoration: "underline overline #14b8a6",
+            }}
+          >
+            Centered, underlined, overlined
+          </div>
+          <div
+            style={{
+              width: "100%",
+              color: "#7c2d12",
+              fontSize: 15,
+              lineHeight: "23px",
+              textAlign: "right",
+              textDecorationLine: "line-through",
+              textDecorationColor: "#fb923c",
+            }}
+          >
+            Right aligned with a custom color
+          </div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 12 }}>
+        <div style={panelStyle}>
+          <span style={labelStyle}>WHITE-SPACE: PRE-WRAP</span>
+          <span
+            style={{
+              color: "#334155",
+              fontFamily: "monospace",
+              fontSize: 14,
+              lineHeight: "21px",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {"spaces   remain\nline breaks remain too"}
+          </span>
+        </div>
+        <div style={panelStyle}>
+          <span style={labelStyle}>OVERFLOW-WRAP · WORD-BREAK</span>
+          <span
+            style={{
+              width: "100%",
+              color: "#334155",
+              fontSize: 14,
+              lineHeight: "20px",
+              overflowWrap: "anywhere",
+            }}
+          >
+            a-very-long-unbroken-identifier-can-wrap-anywhere
+          </span>
+          <span
+            style={{
+              width: "100%",
+              color: "#64748b",
+              fontSize: 13,
+              lineHeight: "18px",
+              wordBreak: "break-all",
+            }}
+          >
+            word-break: break-all
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [remaining, setRemaining] = useState(10);
 
@@ -238,6 +376,7 @@ function App() {
           <GridExample />
         </ExampleCard>
       </div>
+      <TypographyExamples />
     </div>
   );
 }
@@ -245,8 +384,4 @@ function App() {
 document.body.style.overflowY = "auto";
 document.body.style.overflowX = "auto";
 
-<<<<<<< HEAD
-=======
-
->>>>>>> main
 createRoot(document.body).render(<App />);
