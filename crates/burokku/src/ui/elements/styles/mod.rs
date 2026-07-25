@@ -10,6 +10,7 @@ pub(crate) use taffy::style::{
     GridTemplateArea, JustifyContent, Position,
 };
 pub(crate) use values::{
-    Isolation, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow,
-    SizeValue, ZIndex,
+    FontStyleValue, Isolation, LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue,
+    Overflow, OverflowWrapValue, SizeValue, TextAlignValue, TextDecorationLineValue,
+    WhiteSpaceValue, WordBreakValue, ZIndex,
 };
