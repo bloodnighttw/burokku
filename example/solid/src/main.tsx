@@ -1,6 +1,54 @@
 import { createSignal, onCleanup } from "solid-js";
 import { render } from "@burokku/solid";
 
+function ScrollablePanel() {
+  const colors = ["#e8efff", "#eee9ff", "#e1f7ef", "#fff1dc", "#ffe8ee", "#e8f4ff"];
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        width: "386px",
+        height: "130px",
+        overflow: "auto",
+        "background-color": "#eef2f7",
+        "border-color": "#c5cfdd",
+        "border-width": "2px",
+        "border-radius": "12px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          "flex-direction": "column",
+          width: "520px",
+          padding: "8px",
+          gap: "6px",
+          "flex-shrink": 0,
+        }}
+      >
+        {colors.map((color, index) => (
+          <div
+            style={{
+              display: "flex",
+              width: "500px",
+              height: "38px",
+              padding: "10px",
+              "flex-shrink": 0,
+              "background-color": color,
+              "border-radius": "8px",
+            }}
+          >
+            <span style={{ color: "#263246", "font-size": "14px", "line-height": "18px", "font-weight": 700 }}>
+              Scroll item {index + 1} · drag either thumb or use the mouse wheel
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [remaining, setRemaining] = createSignal(10);
   const interval = setInterval(() => {
@@ -28,14 +76,17 @@ function App() {
         "border-radius": "16px",
       }}
     >
-      <span style={{ color: "#18202b", "font-size": "28px", "line-height": "34px", "font-weight": 700 }}>
-        Burokku Solid
+      <span style={{ display: "flex", "flex-direction": "row", gap: "6px" }}>
+        <span style={{ color: "#18202b", "font-size": "28px", "line-height": "34px", "font-weight": 700 }}>
+          Burokku
+        </span>
+        <span style={{ color: "#526071", "font-size": "28px", "line-height": "34px" }}>Solid DOM</span>
       </span>
       <div
         style={{
           display: "flex",
           "flex-direction": "column",
-          padding: "24px",
+          padding: "18px",
           "background-color": "#ffffff",
           "border-color": "#dce1e8",
           "border-width": "1px",
@@ -45,9 +96,26 @@ function App() {
         <span style={{ color: "#526071", "font-size": "16px", "line-height": "24px" }}>
           Countdown
         </span>
-        <span style={{ color: "#18202b", "font-size": "72px", "line-height": "82px", "font-weight": 700 }}>
+        <span style={{ color: "#18202b", "font-size": "52px", "line-height": "60px", "font-weight": 700 }}>
           {remaining()}
         </span>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          "flex-direction": "column",
+          padding: "14px",
+          gap: "10px",
+          "background-color": "#ffffff",
+          "border-color": "#dce1e8",
+          "border-width": "1px",
+          "border-radius": "12px",
+        }}
+      >
+        <span style={{ color: "#18202b", "font-size": "16px", "line-height": "22px", "font-weight": 700 }}>
+          Usable scroll container
+        </span>
+        <ScrollablePanel />
       </div>
     </div>
   );

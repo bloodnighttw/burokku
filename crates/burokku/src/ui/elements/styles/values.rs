@@ -1,5 +1,16 @@
 use super::measurement::{Auto, Percent, Px};
 
+/// The supported forms of CSS overflow, preserving `auto` versus `scroll`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Overflow {
+    #[default]
+    Visible,
+    Hidden,
+    Clip,
+    Auto,
+    Scroll,
+}
+
 /// The supported forms of CSS `z-index`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ZIndex {

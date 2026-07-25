@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use render::{
-    Border, BoxStyle, Color, CornerRadius, FontFamily, Outline, TextConstraints, TextStyle,
-    TextSystem,
+    Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, Outline, Rect as RenderRect,
+    TextConstraints, TextStyle, TextSystem,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -21,13 +23,15 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        Color as ElementColor, LengthPercentageValue, LineHeightValue, MaxSizeValue, SizeValue,
-        Style as ElementStyle,
+        Color as ElementColor, LengthPercentageValue, LineHeightValue, MaxSizeValue,
+        Overflow as ElementOverflow, SizeValue, Style as ElementStyle,
     },
     Document, ElementKind, BODY_ID,
 };
 
-use super::{Layout, LayoutKind, StackingLayer};
+use super::{
+    Layout, LayoutKind, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis, StackingLayer,
+};
 
 /// Computes a renderable layout tree from an element document.
 ///
@@ -40,6 +44,22 @@ pub(super) fn compute_layout(
     viewport_height: f32,
     text_system: &mut TextSystem,
 ) -> Layout {
+    compute_layout_with_scroll(
+        document,
+        viewport_width,
+        viewport_height,
+        text_system,
+        &HashMap::new(),
+    )
+}
+
+pub(super) fn compute_layout_with_scroll(
+    document: &Document,
+    viewport_width: f32,
+    viewport_height: f32,
+    text_system: &mut TextSystem,
+    scroll_offsets: &HashMap<u64, ScrollOffset>,
+) -> Layout {
     let viewport = Size {
         width: viewport_width.max(0.0),
         height: viewport_height.max(0.0),
@@ -51,13 +71,22 @@ pub(super) fn compute_layout(
         height: Dimension::length(viewport.height),
     };
 
-    let mut tree = ElementLayoutTree { nodes, text_system };
+    let mut tree = ElementLayoutTree {
+        nodes,
+        text_system,
+        scroll_offsets,
+    };
     compute_root_layout(
         &mut tree,
         NodeId::from(root),
         viewport.map(AvailableSpace::Definite),
     );
-    tree.to_layout(root, Point::ZERO)
+    tree.to_layout(
+        root,
+        Point::ZERO,
+        &[],
+        RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
+    )
 }
 
 fn add_element(
@@ -105,6 +134,7 @@ struct LayoutNode {
 struct ElementLayoutTree<'a> {
     nodes: Vec<LayoutNode>,
     text_system: &'a mut TextSystem,
+    scroll_offsets: &'a HashMap<u64, ScrollOffset>,
 }
 
 impl ElementLayoutTree<'_> {
@@ -180,7 +210,13 @@ impl ElementLayoutTree<'_> {
         )
     }
 
-    fn to_layout(&self, node: usize, parent_location: Point<f32>) -> Layout {
+    fn to_layout(
+        &self,
+        node: usize,
+        parent_location: Point<f32>,
+        ancestor_clips: &[Clip],
+        viewport: RenderRect,
+    ) -> Layout {
         let data = &self.nodes[node];
         let location = Point {
             x: parent_location.x + data.layout.location.x,
@@ -188,11 +224,19 @@ impl ElementLayoutTree<'_> {
         };
         let width = data.layout.size.width;
         let height = data.layout.size.height;
-        let kind = match &data.kind {
-            ElementKind::Text(text) => LayoutKind::Text {
-                text: text.clone(),
-                style: data.text_style.clone(),
-            },
+        let mut descendant_clips = ancestor_clips.to_vec();
+        let own_clip = overflow_clip(data, location, width, height, viewport);
+        if let Some(clip) = own_clip {
+            descendant_clips.push(clip);
+        }
+        let (kind, scroll) = match &data.kind {
+            ElementKind::Text(text) => (
+                LayoutKind::Text {
+                    text: text.clone(),
+                    style: data.text_style.clone(),
+                },
+                None,
+            ),
             ElementKind::Comment(_)
             | ElementKind::Button
             | ElementKind::Div
@@ -201,15 +245,85 @@ impl ElementLayoutTree<'_> {
             | ElementKind::Select
             | ElementKind::Span
             | ElementKind::Body
-            | ElementKind::Other(_) => LayoutKind::Box {
-                style: box_style(&data.paint_style, width, height),
-                stacking_layer: StackingLayer::from_style(&data.paint_style),
-                children: data
+            | ElementKind::Other(_) => {
+                let scrolls_x = matches!(
+                    data.paint_style.overflow_x,
+                    ElementOverflow::Auto | ElementOverflow::Scroll
+                );
+                let scrolls_y = matches!(
+                    data.paint_style.overflow_y,
+                    ElementOverflow::Auto | ElementOverflow::Scroll
+                );
+                let requested = self
+                    .scroll_offsets
+                    .get(&data.element_id)
+                    .copied()
+                    .unwrap_or(ScrollOffset::ZERO);
+                let mut offset = ScrollOffset::new(
+                    if scrolls_x { requested.x.max(0.0) } else { 0.0 },
+                    if scrolls_y { requested.y.max(0.0) } else { 0.0 },
+                );
+                let child_parent = Point {
+                    x: location.x - offset.x,
+                    y: location.y - offset.y,
+                };
+                let mut children: Vec<_> = data
                     .children
                     .iter()
-                    .map(|child| self.to_layout(*child, location))
-                    .collect(),
-            },
+                    .map(|child| self.to_layout(*child, child_parent, &descendant_clips, viewport))
+                    .collect();
+                let scroll_viewport = padding_box(data, location, width, height);
+                let (content_width, content_height) =
+                    scroll_content_size(&children, scroll_viewport, offset);
+                let max_offset = ScrollOffset::new(
+                    if scrolls_x {
+                        (content_width - scroll_viewport.width).max(0.0)
+                    } else {
+                        0.0
+                    },
+                    if scrolls_y {
+                        (content_height - scroll_viewport.height).max(0.0)
+                    } else {
+                        0.0
+                    },
+                );
+                let clamped =
+                    ScrollOffset::new(offset.x.min(max_offset.x), offset.y.min(max_offset.y));
+                if clamped != offset {
+                    offset = clamped;
+                    let child_parent = Point {
+                        x: location.x - offset.x,
+                        y: location.y - offset.y,
+                    };
+                    children = data
+                        .children
+                        .iter()
+                        .map(|child| {
+                            self.to_layout(*child, child_parent, &descendant_clips, viewport)
+                        })
+                        .collect();
+                }
+                let scroll = (scrolls_x || scrolls_y).then(|| {
+                    scroll_container(
+                        scroll_viewport,
+                        own_clip.expect("scroll containers establish an overflow clip"),
+                        content_width,
+                        content_height,
+                        offset,
+                        max_offset,
+                        data.paint_style.overflow_x == ElementOverflow::Scroll,
+                        data.paint_style.overflow_y == ElementOverflow::Scroll,
+                    )
+                });
+                (
+                    LayoutKind::Box {
+                        style: box_style(&data.paint_style, width, height),
+                        stacking_layer: StackingLayer::from_style(&data.paint_style),
+                        children,
+                    },
+                    scroll,
+                )
+            }
         };
 
         Layout {
@@ -218,9 +332,191 @@ impl ElementLayoutTree<'_> {
             y: location.y,
             width,
             height,
+            clips: ancestor_clips.to_vec(),
+            scroll,
             kind,
         }
     }
+}
+
+fn padding_box(data: &LayoutNode, location: Point<f32>, width: f32, height: f32) -> RenderRect {
+    let border = data.layout.border;
+    RenderRect::new(
+        location.x + border.left,
+        location.y + border.top,
+        (width - border.left - border.right).max(0.0),
+        (height - border.top - border.bottom).max(0.0),
+    )
+}
+
+fn scroll_content_size(
+    children: &[Layout],
+    viewport: RenderRect,
+    offset: ScrollOffset,
+) -> (f32, f32) {
+    children.iter().fold(
+        (viewport.width, viewport.height),
+        |(width, height), child| {
+            (
+                width.max(child.x + offset.x + child.width - viewport.x),
+                height.max(child.y + offset.y + child.height - viewport.y),
+            )
+        },
+    )
+}
+
+fn scroll_container(
+    viewport: RenderRect,
+    clip: Clip,
+    content_width: f32,
+    content_height: f32,
+    offset: ScrollOffset,
+    max_offset: ScrollOffset,
+    always_show_horizontal: bool,
+    always_show_vertical: bool,
+) -> ScrollContainer {
+    const INSET: f32 = 2.0;
+    const THICKNESS: f32 = 8.0;
+    const CROSS_AXIS_SPACE: f32 = 12.0;
+    const MIN_THUMB: f32 = 24.0;
+
+    let has_horizontal = always_show_horizontal || max_offset.x > 0.0;
+    let has_vertical = always_show_vertical || max_offset.y > 0.0;
+    let horizontal = has_horizontal.then(|| {
+        let track = RenderRect::new(
+            viewport.x + INSET,
+            viewport.y + viewport.height - THICKNESS - INSET,
+            (viewport.width - INSET * 2.0 - if has_vertical { CROSS_AXIS_SPACE } else { 0.0 })
+                .max(0.0),
+            THICKNESS,
+        );
+        Scrollbar {
+            axis: ScrollbarAxis::Horizontal,
+            track,
+            thumb: scrollbar_thumb(
+                track,
+                ScrollbarAxis::Horizontal,
+                viewport.width,
+                content_width,
+                offset.x,
+                max_offset.x,
+                MIN_THUMB,
+            ),
+        }
+    });
+    let vertical = has_vertical.then(|| {
+        let track = RenderRect::new(
+            viewport.x + viewport.width - THICKNESS - INSET,
+            viewport.y + INSET,
+            THICKNESS,
+            (viewport.height
+                - INSET * 2.0
+                - if has_horizontal {
+                    CROSS_AXIS_SPACE
+                } else {
+                    0.0
+                })
+            .max(0.0),
+        );
+        Scrollbar {
+            axis: ScrollbarAxis::Vertical,
+            track,
+            thumb: scrollbar_thumb(
+                track,
+                ScrollbarAxis::Vertical,
+                viewport.height,
+                content_height,
+                offset.y,
+                max_offset.y,
+                MIN_THUMB,
+            ),
+        }
+    });
+
+    ScrollContainer {
+        viewport,
+        clip,
+        content_width,
+        content_height,
+        offset,
+        max_offset,
+        horizontal,
+        vertical,
+    }
+}
+
+fn scrollbar_thumb(
+    track: RenderRect,
+    axis: ScrollbarAxis,
+    viewport_size: f32,
+    content_size: f32,
+    offset: f32,
+    max_offset: f32,
+    min_thumb: f32,
+) -> RenderRect {
+    let track_size = match axis {
+        ScrollbarAxis::Horizontal => track.width,
+        ScrollbarAxis::Vertical => track.height,
+    };
+    let thumb_size = (track_size * viewport_size / content_size.max(viewport_size))
+        .clamp(min_thumb.min(track_size), track_size);
+    let travel = (track_size - thumb_size).max(0.0);
+    let position = if max_offset > 0.0 {
+        travel * offset / max_offset
+    } else {
+        0.0
+    };
+    match axis {
+        ScrollbarAxis::Horizontal => {
+            RenderRect::new(track.x + position, track.y, thumb_size, track.height)
+        }
+        ScrollbarAxis::Vertical => {
+            RenderRect::new(track.x, track.y + position, track.width, thumb_size)
+        }
+    }
+}
+
+fn overflow_clip(
+    data: &LayoutNode,
+    location: Point<f32>,
+    width: f32,
+    height: f32,
+    viewport: RenderRect,
+) -> Option<Clip> {
+    let clips_x = data.paint_style.overflow_x != ElementOverflow::Visible;
+    let clips_y = data.paint_style.overflow_y != ElementOverflow::Visible;
+    if !clips_x && !clips_y {
+        return None;
+    }
+
+    let border = data.layout.border;
+    let padding_box = padding_box(data, location, width, height);
+    let rect = RenderRect::new(
+        if clips_x { padding_box.x } else { viewport.x },
+        if clips_y { padding_box.y } else { viewport.y },
+        if clips_x {
+            padding_box.width
+        } else {
+            viewport.width
+        },
+        if clips_y {
+            padding_box.height
+        } else {
+            viewport.height
+        },
+    );
+    let corner_radius = if clips_x && clips_y {
+        let outer = box_style(&data.paint_style, width, height).corner_radius;
+        CornerRadius::new(
+            (outer.top_left - border.left.max(border.top)).max(0.0),
+            (outer.top_right - border.right.max(border.top)).max(0.0),
+            (outer.bottom_right - border.right.max(border.bottom)).max(0.0),
+            (outer.bottom_left - border.left.max(border.bottom)).max(0.0),
+        )
+    } else {
+        CornerRadius::ZERO
+    };
+    Some(Clip::new(rect, corner_radius))
 }
 
 struct ChildIter<'a>(std::slice::Iter<'a, usize>);
@@ -274,6 +570,15 @@ impl LayoutPartialTree for ElementLayoutTree<'_> {
 
 impl CacheTree for ElementLayoutTree<'_> {
     fn cache_get(&self, node_id: NodeId, inputs: &LayoutInput) -> Option<LayoutOutput> {
+        // A cached final container layout does not restore the final layouts
+        // of its descendants. Intrinsic sizing can overwrite a text child's
+        // geometry after that entry was stored, leaving the parent at its
+        // final size but the text shaped and positioned for min-content.
+        // Re-run final layout passes so the retained descendant geometry
+        // always matches the container result that will be painted.
+        if inputs.run_mode == RunMode::PerformLayout {
+            return None;
+        }
         self.nodes[usize::from(node_id)].cache.get(inputs)
     }
 
@@ -362,8 +667,8 @@ fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
         box_sizing: style.box_sizing,
         position: style.position,
         overflow: Point {
-            x: style.overflow_x,
-            y: style.overflow_y,
+            x: taffy_overflow(style.overflow_x),
+            y: taffy_overflow(style.overflow_y),
         },
         inset: Rect {
             left: length_percentage_auto(style.left),
@@ -424,6 +729,15 @@ fn dimension(value: SizeValue) -> Dimension {
         SizeValue::Auto => Dimension::AUTO,
         SizeValue::Px(value) => Dimension::length(value),
         SizeValue::Percent(value) => Dimension::percent(value / 100.0),
+    }
+}
+
+fn taffy_overflow(value: ElementOverflow) -> taffy::style::Overflow {
+    match value {
+        ElementOverflow::Visible => taffy::style::Overflow::Visible,
+        ElementOverflow::Hidden => taffy::style::Overflow::Hidden,
+        ElementOverflow::Clip => taffy::style::Overflow::Clip,
+        ElementOverflow::Auto | ElementOverflow::Scroll => taffy::style::Overflow::Scroll,
     }
 }
 
@@ -571,6 +885,62 @@ mod tests {
             panic!("text should produce a text layout");
         };
         assert_eq!(text_style.font_size, 20.0);
+    }
+
+    #[test]
+    fn nested_flex_items_retain_final_text_geometry() {
+        let mut document = Document::new();
+        let gallery = document.create_node(ElementKind::Div);
+        let card = document.create_node(ElementKind::Div);
+        let row = document.create_node(ElementKind::Div);
+        let large_box = document.create_node(ElementKind::Span);
+        let small_box = document.create_node(ElementKind::Span);
+        let fixed_width_sibling = document.create_node(ElementKind::Span);
+        let large = document.create_node(ElementKind::Text("Baseline".into()));
+        let small =
+            document.create_node(ElementKind::Text("aligned through Glyphon metrics".into()));
+        let sibling = document.create_node(ElementKind::Text(
+            "Styled, centered, spaced and decorated text with font fallbacks".into(),
+        ));
+        document
+            .set_style(gallery, "display", Some("flex"))
+            .unwrap();
+        document
+            .set_style(gallery, "flex-direction", Some("column"))
+            .unwrap();
+        document.set_style(gallery, "width", Some("666px")).unwrap();
+        document.set_style(card, "display", Some("flex")).unwrap();
+        document
+            .set_style(card, "flex-direction", Some("column"))
+            .unwrap();
+        document.set_style(card, "padding", Some("16px")).unwrap();
+        document.set_style(row, "display", Some("flex")).unwrap();
+        document.set_style(row, "gap", Some("10px")).unwrap();
+        document
+            .set_style(large_box, "font-size", Some("30px"))
+            .unwrap();
+        document
+            .set_style(small_box, "font-size", Some("14px"))
+            .unwrap();
+        document
+            .set_style(fixed_width_sibling, "width", Some("610px"))
+            .unwrap();
+        document.insert(BODY_ID, gallery, None).unwrap();
+        document.insert(gallery, card, None).unwrap();
+        document.insert(card, row, None).unwrap();
+        document.insert(card, fixed_width_sibling, None).unwrap();
+        document.insert(row, large_box, None).unwrap();
+        document.insert(row, small_box, None).unwrap();
+        document.insert(large_box, large, None).unwrap();
+        document.insert(small_box, small, None).unwrap();
+        document.insert(fixed_width_sibling, sibling, None).unwrap();
+
+        let layout = compute_layout(&document, 800.0, 600.0, &mut TextSystem::new());
+        let items = layout.children()[0].children()[0].children()[0].children();
+        let small_text = &items[1].children()[0];
+
+        assert_eq!(small_text.width, items[1].width);
+        assert!(small_text.height <= items[1].height);
     }
 
     #[test]
