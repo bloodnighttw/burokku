@@ -9,9 +9,12 @@ mod text_system;
 
 pub use drawing::{
     BackgroundImage, Border, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, DrawCommand,
-    FontFamily, GradientStop, Outline, RasterImage, Rect, TextShadow, TextStyle, TextWrap,
+    FontFamily, FontStyle, GradientStop, Outline, RasterImage, Rect, TextAlign, TextDecorationLine,
+    TextOverflowWrap, TextShadow, TextSpan, TextStyle, TextWhiteSpace, TextWordBreak, TextWrap,
     Transform,
 };
 pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};
-pub use text_system::{TextConstraints, TextMetrics, TextSystem, TextWidth};
+pub use text_system::{
+    TextConstraints, TextLayoutMetrics, TextMetrics, TextRunMetrics, TextSystem, TextWidth,
+};
 pub use wgpu;

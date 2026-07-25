@@ -1,5 +1,5 @@
 export type BurokkuStyle = Partial<{
-  display: "block" | "flex" | "none";
+  display: "block" | "flex" | "grid" | "none";
   overflow: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowX: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowY: "visible" | "hidden" | "clip" | "auto" | "scroll";
@@ -13,6 +13,10 @@ export type BurokkuStyle = Partial<{
   flexGrow: number;
   flexShrink: number;
   gap: number | string;
+  gridTemplateColumns: string;
+  gridTemplateRows: string;
+  gridColumn: string;
+  gridRow: string;
   padding: number | string;
   margin: number | string;
   backgroundColor: string;
@@ -27,6 +31,17 @@ export type BurokkuStyle = Partial<{
   lineHeight: number | string;
   fontWeight: number | "normal" | "bold";
   fontFamily: string;
+  fontStyle: "normal" | "italic" | "oblique";
+  textAlign: "start" | "end" | "left" | "right" | "center" | "justify";
+  letterSpacing: number | string;
+  wordSpacing: number | string;
+  textDecoration: string;
+  textDecorationLine: "none" | string;
+  textDecorationColor: string;
+  whiteSpace: "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces";
+  overflowWrap: "normal" | "break-word" | "anywhere";
+  wordWrap: "normal" | "break-word" | "anywhere";
+  wordBreak: "normal" | "break-all" | "keep-all";
 }>;
 
 export type HostProps = Record<string, unknown> & {

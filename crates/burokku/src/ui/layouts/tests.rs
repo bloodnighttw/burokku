@@ -1,4 +1,4 @@
-use render::{BoxStyle, TextStyle};
+use render::{BoxStyle, TextSpan, TextStyle};
 
 use super::*;
 
@@ -14,7 +14,10 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
         scroll: None,
         kind: LayoutKind::Text {
             text: "Burokku".into(),
+            spans: vec![TextSpan::new("Burokku", TextStyle::default())],
             style: TextStyle::default(),
+            line_count: 1,
+            runs: Vec::new(),
         },
     }
 }

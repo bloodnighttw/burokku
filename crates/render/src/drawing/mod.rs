@@ -10,4 +10,7 @@ pub use geometry::{Clip, CornerRadius, Rect};
 pub use style::{
     BackgroundImage, Border, BoxShadow, BoxStyle, GradientStop, Outline, RasterImage, Transform,
 };
-pub use text::{FontFamily, TextShadow, TextStyle, TextWrap};
+pub use text::{
+    FontFamily, FontStyle, TextAlign, TextDecorationLine, TextOverflowWrap, TextShadow, TextSpan,
+    TextStyle, TextWhiteSpace, TextWordBreak, TextWrap,
+};
