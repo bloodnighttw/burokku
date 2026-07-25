@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextShadow,
-    TextStyle, TextSystem, Transform,
+    Border, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect,
+    TextDecorationLine, TextRunMetrics, TextShadow, TextSpan, TextStyle, TextSystem, Transform,
 };
 
 use super::{
@@ -213,7 +213,8 @@ fn paint_one(
         .skip(clip_skip)
         .copied()
         .map(|clip| localize_clip(clip, context_world))
-        .map(|clip| scaled_clip(clip, scale_factor));
+        .map(|clip| scaled_clip(clip, scale_factor))
+        .collect::<Vec<_>>();
     match &layout.kind {
         LayoutKind::Box { style, .. } => {
             let mut style = style.clone();
@@ -222,20 +223,87 @@ fn paint_one(
                 style.transform = Transform::IDENTITY;
             }
             if style != BoxStyle::default() {
-                canvas.draw_box_with_clips(bounds, scaled_box_style(style, scale_factor), clips);
+                canvas.draw_box_with_clips(
+                    bounds,
+                    scaled_box_style(style, scale_factor),
+                    clips.iter().copied(),
+                );
             }
         }
-        LayoutKind::Text { text, style } => {
+        LayoutKind::Text {
+            spans, style, runs, ..
+        } => {
             let mut style = style.clone();
             if strip_effect {
                 style.opacity = 1.0;
                 style.transform = Transform::IDENTITY;
             }
-            canvas.draw_text_with_clips(
+            let scaled_style = scaled_text_style(&style, scale_factor);
+            let scaled_spans = scaled_text_spans(spans, scale_factor);
+            canvas.draw_rich_text_with_clips(
                 bounds,
-                text,
-                scaled_text_style(&style, scale_factor),
-                clips,
+                scaled_spans.clone(),
+                scaled_style,
+                clips.iter().copied(),
+            );
+            paint_text_decorations(
+                bounds,
+                &scaled_spans,
+                runs,
+                scale_factor,
+                clips.iter().copied(),
+                canvas,
+            );
+        }
+    }
+}
+
+fn paint_text_decorations(
+    bounds: Rect,
+    spans: &[TextSpan],
+    runs: &[TextRunMetrics],
+    scale_factor: f32,
+    clips: impl IntoIterator<Item = Clip> + Clone,
+    canvas: &mut Canvas,
+) {
+    for run in runs {
+        let Some(style) = spans.get(run.span_index).map(|span| &span.style) else {
+            continue;
+        };
+        if style.text_decoration_line == TextDecorationLine::NONE {
+            continue;
+        }
+        let decoration_style = BoxStyle {
+            background: style.text_decoration_color,
+            ..BoxStyle::default()
+        };
+        for decoration in [
+            style
+                .text_decoration_line
+                .contains(TextDecorationLine::OVERLINE)
+                .then_some((run.overline_y, run.overline_thickness)),
+            style
+                .text_decoration_line
+                .contains(TextDecorationLine::LINE_THROUGH)
+                .then_some((run.line_through_y, run.line_through_thickness)),
+            style
+                .text_decoration_line
+                .contains(TextDecorationLine::UNDERLINE)
+                .then_some((run.underline_y, run.underline_thickness)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let (y, thickness) = decoration;
+            canvas.draw_overlay_box_with_clips(
+                Rect::new(
+                    bounds.x + run.left * scale_factor,
+                    bounds.y + y * scale_factor,
+                    run.width * scale_factor,
+                    thickness * scale_factor,
+                ),
+                decoration_style.clone(),
+                clips.clone(),
             );
         }
     }
@@ -577,6 +645,8 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
     let mut style = style.clone();
     style.font_size *= scale_factor;
     style.line_height *= scale_factor;
+    style.letter_spacing *= scale_factor;
+    style.word_spacing *= scale_factor;
     style.transform.matrix[4] *= scale_factor;
     style.transform.matrix[5] *= scale_factor;
     style.shadows = style
@@ -592,6 +662,13 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
         })
         .collect();
     style
+}
+
+fn scaled_text_spans(spans: &[TextSpan], scale_factor: f32) -> Vec<TextSpan> {
+    spans
+        .iter()
+        .map(|span| TextSpan::new(&span.text, scaled_text_style(&span.style, scale_factor)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -787,6 +864,131 @@ mod tests {
             .zip(Transform::IDENTITY.matrix)
         {
             assert!((actual - expected).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn emits_overlay_shapes_for_text_decorations() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let text = document.create_node(ElementKind::Text("decorated".into()));
+        document
+            .set_style(
+                container,
+                "text-decoration",
+                Some("underline line-through red"),
+            )
+            .unwrap();
+        document
+            .set_style(container, "text-align", Some("right"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, text, None).unwrap();
+
+        let frame = build_frame(&document, 200.0, 100.0, 1.0, &mut TextSystem::new());
+        let canvas = &frame.canvas;
+        assert!(matches!(
+            canvas.commands()[0],
+            render::DrawCommand::Text { .. }
+        ));
+        let decorations = canvas
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, render::DrawCommand::OverlayBox { .. }))
+            .count();
+        assert_eq!(decorations, 2);
+        let LayoutKind::Text { runs, .. } = &frame.layout.children()[0].children()[0].kind else {
+            panic!("child should be text");
+        };
+        let render::DrawCommand::OverlayBox { rect, .. } = &canvas.commands()[1] else {
+            panic!("decoration should be an overlay");
+        };
+        assert!((rect.x - runs[0].left).abs() < 0.01);
+        assert!((rect.width - runs[0].width).abs() < 0.01);
+        assert!(rect.x > 0.0);
+        assert!(rect.width < 200.0);
+    }
+
+    #[test]
+    fn decorates_only_the_styled_inline_span() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::Span);
+        let before = document.create_node(ElementKind::Text("before ".into()));
+        let decorated = document.create_node(ElementKind::Span);
+        let decorated_text = document.create_node(ElementKind::Text("middle".into()));
+        let after = document.create_node(ElementKind::Text(" after".into()));
+        document
+            .set_style(decorated, "text-decoration", Some("underline #7c3aed"))
+            .unwrap();
+        document.insert(BODY_ID, line, None).unwrap();
+        document.insert(line, before, None).unwrap();
+        document.insert(line, decorated, None).unwrap();
+        document.insert(decorated, decorated_text, None).unwrap();
+        document.insert(line, after, None).unwrap();
+
+        let frame = build_frame(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+        let inline = &frame.layout.children()[0];
+        let LayoutKind::Text { spans, runs, .. } = &inline.kind else {
+            panic!("nested spans should produce one inline text layout");
+        };
+        let decorated_runs = runs.iter().filter(|run| run.span_index == 1).count();
+        let decorations: Vec<_> = frame
+            .canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                render::DrawCommand::OverlayBox { style, .. } => Some(style),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(spans.len(), 3);
+        assert!(decorated_runs > 0);
+        assert_eq!(decorations.len(), decorated_runs);
+        assert!(decorations
+            .iter()
+            .all(|style| style.background == Color::from_rgba8(0x7c, 0x3a, 0xed, 0xff)));
+    }
+
+    #[test]
+    fn wrapped_centered_decorations_follow_each_shaped_line() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let text =
+            document.create_node(ElementKind::Text("decorations follow wrapped lines".into()));
+        document
+            .set_style(container, "width", Some("90px"))
+            .unwrap();
+        document
+            .set_style(container, "text-align", Some("center"))
+            .unwrap();
+        document
+            .set_style(container, "text-decoration", Some("underline"))
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, text, None).unwrap();
+
+        let frame = build_frame(&document, 200.0, 150.0, 1.0, &mut TextSystem::new());
+        let text_layout = &frame.layout.children()[0].children()[0];
+        let LayoutKind::Text { runs, .. } = &text_layout.kind else {
+            panic!("child should be text");
+        };
+        let decorations: Vec<_> = frame
+            .canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                render::DrawCommand::OverlayBox { rect, .. } => Some(rect),
+                _ => None,
+            })
+            .collect();
+
+        assert!(runs.len() > 1);
+        assert_eq!(decorations.len(), runs.len());
+        for (rect, run) in decorations.into_iter().zip(runs) {
+            assert!((rect.x - (text_layout.x + run.left)).abs() < 0.01);
+            assert!((rect.width - run.width).abs() < 0.01);
+            assert!(rect.width < text_layout.width);
         }
     }
 

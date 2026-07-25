@@ -26,7 +26,6 @@ var background_image_sampler: sampler;
 struct GradientStop {
     color: vec4<f32>,
     position: f32,
-    _padding: vec3<f32>,
 }
 
 @group(0) @binding(4)

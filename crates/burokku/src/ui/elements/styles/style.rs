@@ -1,7 +1,9 @@
 use super::{
     AlignContent, AlignItems, AlignSelf, BackgroundImage, BoxSizing, Display, FlexDirection,
-    FlexWrap, Isolation, JustifyContent, LengthPercentageValue, LengthValue, LineHeightValue,
-    MaxSizeValue, Overflow, Position, Shadow, SizeValue, Transform, ZIndex,
+    FlexWrap, FontStyleValue, GridAutoFlow, GridTemplateArea, Isolation, JustifyContent,
+    LengthPercentageValue, LengthValue, LineHeightValue, MaxSizeValue, Overflow, OverflowWrapValue,
+    Position, Shadow, SizeValue, TextAlignValue, TextDecorationLineValue, Transform,
+    WhiteSpaceValue, WordBreakValue, ZIndex,
 };
 
 pub(crate) type Color = [u8; 4];
@@ -57,6 +59,19 @@ pub(crate) struct Style {
     pub(crate) flex_basis: SizeValue,
     pub(crate) flex_grow: f32,
     pub(crate) flex_shrink: f32,
+    pub(crate) order: i32,
+
+    // Grid container and item properties
+    pub(crate) grid_template_rows: Option<String>,
+    pub(crate) grid_template_columns: Option<String>,
+    pub(crate) grid_template_areas: Vec<GridTemplateArea<String>>,
+    pub(crate) grid_auto_rows: Option<String>,
+    pub(crate) grid_auto_columns: Option<String>,
+    pub(crate) grid_auto_flow: GridAutoFlow,
+    pub(crate) grid_row_start: Option<String>,
+    pub(crate) grid_row_end: Option<String>,
+    pub(crate) grid_column_start: Option<String>,
+    pub(crate) grid_column_end: Option<String>,
 
     // Paint
     pub(crate) background_color: Option<Color>,
@@ -79,7 +94,16 @@ pub(crate) struct Style {
     pub(crate) font_size: Option<LengthPercentageValue>,
     pub(crate) line_height: Option<LineHeightValue>,
     pub(crate) font_weight: Option<u16>,
-    pub(crate) font_family: Option<String>,
+    pub(crate) font_families: Option<Vec<String>>,
+    pub(crate) font_style: Option<FontStyleValue>,
+    pub(crate) text_align: Option<TextAlignValue>,
+    pub(crate) letter_spacing: Option<LengthValue>,
+    pub(crate) word_spacing: Option<LengthValue>,
+    pub(crate) text_decoration_line: Option<TextDecorationLineValue>,
+    pub(crate) text_decoration_color: Option<Color>,
+    pub(crate) white_space: Option<WhiteSpaceValue>,
+    pub(crate) overflow_wrap: Option<OverflowWrapValue>,
+    pub(crate) word_break: Option<WordBreakValue>,
 }
 
 impl Default for Style {
@@ -126,6 +150,17 @@ impl Default for Style {
             flex_basis: SizeValue::Auto,
             flex_grow: 0.0,
             flex_shrink: 1.0,
+            order: 0,
+            grid_template_rows: None,
+            grid_template_columns: None,
+            grid_template_areas: Vec::new(),
+            grid_auto_rows: None,
+            grid_auto_columns: None,
+            grid_auto_flow: GridAutoFlow::Row,
+            grid_row_start: None,
+            grid_row_end: None,
+            grid_column_start: None,
+            grid_column_end: None,
             background_color: None,
             background_image: None,
             color: None,
@@ -144,7 +179,16 @@ impl Default for Style {
             font_size: None,
             line_height: None,
             font_weight: None,
-            font_family: None,
+            font_families: None,
+            font_style: None,
+            text_align: None,
+            letter_spacing: None,
+            word_spacing: None,
+            text_decoration_line: None,
+            text_decoration_color: None,
+            white_space: None,
+            overflow_wrap: None,
+            word_break: None,
         }
     }
 }
