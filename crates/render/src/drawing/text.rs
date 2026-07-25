@@ -130,3 +130,22 @@ impl Default for TextStyle {
         }
     }
 }
+
+/// A contiguous piece of text with its own computed typography.
+///
+/// Multiple spans are shaped together so they share line breaking, alignment,
+/// and bidirectional layout while retaining their individual font and color.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextSpan {
+    pub text: String,
+    pub style: TextStyle,
+}
+
+impl TextSpan {
+    pub fn new(text: impl Into<String>, style: TextStyle) -> Self {
+        Self {
+            text: text.into(),
+            style,
+        }
+    }
+}

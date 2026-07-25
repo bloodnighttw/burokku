@@ -9,8 +9,8 @@ mod text_system;
 
 pub use drawing::{
     Border, BoxStyle, Canvas, Clip, Color, CornerRadius, DrawCommand, FontFamily, FontStyle,
-    Outline, Rect, TextAlign, TextDecorationLine, TextOverflowWrap, TextStyle, TextWhiteSpace,
-    TextWordBreak, TextWrap,
+    Outline, Rect, TextAlign, TextDecorationLine, TextOverflowWrap, TextSpan, TextStyle,
+    TextWhiteSpace, TextWordBreak, TextWrap,
 };
 pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};
 pub use text_system::{

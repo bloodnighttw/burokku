@@ -3,7 +3,7 @@ use glyphon::{
     Weight, Wrap,
 };
 
-use crate::{FontFamily, FontStyle, TextAlign, TextStyle, TextWrap};
+use crate::{FontFamily, FontStyle, TextAlign, TextSpan, TextStyle, TextWrap};
 
 /// Width behavior used while calculating intrinsic text dimensions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -50,6 +50,8 @@ pub struct TextMetrics {
 /// Shaped geometry for a contiguous font run, used to paint text decorations.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextRunMetrics {
+    /// Index of the source [`TextSpan`] that produced this shaped run.
+    pub span_index: usize,
     pub left: f32,
     pub width: f32,
     pub baseline: f32,
@@ -98,12 +100,22 @@ impl TextSystem {
         style: &TextStyle,
         constraints: TextConstraints,
     ) -> TextLayoutMetrics {
+        self.layout_rich_metrics(&[TextSpan::new(text, style.clone())], style, constraints)
+    }
+
+    /// Shapes styled spans as one inline flow and returns their shared metrics.
+    pub fn layout_rich_metrics(
+        &mut self,
+        spans: &[TextSpan],
+        style: &TextStyle,
+        constraints: TextConstraints,
+    ) -> TextLayoutMetrics {
         let (width, wrap) = match constraints.width {
             TextWidth::Unconstrained => (None, Wrap::None),
             TextWidth::AtMost(width) => (Some(width.max(0.0)), wrap_mode(style.wrap)),
             TextWidth::MinContent => (Some(0.0), wrap_mode(style.wrap)),
         };
-        let buffer = self.layout_buffer(text, style, width, None, Some(wrap));
+        let buffer = self.layout_rich_buffer(spans, style, width, None, Some(wrap));
         let mut result = TextLayoutMetrics::default();
         for run in buffer.layout_runs() {
             if result.text.line_count == 0 {
@@ -123,6 +135,7 @@ impl TextSystem {
                         || glyph.font_weight != first.font_weight
                         || glyph.font_size.to_bits() != first.font_size.to_bits()
                         || glyph.level != first.level
+                        || glyph.metadata != first.metadata
                     {
                         break;
                     }
@@ -152,9 +165,27 @@ impl TextSystem {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn layout_buffer(
         &mut self,
         text: &str,
+        style: &TextStyle,
+        width: Option<f32>,
+        height: Option<f32>,
+        wrap: Option<Wrap>,
+    ) -> Buffer {
+        self.layout_rich_buffer(
+            &[TextSpan::new(text, style.clone())],
+            style,
+            width,
+            height,
+            wrap,
+        )
+    }
+
+    pub(crate) fn layout_rich_buffer(
+        &mut self,
+        spans: &[TextSpan],
         style: &TextStyle,
         width: Option<f32>,
         height: Option<f32>,
@@ -168,23 +199,7 @@ impl TextSystem {
             &mut self.font_system,
             wrap.unwrap_or_else(|| wrap_mode(style.wrap)),
         );
-        let family = match self.resolve_font_family(&style.font_families) {
-            FontFamily::SansSerif => Family::SansSerif,
-            FontFamily::Serif => Family::Serif,
-            FontFamily::Monospace => Family::Monospace,
-            FontFamily::Cursive => Family::Cursive,
-            FontFamily::Fantasy => Family::Fantasy,
-            FontFamily::Named(name) => Family::Name(name),
-        };
-        let attrs = Attrs::new()
-            .family(family)
-            .weight(Weight(style.font_weight))
-            .style(match style.font_style {
-                FontStyle::Normal => GlyphStyle::Normal,
-                FontStyle::Italic => GlyphStyle::Italic,
-                FontStyle::Oblique => GlyphStyle::Oblique,
-            })
-            .letter_spacing(style.letter_spacing / font_size);
+        let default_attrs = self.attrs(style, 0);
         let alignment = match style.text_align {
             TextAlign::Start => None,
             TextAlign::End => Some(Align::End),
@@ -193,29 +208,53 @@ impl TextSystem {
             TextAlign::Center => Some(Align::Center),
             TextAlign::Justify => Some(Align::Justified),
         };
-        if style.word_spacing == 0.0 {
-            buffer.set_text(
-                &mut self.font_system,
-                text,
-                &attrs,
-                Shaping::Advanced,
-                alignment,
-            );
-        } else {
-            let word_attrs = attrs
-                .clone()
-                .letter_spacing((style.letter_spacing + style.word_spacing) / font_size);
-            let spans = text_spans(text, attrs.clone(), word_attrs);
-            buffer.set_rich_text(
-                &mut self.font_system,
-                spans,
-                &attrs,
-                Shaping::Advanced,
-                alignment,
-            );
+        let mut rich_spans = Vec::new();
+        for (span_index, span) in spans.iter().enumerate() {
+            let attrs = self.attrs(&span.style, span_index);
+            if span.style.word_spacing == 0.0 {
+                rich_spans.push((span.text.as_str(), attrs));
+            } else {
+                let font_size = span.style.font_size.max(1.0);
+                let word_attrs = attrs.clone().letter_spacing(
+                    (span.style.letter_spacing + span.style.word_spacing) / font_size,
+                );
+                rich_spans.extend(text_spans(&span.text, attrs, word_attrs));
+            }
         }
+        buffer.set_rich_text(
+            &mut self.font_system,
+            rich_spans,
+            &default_attrs,
+            Shaping::Advanced,
+            alignment,
+        );
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer
+    }
+
+    fn attrs<'a>(&self, style: &'a TextStyle, metadata: usize) -> Attrs<'a> {
+        let family = match self.resolve_font_family(&style.font_families) {
+            FontFamily::SansSerif => Family::SansSerif,
+            FontFamily::Serif => Family::Serif,
+            FontFamily::Monospace => Family::Monospace,
+            FontFamily::Cursive => Family::Cursive,
+            FontFamily::Fantasy => Family::Fantasy,
+            FontFamily::Named(name) => Family::Name(name),
+        };
+        let [red, green, blue, alpha] = style.color.rgba8();
+        let font_size = style.font_size.max(1.0);
+        Attrs::new()
+            .family(family)
+            .weight(Weight(style.font_weight))
+            .style(match style.font_style {
+                FontStyle::Normal => GlyphStyle::Normal,
+                FontStyle::Italic => GlyphStyle::Italic,
+                FontStyle::Oblique => GlyphStyle::Oblique,
+            })
+            .metrics(Metrics::new(font_size, style.line_height.max(font_size)))
+            .letter_spacing(style.letter_spacing / font_size)
+            .color(glyphon::Color::rgba(red, green, blue, alpha))
+            .metadata(metadata)
     }
 
     fn resolve_font_family<'a>(&self, families: &'a [FontFamily]) -> &'a FontFamily {
@@ -271,6 +310,7 @@ fn text_run_metrics(
     ));
 
     Some(TextRunMetrics {
+        span_index: glyph.metadata,
         left,
         width,
         baseline,
@@ -399,6 +439,34 @@ mod tests {
         );
 
         assert!(spaced.width > plain.width + 5.0);
+    }
+
+    #[test]
+    fn rich_spans_shape_and_wrap_as_one_flow() {
+        let base = TextStyle {
+            wrap: TextWrap::Glyph,
+            ..TextStyle::default()
+        };
+        let accent = TextStyle {
+            color: crate::Color::from_rgba8(124, 58, 237, 255),
+            font_weight: 700,
+            ..base.clone()
+        };
+        let spans = [
+            TextSpan::new("prefix/", base.clone()),
+            TextSpan::new("a-very-long-styled-value", accent),
+            TextSpan::new("/suffix", base.clone()),
+        ];
+        let mut system = TextSystem::new();
+        let metrics = system.layout_rich_metrics(&spans, &base, TextConstraints::at_most(90.0));
+        if metrics.runs.is_empty() {
+            return;
+        }
+
+        assert!(metrics.text.line_count > 1);
+        assert!(metrics.runs.iter().any(|run| run.span_index == 0));
+        assert!(metrics.runs.iter().any(|run| run.span_index == 1));
+        assert!(metrics.runs.iter().any(|run| run.span_index == 2));
     }
 
     #[test]
