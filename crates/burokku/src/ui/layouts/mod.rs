@@ -121,6 +121,7 @@ pub enum LayoutKind {
     Text {
         text: String,
         style: TextStyle,
+        line_count: usize,
     },
 }
 

@@ -197,7 +197,11 @@ fn text_layout_style_matches(left: &TextStyle, right: &TextStyle) -> bool {
     left.font_size == right.font_size
         && left.line_height == right.line_height
         && left.font_weight == right.font_weight
-        && left.font_family == right.font_family
+        && left.font_families == right.font_families
+        && left.font_style == right.font_style
+        && left.text_align == right.text_align
+        && left.letter_spacing == right.letter_spacing
+        && left.word_spacing == right.word_spacing
         && left.wrap == right.wrap
 }
 
@@ -207,7 +211,11 @@ fn text_layout_fingerprint(text: &str, style: &TextStyle, width: f32, height: f3
     style.font_size.to_bits().hash(&mut hasher);
     style.line_height.to_bits().hash(&mut hasher);
     style.font_weight.hash(&mut hasher);
-    style.font_family.hash(&mut hasher);
+    style.font_families.hash(&mut hasher);
+    style.font_style.hash(&mut hasher);
+    style.text_align.hash(&mut hasher);
+    style.letter_spacing.to_bits().hash(&mut hasher);
+    style.word_spacing.to_bits().hash(&mut hasher);
     style.wrap.hash(&mut hasher);
     width.to_bits().hash(&mut hasher);
     height.to_bits().hash(&mut hasher);

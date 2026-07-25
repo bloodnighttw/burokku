@@ -14,6 +14,7 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
         kind: LayoutKind::Text {
             text: "Burokku".into(),
             style: TextStyle::default(),
+            line_count: 1,
         },
     }
 }

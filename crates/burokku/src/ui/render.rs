@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextStyle, TextSystem,
+    Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextDecorationLine,
+    TextStyle, TextSystem,
 };
 
 use super::{
@@ -118,14 +119,59 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
                     );
                 }
             }
-            LayoutKind::Text { text, style } => {
-                canvas.draw_text_with_clips(
-                    bounds,
-                    text,
-                    scaled_text_style(style, scale_factor),
-                    clips,
-                );
+            LayoutKind::Text {
+                text,
+                style,
+                line_count,
+            } => {
+                let scaled_style = scaled_text_style(style, scale_factor);
+                canvas.draw_text_with_clips(bounds, text, scaled_style.clone(), clips.clone());
+                paint_text_decorations(bounds, &scaled_style, *line_count, clips, canvas);
             }
+        }
+    }
+}
+
+fn paint_text_decorations(
+    bounds: Rect,
+    style: &TextStyle,
+    line_count: usize,
+    clips: impl IntoIterator<Item = Clip> + Clone,
+    canvas: &mut Canvas,
+) {
+    if style.text_decoration_line == TextDecorationLine::NONE || style.line_height <= 0.0 {
+        return;
+    }
+    let thickness = (style.font_size / 16.0).max(1.0);
+    let line_count = line_count.max(1);
+    let decoration_style = BoxStyle {
+        background: style.text_decoration_color,
+        ..BoxStyle::default()
+    };
+    for line in 0..line_count {
+        let top = bounds.y + line as f32 * style.line_height;
+        for y in [
+            style
+                .text_decoration_line
+                .contains(TextDecorationLine::OVERLINE)
+                .then_some(top),
+            style
+                .text_decoration_line
+                .contains(TextDecorationLine::LINE_THROUGH)
+                .then_some(top + style.font_size * 0.55),
+            style
+                .text_decoration_line
+                .contains(TextDecorationLine::UNDERLINE)
+                .then_some(top + style.font_size),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            canvas.draw_overlay_box_with_clips(
+                Rect::new(bounds.x, y, bounds.width, thickness),
+                decoration_style,
+                clips.clone(),
+            );
         }
     }
 }
@@ -247,6 +293,8 @@ fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
     let mut style = style.clone();
     style.font_size *= scale_factor;
     style.line_height *= scale_factor;
+    style.letter_spacing *= scale_factor;
+    style.word_spacing *= scale_factor;
     style
 }
 
@@ -288,6 +336,34 @@ mod tests {
 
         assert_eq!(frame.layout.kind.children()[0].element_id(), card);
         assert_eq!(frame.canvas.commands().len(), 1);
+    }
+
+    #[test]
+    fn emits_overlay_shapes_for_text_decorations() {
+        let mut document = Document::new();
+        let container = document.create_node(ElementKind::Div);
+        let text = document.create_node(ElementKind::Text("decorated".into()));
+        document
+            .set_style(
+                container,
+                "text-decoration",
+                Some("underline line-through red"),
+            )
+            .unwrap();
+        document.insert(BODY_ID, container, None).unwrap();
+        document.insert(container, text, None).unwrap();
+
+        let canvas = build_canvas(&document, 200.0, 100.0, 1.0, &mut TextSystem::new());
+        assert!(matches!(
+            canvas.commands()[0],
+            render::DrawCommand::Text { .. }
+        ));
+        let decorations = canvas
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, render::DrawCommand::OverlayBox { .. }))
+            .count();
+        assert_eq!(decorations, 2);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, Outline, Rect as RenderRect,
-    TextConstraints, TextStyle, TextSystem,
+    Border, BoxStyle, Clip, Color, CornerRadius, FontFamily, FontStyle, Outline,
+    Rect as RenderRect, TextAlign, TextConstraints, TextDecorationLine, TextStyle, TextSystem,
+    TextWhiteSpace, TextWrap,
 };
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
@@ -26,8 +27,10 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        Color as ElementColor, LengthPercentageValue, LineHeightValue, MaxSizeValue,
-        Overflow as ElementOverflow, SizeValue, Style as ElementStyle,
+        Color as ElementColor, FontStyleValue, LengthPercentageValue, LineHeightValue,
+        MaxSizeValue, Overflow as ElementOverflow, OverflowWrapValue, SizeValue,
+        Style as ElementStyle, TextAlignValue, TextDecorationLineValue, WhiteSpaceValue,
+        WordBreakValue,
     },
     Document, ElementKind, BODY_ID,
 };
@@ -112,6 +115,8 @@ fn add_element(
         children: Vec::with_capacity(element.children.len()),
         cache: Cache::new(),
         layout: TaffyLayout::new(),
+        first_baseline: None,
+        text_line_count: 0,
     });
 
     let children = element
@@ -136,6 +141,8 @@ struct LayoutNode {
     children: Vec<usize>,
     cache: Cache,
     layout: TaffyLayout,
+    first_baseline: Option<f32>,
+    text_line_count: usize,
 }
 
 struct ElementLayoutTree<'a> {
@@ -155,7 +162,7 @@ impl ElementLayoutTree<'_> {
             return compute_hidden_layout(self, node_id);
         }
 
-        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+        let output = compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             let index = usize::from(node_id);
             let display = tree.nodes[index].style.display;
             let is_text = matches!(tree.nodes[index].kind, ElementKind::Text(_));
@@ -165,7 +172,14 @@ impl ElementLayoutTree<'_> {
                 (Display::None, _, _) => compute_hidden_layout(tree, node_id),
                 (_, true, _) => tree.compute_text_layout(node_id, inputs),
                 (Display::Block, false, true) => {
-                    compute_block_layout(tree, node_id, inputs, block_context)
+                    let mut output = compute_block_layout(tree, node_id, inputs, block_context);
+                    output.first_baselines.y =
+                        tree.nodes[index].children.iter().rev().find_map(|child| {
+                            tree.nodes[*child]
+                                .first_baseline
+                                .map(|baseline| tree.nodes[*child].layout.location.y + baseline)
+                        });
+                    output
                 }
                 (Display::Flex, false, true) => compute_flexbox_layout(tree, node_id, inputs),
                 (Display::Grid, false, true) => compute_grid_layout(tree, node_id, inputs),
@@ -182,7 +196,9 @@ impl ElementLayoutTree<'_> {
                     )
                 }
             }
-        })
+        });
+        self.nodes[usize::from(node_id)].first_baseline = output.first_baselines.y;
+        output
     }
 
     fn compute_text_layout(&mut self, node_id: NodeId, inputs: LayoutInput) -> LayoutOutput {
@@ -194,7 +210,8 @@ impl ElementLayoutTree<'_> {
             _ => unreachable!("only text elements use text measurement"),
         };
 
-        compute_leaf_layout(
+        let mut first_baseline = None;
+        let mut output = compute_leaf_layout(
             inputs,
             &style,
             |_, _| 0.0,
@@ -208,13 +225,18 @@ impl ElementLayoutTree<'_> {
                         AvailableSpace::MaxContent => TextConstraints::UNCONSTRAINED,
                     }
                 };
+                let text = normalize_white_space(&text, text_style.white_space);
                 let measured = self.text_system.measure(&text, &text_style, constraints);
+                first_baseline = Some(measured.first_baseline);
+                self.nodes[index].text_line_count = measured.line_count;
                 Size {
                     width: known_dimensions.width.unwrap_or(measured.width),
                     height: known_dimensions.height.unwrap_or(measured.height),
                 }
             },
-        )
+        );
+        output.first_baselines.y = first_baseline;
+        output
     }
 
     fn to_layout(
@@ -239,8 +261,9 @@ impl ElementLayoutTree<'_> {
         let (kind, scroll) = match &data.kind {
             ElementKind::Text(text) => (
                 LayoutKind::Text {
-                    text: text.clone(),
+                    text: normalize_white_space(text, data.text_style.white_space),
                     style: data.text_style.clone(),
+                    line_count: data.text_line_count,
                 },
                 None,
             ),
@@ -826,14 +849,21 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
     let mut merged = parent.clone();
     if let Some(color) = style.color {
         merged.color = rgba(color);
+        if merged.text_decoration_color_is_current {
+            merged.text_decoration_color = merged.color;
+        }
     }
     if let Some(font_size) = style.font_size {
         merged.font_size = match font_size {
             LengthPercentageValue::Px(value) => value,
             LengthPercentageValue::Percent(value) => parent.font_size * value / 100.0,
         };
+        if merged.line_height_is_normal && style.line_height.is_none() {
+            merged.line_height = merged.font_size * 1.2;
+        }
     }
     if let Some(line_height) = style.line_height {
+        merged.line_height_is_normal = line_height == LineHeightValue::Normal;
         merged.line_height = match line_height {
             LineHeightValue::Normal => merged.font_size * 1.2,
             LineHeightValue::Number(value) => merged.font_size * value,
@@ -844,10 +874,131 @@ fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
     if let Some(font_weight) = style.font_weight {
         merged.font_weight = font_weight;
     }
-    if let Some(font_family) = &style.font_family {
-        merged.font_family = FontFamily::Named(font_family.clone());
+    if let Some(font_families) = &style.font_families {
+        merged.font_families = font_families
+            .iter()
+            .map(|family| font_family(family))
+            .collect();
+    }
+    if let Some(font_style) = style.font_style {
+        merged.font_style = match font_style {
+            FontStyleValue::Normal => FontStyle::Normal,
+            FontStyleValue::Italic => FontStyle::Italic,
+            FontStyleValue::Oblique => FontStyle::Oblique,
+        };
+    }
+    if let Some(text_align) = style.text_align {
+        merged.text_align = match text_align {
+            TextAlignValue::Start => TextAlign::Start,
+            TextAlignValue::End => TextAlign::End,
+            TextAlignValue::Left => TextAlign::Left,
+            TextAlignValue::Right => TextAlign::Right,
+            TextAlignValue::Center => TextAlign::Center,
+            TextAlignValue::Justify => TextAlign::Justify,
+        };
+    }
+    if let Some(letter_spacing) = style.letter_spacing {
+        merged.letter_spacing = letter_spacing.px();
+    }
+    if let Some(word_spacing) = style.word_spacing {
+        merged.word_spacing = word_spacing.px();
+    }
+    if let Some(line) = style.text_decoration_line {
+        merged.text_decoration_line = text_decoration_line(line);
+    }
+    if let Some(color) = style.text_decoration_color {
+        merged.text_decoration_color = rgba(color);
+        merged.text_decoration_color_is_current = false;
+    }
+    if let Some(white_space) = style.white_space {
+        (merged.white_space, merged.wrap) = match white_space {
+            WhiteSpaceValue::Normal => (TextWhiteSpace::Collapse, TextWrap::Word),
+            WhiteSpaceValue::NoWrap => (TextWhiteSpace::Collapse, TextWrap::None),
+            WhiteSpaceValue::Pre => (TextWhiteSpace::Preserve, TextWrap::None),
+            WhiteSpaceValue::PreWrap => (TextWhiteSpace::Preserve, TextWrap::Word),
+            WhiteSpaceValue::PreLine => (TextWhiteSpace::CollapsePreserveNewlines, TextWrap::Word),
+            WhiteSpaceValue::BreakSpaces => (TextWhiteSpace::Preserve, TextWrap::Glyph),
+        };
+    }
+    if let Some(overflow_wrap) = style.overflow_wrap {
+        match overflow_wrap {
+            OverflowWrapValue::Normal => {}
+            OverflowWrapValue::BreakWord => merged.wrap = TextWrap::WordOrGlyph,
+            OverflowWrapValue::Anywhere => merged.wrap = TextWrap::Glyph,
+        }
+    }
+    if let Some(word_break) = style.word_break {
+        match word_break {
+            WordBreakValue::Normal | WordBreakValue::KeepAll => {}
+            WordBreakValue::BreakAll => merged.wrap = TextWrap::Glyph,
+        }
     }
     merged
+}
+
+fn font_family(family: &str) -> FontFamily {
+    match family.to_ascii_lowercase().as_str() {
+        "serif" => FontFamily::Serif,
+        "sans-serif" => FontFamily::SansSerif,
+        "monospace" => FontFamily::Monospace,
+        "cursive" => FontFamily::Cursive,
+        "fantasy" => FontFamily::Fantasy,
+        _ => FontFamily::Named(family.to_owned()),
+    }
+}
+
+fn text_decoration_line(value: TextDecorationLineValue) -> TextDecorationLine {
+    let mut result = TextDecorationLine::NONE;
+    for (source, target) in [
+        (
+            TextDecorationLineValue::UNDERLINE,
+            TextDecorationLine::UNDERLINE,
+        ),
+        (
+            TextDecorationLineValue::OVERLINE,
+            TextDecorationLine::OVERLINE,
+        ),
+        (
+            TextDecorationLineValue::LINE_THROUGH,
+            TextDecorationLine::LINE_THROUGH,
+        ),
+    ] {
+        if value.contains(source) {
+            result = result.union(target);
+        }
+    }
+    result
+}
+
+fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String {
+    match mode {
+        TextWhiteSpace::Preserve => text.to_owned(),
+        TextWhiteSpace::Collapse => collapse_white_space(text, false),
+        TextWhiteSpace::CollapsePreserveNewlines => collapse_white_space(text, true),
+    }
+}
+
+fn collapse_white_space(text: &str, preserve_newlines: bool) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character == '\n' && preserve_newlines {
+            while result.ends_with(' ') {
+                result.pop();
+            }
+            result.push('\n');
+            pending_space = false;
+        } else if character.is_whitespace() {
+            pending_space = !result.is_empty() && !result.ends_with('\n');
+        } else {
+            if pending_space {
+                result.push(' ');
+            }
+            result.push(character);
+            pending_space = false;
+        }
+    }
+    result
 }
 
 fn box_style(style: &ElementStyle, width: f32, height: f32) -> BoxStyle {
@@ -999,6 +1150,149 @@ mod tests {
 
         assert_eq!(small_text.width, items[1].width);
         assert!(small_text.height <= items[1].height);
+    }
+
+    #[test]
+    fn recomputes_normal_line_height_and_inherits_typography() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Text("styled text".into()));
+        document
+            .set_style(parent, "font-size", Some("30px"))
+            .unwrap();
+        document
+            .set_style(parent, "font-family", Some("Missing Face, serif"))
+            .unwrap();
+        document
+            .set_style(parent, "font-style", Some("oblique"))
+            .unwrap();
+        document
+            .set_style(parent, "text-align", Some("right"))
+            .unwrap();
+        document
+            .set_style(parent, "letter-spacing", Some("2px"))
+            .unwrap();
+        document
+            .set_style(parent, "word-spacing", Some("4px"))
+            .unwrap();
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, child, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let text = &layout.children()[0].children()[0];
+        let LayoutKind::Text { style, .. } = &text.kind else {
+            panic!("child should be text");
+        };
+
+        assert_eq!(style.font_size, 30.0);
+        assert_eq!(style.line_height, 36.0);
+        assert!(style.line_height_is_normal);
+        assert_eq!(
+            style.font_families,
+            vec![
+                FontFamily::Named("Missing Face".to_owned()),
+                FontFamily::Serif
+            ]
+        );
+        assert_eq!(style.font_style, FontStyle::Oblique);
+        assert_eq!(style.text_align, TextAlign::Right);
+        assert_eq!(style.letter_spacing, 2.0);
+        assert_eq!(style.word_spacing, 4.0);
+    }
+
+    #[test]
+    fn normalizes_text_according_to_white_space_and_wrapping_styles() {
+        let mut document = Document::new();
+        let normal_box = document.create_node(ElementKind::Div);
+        let pre_box = document.create_node(ElementKind::Div);
+        let anywhere_box = document.create_node(ElementKind::Div);
+        let normal = document.create_node(ElementKind::Text("  a \n  b  ".into()));
+        let pre = document.create_node(ElementKind::Text("  a \n  b  ".into()));
+        let anywhere = document.create_node(ElementKind::Text("abcdefghij".into()));
+        document
+            .set_style(pre_box, "white-space", Some("pre"))
+            .unwrap();
+        document
+            .set_style(anywhere_box, "overflow-wrap", Some("anywhere"))
+            .unwrap();
+        document.insert(BODY_ID, normal_box, None).unwrap();
+        document.insert(BODY_ID, pre_box, None).unwrap();
+        document.insert(BODY_ID, anywhere_box, None).unwrap();
+        document.insert(normal_box, normal, None).unwrap();
+        document.insert(pre_box, pre, None).unwrap();
+        document.insert(anywhere_box, anywhere, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let children = layout.children();
+        let LayoutKind::Text { text, style, .. } = &children[0].children()[0].kind else {
+            panic!("normal should be text");
+        };
+        assert_eq!(text, "a b");
+        assert_eq!(style.wrap, TextWrap::Word);
+        let LayoutKind::Text { text, style, .. } = &children[1].children()[0].kind else {
+            panic!("pre should be text");
+        };
+        assert_eq!(text, "  a \n  b  ");
+        assert_eq!(style.wrap, TextWrap::None);
+        let LayoutKind::Text { style, .. } = &children[2].children()[0].kind else {
+            panic!("anywhere should be text");
+        };
+        assert_eq!(style.wrap, TextWrap::Glyph);
+    }
+
+    #[test]
+    fn propagates_glyphon_baselines_for_flex_alignment() {
+        let mut document = Document::new();
+        let row = document.create_node(ElementKind::Div);
+        let small_box = document.create_node(ElementKind::Div);
+        let large_box = document.create_node(ElementKind::Div);
+        let small = document.create_node(ElementKind::Text("small".into()));
+        let large = document.create_node(ElementKind::Text("large".into()));
+        document.set_style(row, "display", Some("flex")).unwrap();
+        document
+            .set_style(row, "align-items", Some("baseline"))
+            .unwrap();
+        document
+            .set_style(small_box, "font-size", Some("12px"))
+            .unwrap();
+        document
+            .set_style(large_box, "font-size", Some("32px"))
+            .unwrap();
+        document.insert(BODY_ID, row, None).unwrap();
+        document.insert(row, small_box, None).unwrap();
+        document.insert(row, large_box, None).unwrap();
+        document.insert(small_box, small, None).unwrap();
+        document.insert(large_box, large, None).unwrap();
+
+        let mut text_system = TextSystem::new();
+        let layout = compute_layout(&document, 300.0, 100.0, &mut text_system);
+        let children = layout.children()[0].children();
+        let small_layout = &children[0].children()[0];
+        let large_layout = &children[1].children()[0];
+        let LayoutKind::Text {
+            text: small_text,
+            style: small_style,
+            ..
+        } = &small_layout.kind
+        else {
+            panic!("small should be text");
+        };
+        let LayoutKind::Text {
+            text: large_text,
+            style: large_style,
+            ..
+        } = &large_layout.kind
+        else {
+            panic!("large should be text");
+        };
+        let small_baseline = text_system
+            .measure(small_text, small_style, TextConstraints::UNCONSTRAINED)
+            .first_baseline;
+        let large_baseline = text_system
+            .measure(large_text, large_style, TextConstraints::UNCONSTRAINED)
+            .first_baseline;
+
+        assert!((small_layout.y + small_baseline - large_layout.y - large_baseline).abs() < 0.01);
     }
 
     #[test]
