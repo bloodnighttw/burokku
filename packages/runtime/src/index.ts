@@ -1,5 +1,5 @@
 export type BurokkuStyle = Partial<{
-  display: "block" | "flex" | "none";
+  display: "block" | "flex" | "grid" | "none";
   overflow: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowX: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowY: "visible" | "hidden" | "clip" | "auto" | "scroll";
@@ -13,6 +13,10 @@ export type BurokkuStyle = Partial<{
   flexGrow: number;
   flexShrink: number;
   gap: number | string;
+  gridTemplateColumns: string;
+  gridTemplateRows: string;
+  gridColumn: string;
+  gridRow: string;
   padding: number | string;
   margin: number | string;
   backgroundColor: string;
