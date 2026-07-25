@@ -16,10 +16,17 @@
 
 ## Layout
 
+<<<<<<< HEAD
 <!--- [ ] Add inline formatting for `span` and other inline elements.-->
 <!--- [ ] Preserve inline participation for `inline-flex` and `inline-grid`.-->
 - [x] Add grid templates, explicit and implicit track sizing, placement, and auto-flow properties.
 - [x] Add the `flex` shorthand and `order`.
+=======
+<!--<!--- [ ] Add inline formatting for `span` and other inline elements.-->
+<!--- [ ] Preserve inline participation for `inline-flex` and `inline-grid`.-->-->
+- [ ] Add grid templates, explicit and implicit track sizing, placement, and auto-flow properties.
+- [ ] Add the `flex` shorthand and `order`.
+>>>>>>> main
 <!--- [ ] Add logical box properties such as `padding-inline`, `margin-block`, and logical insets.-->
 
 ## Typography

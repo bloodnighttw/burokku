@@ -245,4 +245,8 @@ function App() {
 document.body.style.overflowY = "auto";
 document.body.style.overflowX = "auto";
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> main
 createRoot(document.body).render(<App />);
