@@ -419,6 +419,103 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn paints_dotted_borders_as_round_dots() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 48),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        let hidden = BorderSide::new(0.0, Color::TRANSPARENT, BorderStyle::None);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 32.0),
+            BoxStyle {
+                background: Color::WHITE,
+                border: Some(Border::sides(
+                    BorderSide::new(8.0, Color::BLACK, BorderStyle::Dotted),
+                    hidden,
+                    hidden,
+                    hidden,
+                )),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 48),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen dotted border render");
+
+        let dot_center = image.pixel(16, 12).expect("dot center");
+        assert!(
+            dot_center[0] < 40 && dot_center[1] < 40 && dot_center[2] < 40,
+            "the center of a dotted-border mark should be painted"
+        );
+        let outside_round_dot = image.pixel(20, 15).expect("outside round dot");
+        assert!(
+            outside_round_dot[0] > 220 && outside_round_dot[1] > 220 && outside_round_dot[2] > 220,
+            "a dotted-border mark should have round rather than rectangular corners"
+        );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn double_border_lines_follow_rounded_corners() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        let double = BorderSide::new(9.0, Color::BLACK, BorderStyle::Double);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::WHITE,
+                corner_radius: CornerRadius::all(16.0),
+                border: Some(Border::sides(double, double, double, double)),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen rounded double border render");
+
+        let outer_line = image.pixel(13, 13).expect("outer curved line");
+        assert!(
+            outer_line[0] < 80 && outer_line[1] < 80 && outer_line[2] < 80,
+            "the outer double-border line should follow the corner curve"
+        );
+        let curved_gap = image.pixel(15, 15).expect("curved double-border gap");
+        assert!(
+            curved_gap[0] > 200 && curved_gap[1] > 200 && curved_gap[2] > 200,
+            "the gap between double-border lines should follow the corner curve"
+        );
+        let inner_line = image.pixel(18, 18).expect("inner curved line");
+        assert!(
+            inner_line[0] < 120 && inner_line[1] < 120 && inner_line[2] < 120,
+            "the inner double-border line should follow the corner curve"
+        );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn paints_elliptical_corner_radii() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {

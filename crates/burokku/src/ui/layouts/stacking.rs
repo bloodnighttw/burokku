@@ -34,10 +34,6 @@ impl StackingLayer {
         self.z_index.is_some() || self.isolated
     }
 
-    /// Compatibility alias for [`Self::establishes_context`].
-    pub const fn creates_context(self) -> bool {
-        self.establishes_context()
-    }
 
     pub const fn index(self) -> i32 {
         match self.z_index {

@@ -1,5 +1,10 @@
 export type BurokkuStyle = Partial<{
   display: "block" | "flex" | "none";
+  position: "static" | "relative" | "absolute" | "fixed";
+  top: number | string;
+  right: number | string;
+  bottom: number | string;
+  left: number | string;
   overflow: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowX: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowY: "visible" | "hidden" | "clip" | "auto" | "scroll";
@@ -18,8 +23,35 @@ export type BurokkuStyle = Partial<{
   backgroundColor: string;
   color: string;
   borderColor: string;
+  borderTopColor: string;
+  borderRightColor: string;
+  borderBottomColor: string;
+  borderLeftColor: string;
   borderWidth: number | string;
+  borderTopWidth: number | string;
+  borderRightWidth: number | string;
+  borderBottomWidth: number | string;
+  borderLeftWidth: number | string;
+  borderStyle:
+    | "none"
+    | "hidden"
+    | "dotted"
+    | "dashed"
+    | "solid"
+    | "double"
+    | "groove"
+    | "ridge"
+    | "inset"
+    | "outset";
+  borderTopStyle: BurokkuStyle["borderStyle"];
+  borderRightStyle: BurokkuStyle["borderStyle"];
+  borderBottomStyle: BurokkuStyle["borderStyle"];
+  borderLeftStyle: BurokkuStyle["borderStyle"];
   borderRadius: number | string;
+  borderTopLeftRadius: number | string;
+  borderTopRightRadius: number | string;
+  borderBottomRightRadius: number | string;
+  borderBottomLeftRadius: number | string;
   outlineColor: string;
   outlineWidth: number | string;
   outlineOffset: number | string;

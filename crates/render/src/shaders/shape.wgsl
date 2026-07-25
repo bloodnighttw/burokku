@@ -190,25 +190,180 @@ fn side_depth(position: vec2<f32>, half_size: vec2<f32>, side: u32) -> f32 {
     return position.x + half_size.x;
 }
 
-fn border_pattern(style: u32, side: u32, position: vec2<f32>, width: f32, depth: f32) -> f32 {
+fn ellipse_speed(radius: vec2<f32>, angle: f32) -> f32 {
+    let sine = sin(angle);
+    let cosine = cos(angle);
+    return length(vec2(radius.x * sine, radius.y * cosine));
+}
+
+fn ellipse_arc_length(radius: vec2<f32>, start: f32, end: f32) -> f32 {
+    if radius.x <= 0.0 || radius.y <= 0.0 || end <= start {
+        return 0.0;
+    }
+    let midpoint = (start + end) * 0.5;
+    return (end - start) * (
+        ellipse_speed(radius, start)
+        + 4.0 * ellipse_speed(radius, midpoint)
+        + ellipse_speed(radius, end)
+    ) / 6.0;
+}
+
+fn ellipse_angle(position: vec2<f32>, center: vec2<f32>, radius: vec2<f32>) -> f32 {
+    let safe_radius = max(radius, vec2(0.0001));
+    let direction = (position - center) / safe_radius;
+    return atan2(direction.y, direction.x);
+}
+
+fn border_path_coordinate(
+    position: vec2<f32>,
+    half_size: vec2<f32>,
+    radii_x: vec4<f32>,
+    radii_y: vec4<f32>,
+    side: u32,
+) -> f32 {
+    let pi = 3.14159265359;
+    let top_left_radius = vec2(radii_x.x, radii_y.x);
+    let top_right_radius = vec2(radii_x.y, radii_y.y);
+    let bottom_right_radius = vec2(radii_x.z, radii_y.z);
+    let bottom_left_radius = vec2(radii_x.w, radii_y.w);
+    let top_left_center = vec2(
+        -half_size.x + top_left_radius.x,
+        -half_size.y + top_left_radius.y,
+    );
+    let top_right_center = vec2(
+        half_size.x - top_right_radius.x,
+        -half_size.y + top_right_radius.y,
+    );
+    let bottom_right_center = vec2(
+        half_size.x - bottom_right_radius.x,
+        half_size.y - bottom_right_radius.y,
+    );
+    let bottom_left_center = vec2(
+        -half_size.x + bottom_left_radius.x,
+        half_size.y - bottom_left_radius.y,
+    );
+
+    if side == 0u {
+        if position.x < top_left_center.x {
+            let angle = clamp(
+                ellipse_angle(position, top_left_center, top_left_radius),
+                -pi,
+                -pi * 0.5,
+            );
+            return -ellipse_arc_length(top_left_radius, angle, -pi * 0.5);
+        }
+        let straight_length = max(top_right_center.x - top_left_center.x, 0.0);
+        if position.x > top_right_center.x {
+            let angle = clamp(
+                ellipse_angle(position, top_right_center, top_right_radius),
+                -pi * 0.5,
+                0.0,
+            );
+            return straight_length
+                + ellipse_arc_length(top_right_radius, -pi * 0.5, angle);
+        }
+        return position.x - top_left_center.x;
+    }
+
+    if side == 1u {
+        if position.y < top_right_center.y {
+            let angle = clamp(
+                ellipse_angle(position, top_right_center, top_right_radius),
+                -pi * 0.5,
+                0.0,
+            );
+            return ellipse_arc_length(top_right_radius, -pi * 0.5, angle);
+        }
+        let top_arc = ellipse_arc_length(top_right_radius, -pi * 0.5, 0.0);
+        let straight_length = max(bottom_right_center.y - top_right_center.y, 0.0);
+        if position.y > bottom_right_center.y {
+            let angle = clamp(
+                ellipse_angle(position, bottom_right_center, bottom_right_radius),
+                0.0,
+                pi * 0.5,
+            );
+            return top_arc + straight_length
+                + ellipse_arc_length(bottom_right_radius, 0.0, angle);
+        }
+        return top_arc + position.y - top_right_center.y;
+    }
+
+    if side == 2u {
+        if position.x < bottom_left_center.x {
+            let angle = clamp(
+                ellipse_angle(position, bottom_left_center, bottom_left_radius),
+                pi * 0.5,
+                pi,
+            );
+            return -ellipse_arc_length(bottom_left_radius, pi * 0.5, angle);
+        }
+        let straight_length = max(bottom_right_center.x - bottom_left_center.x, 0.0);
+        if position.x > bottom_right_center.x {
+            let angle = clamp(
+                ellipse_angle(position, bottom_right_center, bottom_right_radius),
+                0.0,
+                pi * 0.5,
+            );
+            return straight_length
+                + ellipse_arc_length(bottom_right_radius, angle, pi * 0.5);
+        }
+        return position.x - bottom_left_center.x;
+    }
+
+    if position.y < top_left_center.y {
+        let angle = clamp(
+            ellipse_angle(position, top_left_center, top_left_radius),
+            -pi,
+            -pi * 0.5,
+        );
+        return -ellipse_arc_length(top_left_radius, -pi, angle);
+    }
+    let straight_length = max(bottom_left_center.y - top_left_center.y, 0.0);
+    if position.y > bottom_left_center.y {
+        let angle = clamp(
+            ellipse_angle(position, bottom_left_center, bottom_left_radius),
+            pi * 0.5,
+            pi,
+        );
+        return straight_length + ellipse_arc_length(bottom_left_radius, angle, pi);
+    }
+    return position.y - top_left_center.y;
+}
+
+fn border_pattern(style: u32, along: f32, width: f32, depth_fraction: f32) -> f32 {
     if style <= 1u {
         return 0.0;
     }
-    let along = select(position.y, position.x, side == 0u || side == 2u);
     if style == 2u {
-        return select(0.0, 1.0, fract(along / max(width * 2.0, 1.0)) < 0.5);
+        let period = max(width * 2.0, 1.0);
+        let tangent_distance = abs(fract(along / period) - 0.5) * period;
+        let normal_distance = (depth_fraction - 0.5) * width;
+        let distance = length(vec2(tangent_distance, normal_distance)) - width * 0.5;
+        return 1.0 - smoothstep(-0.75, 0.75, distance);
     }
     if style == 3u {
-        return select(0.0, 1.0, fract(along / max(width * 5.0, 1.0)) < 0.6);
+        let period = max(width * 5.0, 1.0);
+        let dash_length = period * 0.6;
+        let distance = abs(fract(along / period) - 0.5) * period - dash_length * 0.5;
+        return 1.0 - smoothstep(-0.75, 0.75, distance);
     }
     if style == 5u {
-        let fraction = depth / max(width, 0.0001);
-        return select(0.0, 1.0, fraction <= 0.333 || fraction >= 0.667);
+        let distance = min(
+            abs(depth_fraction - 1.0 / 6.0),
+            abs(depth_fraction - 5.0 / 6.0),
+        ) - 1.0 / 6.0;
+        let antialias = 0.75 / max(width, 1.0);
+        return 1.0 - smoothstep(-antialias, antialias, distance);
     }
     return 1.0;
 }
 
-fn styled_border_color(color: vec4<f32>, style: u32, side: u32, depth: f32, width: f32) -> vec4<f32> {
+fn styled_border_color(
+    color: vec4<f32>,
+    style: u32,
+    side: u32,
+    depth_fraction: f32,
+) -> vec4<f32> {
     var shade = 1.0;
     let upper_or_left = side == 0u || side == 3u;
     if style == 8u {
@@ -216,7 +371,7 @@ fn styled_border_color(color: vec4<f32>, style: u32, side: u32, depth: f32, widt
     } else if style == 9u {
         shade = select(0.65, 1.25, upper_or_left);
     } else if style == 6u || style == 7u {
-        let outer_half = depth < width * 0.5;
+        let outer_half = depth_fraction < 0.5;
         let dark = select(upper_or_left == outer_half, upper_or_left != outer_half, style == 7u);
         shade = select(1.25, 0.65, dark);
     }
@@ -313,14 +468,33 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
     let inner_coverage = 1.0 - smoothstep(-antialias, antialias, inner_distance);
     var base_color = input.background;
-    if any(border_widths > vec4(0.0)) {
+    let border_coverage = 1.0 - inner_coverage;
+    if any(border_widths > vec4(0.0)) && border_coverage > 0.0001 {
         let side = border_side_index(input.local_position, input.half_size, border_widths);
         let width = side_width(border_widths, side);
-        let depth = side_depth(input.local_position, input.half_size, side);
+        let axis_depth = side_depth(input.local_position, input.half_size, side);
+        let outer_depth = max(-base_distance, 0.0);
+        let inner_depth = max(inner_distance, 0.0);
+        let curved_thickness = outer_depth + inner_depth;
+        let depth_fraction = select(
+            clamp(axis_depth / max(width, 0.0001), 0.0, 1.0),
+            clamp(outer_depth / curved_thickness, 0.0, 1.0),
+            curved_thickness > 0.0001,
+        );
         let style = side_style(input.border_styles, side);
-        let pattern = border_pattern(style, side, input.local_position, width, depth);
-        var color = styled_border_color(side_color(input, side), style, side, depth, width);
-        color.a *= (1.0 - inner_coverage) * pattern;
+        var along = 0.0;
+        if style == 2u || style == 3u {
+            along = border_path_coordinate(
+                input.local_position,
+                input.half_size,
+                input.radii_x,
+                input.radii_y,
+                side,
+            );
+        }
+        let pattern = border_pattern(style, along, width, depth_fraction);
+        var color = styled_border_color(side_color(input, side), style, side, depth_fraction);
+        color.a *= border_coverage * pattern;
         base_color = composite_over(color, input.background);
     }
     base_color.a *= base_coverage;
