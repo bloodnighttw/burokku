@@ -206,7 +206,10 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Border, BoxStyle, Clip, Color, CornerRadius, Outline, Rect, TextStyle};
+    use crate::{
+        Border, BorderSide, BorderStyle, BoxStyle, Clip, Color, CornerRadius, CornerSize, Outline,
+        Rect, TextStyle,
+    };
 
     #[tokio::test(flavor = "current_thread")]
     async fn renders_box_border_outline_text_and_readback() {
@@ -298,6 +301,257 @@ mod tests {
         .expect("cached text test render");
         assert_eq!(cached_text_image.pixels, text_image.pixels);
 
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paints_each_border_side_at_its_own_width() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                border: Some(Border::per_side(4.0, 8.0, 12.0, 16.0, Color::BLACK)),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen per-side border render");
+        let is_border = |x, y| {
+            let pixel = image.pixel(x, y).expect("sample in image");
+            pixel[0] < 60 && pixel[1] < 60 && pixel[2] < 60 && pixel[3] > 200
+        };
+        let is_background = |x, y| {
+            let pixel = image.pixel(x, y).expect("sample in image");
+            pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 90 && pixel[3] > 200
+        };
+
+        assert!(is_border(32, 10), "top border should be four pixels wide");
+        assert!(
+            is_background(32, 14),
+            "top border should stop after four pixels"
+        );
+        assert!(
+            is_border(52, 32),
+            "right border should be eight pixels wide"
+        );
+        assert!(
+            is_background(46, 32),
+            "right border should stop after eight pixels"
+        );
+        assert!(
+            is_border(32, 50),
+            "bottom border should be twelve pixels wide"
+        );
+        assert!(
+            is_background(32, 42),
+            "bottom border should stop after twelve pixels"
+        );
+        assert!(
+            is_border(12, 32),
+            "left border should be sixteen pixels wide"
+        );
+        assert!(
+            is_background(26, 32),
+            "left border should stop after sixteen pixels"
+        );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paints_per_side_border_colors_and_line_styles() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::WHITE,
+                border: Some(Border::sides(
+                    BorderSide::new(8.0, Color::from_rgba8(255, 0, 0, 255), BorderStyle::Dashed),
+                    BorderSide::new(8.0, Color::from_rgba8(0, 255, 0, 255), BorderStyle::Solid),
+                    BorderSide::new(8.0, Color::from_rgba8(0, 0, 255, 255), BorderStyle::Double),
+                    BorderSide::new(8.0, Color::BLACK, BorderStyle::Dotted),
+                )),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen per-side border style render");
+
+        let top_dash = image.pixel(32, 10).expect("top dash");
+        assert!(top_dash[0] > 200 && top_dash[1] < 60 && top_dash[2] < 60);
+        assert_eq!(image.pixel(48, 10), Some([255, 255, 255, 255]));
+        let right = image.pixel(52, 32).expect("right border");
+        assert!(right[1] > 200 && right[0] < 60 && right[2] < 60);
+        let bottom_outer = image.pixel(32, 54).expect("double outer line");
+        assert!(bottom_outer[2] > 200 && bottom_outer[0] < 60);
+        assert_eq!(image.pixel(32, 51), Some([255, 255, 255, 255]));
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paints_dotted_borders_as_round_dots() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 48),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        let hidden = BorderSide::new(0.0, Color::TRANSPARENT, BorderStyle::None);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 32.0),
+            BoxStyle {
+                background: Color::WHITE,
+                border: Some(Border::sides(
+                    BorderSide::new(8.0, Color::BLACK, BorderStyle::Dotted),
+                    hidden,
+                    hidden,
+                    hidden,
+                )),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 48),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen dotted border render");
+
+        let dot_center = image.pixel(16, 12).expect("dot center");
+        assert!(
+            dot_center[0] < 40 && dot_center[1] < 40 && dot_center[2] < 40,
+            "the center of a dotted-border mark should be painted"
+        );
+        let outside_round_dot = image.pixel(20, 15).expect("outside round dot");
+        assert!(
+            outside_round_dot[0] > 220 && outside_round_dot[1] > 220 && outside_round_dot[2] > 220,
+            "a dotted-border mark should have round rather than rectangular corners"
+        );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn double_border_lines_follow_rounded_corners() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        let double = BorderSide::new(9.0, Color::BLACK, BorderStyle::Double);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            BoxStyle {
+                background: Color::WHITE,
+                corner_radius: CornerRadius::all(16.0),
+                border: Some(Border::sides(double, double, double, double)),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen rounded double border render");
+
+        let outer_line = image.pixel(13, 13).expect("outer curved line");
+        assert!(
+            outer_line[0] < 80 && outer_line[1] < 80 && outer_line[2] < 80,
+            "the outer double-border line should follow the corner curve"
+        );
+        let curved_gap = image.pixel(15, 15).expect("curved double-border gap");
+        assert!(
+            curved_gap[0] > 200 && curved_gap[1] > 200 && curved_gap[2] > 200,
+            "the gap between double-border lines should follow the corner curve"
+        );
+        let inner_line = image.pixel(18, 18).expect("inner curved line");
+        assert!(
+            inner_line[0] < 120 && inner_line[1] < 120 && inner_line[2] < 120,
+            "the inner double-border line should follow the corner curve"
+        );
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paints_elliptical_corner_radii() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box(
+            Rect::new(8.0, 8.0, 48.0, 32.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                corner_radius: CornerRadius::elliptical(
+                    CornerSize::new(20.0, 6.0),
+                    CornerSize::ZERO,
+                    CornerSize::ZERO,
+                    CornerSize::ZERO,
+                ),
+                ..BoxStyle::default()
+            },
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut TextSystem::new(),
+        )
+        .expect("off-screen elliptical corner render");
+
+        assert_eq!(image.pixel(10, 10), Some([255, 255, 255, 255]));
+        let inside = image.pixel(10, 14).expect("inside ellipse");
+        assert!(inside[0] > 180 && inside[1] < 80 && inside[2] < 90);
         drop(adapter);
     }
 

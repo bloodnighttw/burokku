@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect, TextStyle, TextSystem,
+    Border, BorderSide, BoxStyle, Canvas, Clip, Color, CornerRadius, CornerSize, Outline, Rect,
+    TextStyle, TextSystem,
 };
 
 use super::{
@@ -212,11 +213,11 @@ fn scaled_rect(rect: Rect, scale_factor: f32) -> Rect {
 fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
     Clip::new(
         scaled_rect(clip.rect, scale_factor),
-        CornerRadius::new(
-            clip.corner_radius.top_left * scale_factor,
-            clip.corner_radius.top_right * scale_factor,
-            clip.corner_radius.bottom_right * scale_factor,
-            clip.corner_radius.bottom_left * scale_factor,
+        CornerRadius::elliptical(
+            scaled_corner(clip.corner_radius.top_left, scale_factor),
+            scaled_corner(clip.corner_radius.top_right, scale_factor),
+            scaled_corner(clip.corner_radius.bottom_right, scale_factor),
+            scaled_corner(clip.corner_radius.bottom_left, scale_factor),
         ),
     )
 }
@@ -224,15 +225,20 @@ fn scaled_clip(clip: Clip, scale_factor: f32) -> Clip {
 fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
     BoxStyle {
         background: style.background,
-        corner_radius: CornerRadius::new(
-            style.corner_radius.top_left * scale_factor,
-            style.corner_radius.top_right * scale_factor,
-            style.corner_radius.bottom_right * scale_factor,
-            style.corner_radius.bottom_left * scale_factor,
+        corner_radius: CornerRadius::elliptical(
+            scaled_corner(style.corner_radius.top_left, scale_factor),
+            scaled_corner(style.corner_radius.top_right, scale_factor),
+            scaled_corner(style.corner_radius.bottom_right, scale_factor),
+            scaled_corner(style.corner_radius.bottom_left, scale_factor),
         ),
-        border: style
-            .border
-            .map(|border| Border::new(border.width * scale_factor, border.color)),
+        border: style.border.map(|border| {
+            Border::sides(
+                scaled_border_side(border.top, scale_factor),
+                scaled_border_side(border.right, scale_factor),
+                scaled_border_side(border.bottom, scale_factor),
+                scaled_border_side(border.left, scale_factor),
+            )
+        }),
         outline: style.outline.map(|outline| {
             Outline::new(
                 outline.width * scale_factor,
@@ -241,6 +247,14 @@ fn scaled_box_style(style: BoxStyle, scale_factor: f32) -> BoxStyle {
             )
         }),
     }
+}
+
+fn scaled_corner(corner: CornerSize, scale_factor: f32) -> CornerSize {
+    CornerSize::new(corner.x * scale_factor, corner.y * scale_factor)
+}
+
+fn scaled_border_side(side: BorderSide, scale_factor: f32) -> BorderSide {
+    BorderSide::new(side.width * scale_factor, side.color, side.style)
 }
 
 fn scaled_text_style(style: &TextStyle, scale_factor: f32) -> TextStyle {
@@ -297,7 +311,10 @@ mod tests {
         document.set_style(card, "width", Some("100px")).unwrap();
         document.set_style(card, "height", Some("50px")).unwrap();
         document
-            .set_style(card, "border-width", Some("2px"))
+            .set_style(card, "border-width", Some("1px 2px 3px 4px"))
+            .unwrap();
+        document
+            .set_style(card, "border-style", Some("solid"))
             .unwrap();
         document
             .set_style(card, "border-radius", Some("4px"))
@@ -309,9 +326,9 @@ mod tests {
             panic!("card should produce a box command");
         };
 
-        assert_eq!((rect.width, rect.height), (208.0, 108.0));
-        assert_eq!(style.border.expect("border").width, 4.0);
-        assert_eq!(style.corner_radius.top_left, 8.0);
+        assert_eq!((rect.width, rect.height), (212.0, 108.0));
+        assert_eq!(style.border.expect("border").widths(), [2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(style.corner_radius.top_left, CornerSize::all(8.0));
     }
 
     #[test]
@@ -380,6 +397,9 @@ mod tests {
                 .unwrap();
             document
                 .set_style(container, "border-width", Some("2px"))
+                .unwrap();
+            document
+                .set_style(container, "border-style", Some("solid"))
                 .unwrap();
             document
                 .set_style(container, "border-radius", Some("12px"))

@@ -1,5 +1,31 @@
 use super::measurement::{Auto, Percent, Px};
 
+/// The supported values of CSS `position`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Position {
+    #[default]
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
+/// The supported CSS border line styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum BorderStyle {
+    #[default]
+    None,
+    Hidden,
+    Dotted,
+    Dashed,
+    Solid,
+    Double,
+    Groove,
+    Ridge,
+    Inset,
+    Outset,
+}
+
 /// The supported forms of CSS overflow, preserving `auto` versus `scroll`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Overflow {
@@ -69,6 +95,40 @@ impl LengthPercentageValue {
 }
 
 impl Default for LengthPercentageValue {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+/// The horizontal and vertical radius of one box corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CornerRadiusValue {
+    pub(crate) horizontal: LengthPercentageValue,
+    pub(crate) vertical: LengthPercentageValue,
+}
+
+impl CornerRadiusValue {
+    pub(crate) const ZERO: Self = Self::all(LengthPercentageValue::ZERO);
+
+    pub(crate) const fn all(value: LengthPercentageValue) -> Self {
+        Self {
+            horizontal: value,
+            vertical: value,
+        }
+    }
+
+    pub(crate) const fn new(
+        horizontal: LengthPercentageValue,
+        vertical: LengthPercentageValue,
+    ) -> Self {
+        Self {
+            horizontal,
+            vertical,
+        }
+    }
+}
+
+impl Default for CornerRadiusValue {
     fn default() -> Self {
         Self::ZERO
     }

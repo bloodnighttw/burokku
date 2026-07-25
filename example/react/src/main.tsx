@@ -14,6 +14,7 @@ function ScrollablePanel() {
         backgroundColor: "#eef2f7",
         borderColor: "#c5cfdd",
         borderWidth: 2,
+        borderStyle: "solid",
         borderRadius: 12,
       }}
     >
@@ -50,6 +51,111 @@ function ScrollablePanel() {
   );
 }
 
+function BorderPositioningPanel() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        padding: 14,
+        gap: 10,
+        backgroundColor: "#ffffff",
+        borderColor: "#dce1e8",
+        borderWidth: 1,
+        borderStyle: "solid",
+        borderRadius: 12,
+      }}
+    >
+      <span style={{ color: "#18202b", fontSize: 16, lineHeight: "22px", fontWeight: 700 }}>
+        Borders & positioning
+      </span>
+      <span style={{ color: "#526071", fontSize: 12, lineHeight: "18px" }}>
+        Per-side borders, elliptical radii, and all four position modes
+      </span>
+      <div
+        style={{
+          height: 72,
+          padding: 12,
+          backgroundColor: "#f8fbff",
+          borderTopWidth: 3,
+          borderRightWidth: 7,
+          borderBottomWidth: 5,
+          borderLeftWidth: 10,
+          borderTopColor: "#ef476f",
+          borderRightColor: "#118ab2",
+          borderBottomColor: "#06d6a0",
+          borderLeftColor: "#8338ec",
+          borderTopStyle: "dashed",
+          borderRightStyle: "double",
+          borderBottomStyle: "dotted",
+          borderLeftStyle: "solid",
+          borderRadius: "28px 10px / 12px 30px",
+        }}
+      >
+        <span style={{ color: "#263246", fontSize: 13, lineHeight: "18px", fontWeight: 700 }}>
+          Four independent border sides
+        </span>
+      </div>
+      <div
+        style={{
+          position: "relative",
+          height: 104,
+          padding: 12,
+          backgroundColor: "#edf2ff",
+          borderRadius: 12,
+        }}
+      >
+        <span style={{ position: "static", color: "#526071", fontSize: 12, lineHeight: "18px" }}>
+          static flow
+        </span>
+        <span
+          style={{
+            position: "relative",
+            left: 22,
+            top: 12,
+            color: "#3158aa",
+            fontSize: 14,
+            lineHeight: "18px",
+            fontWeight: 700,
+          }}
+        >
+          relative offset
+        </span>
+        <span
+          style={{
+            position: "absolute",
+            right: 10,
+            bottom: 8,
+            padding: 6,
+            backgroundColor: "#3158aa",
+            color: "#ffffff",
+            borderRadius: 7,
+            fontSize: 11,
+            lineHeight: "16px",
+          }}
+        >
+          absolute
+        </span>
+      </div>
+      <span
+        style={{
+          position: "fixed",
+          top: 10,
+          right: 12,
+          padding: "5px 9px",
+          backgroundColor: "#172033",
+          color: "#ffffff",
+          borderRadius: 8,
+          fontSize: 11,
+          lineHeight: "16px",
+        }}
+      >
+        fixed to viewport
+      </span>
+    </div>
+  );
+}
+
 function App() {
   const [remaining, setRemaining] = useState(10);
 
@@ -78,6 +184,7 @@ function App() {
         backgroundColor: "#f5f7fa",
         borderColor: "#cbd2dc",
         borderWidth: 1,
+        borderStyle: "solid",
         borderRadius: 16,
       }}
     >
@@ -95,6 +202,7 @@ function App() {
           backgroundColor: "#ffffff",
           borderColor: "#dce1e8",
           borderWidth: 1,
+          borderStyle: "solid",
           borderRadius: 12,
         }}
       >
@@ -114,6 +222,7 @@ function App() {
           backgroundColor: "#ffffff",
           borderColor: "#dce1e8",
           borderWidth: 1,
+          borderStyle: "solid",
           borderRadius: 12,
         }}
       >
@@ -122,6 +231,7 @@ function App() {
         </span>
         <ScrollablePanel />
       </div>
+      <BorderPositioningPanel />
     </div>
   );
 }
