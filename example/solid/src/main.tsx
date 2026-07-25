@@ -151,6 +151,144 @@ function ExampleCard(props: { title: string; children: JSX.Element }) {
   );
 }
 
+function TypographyExamples() {
+  const panelStyle = {
+    display: "flex",
+    "flex-direction": "column",
+    width: "0px",
+    "min-width": "0px",
+    padding: "14px",
+    gap: "8px",
+    "flex-grow": 1,
+    "background-color": "#ffffff",
+    "border-color": "#dce1e8",
+    "border-width": "1px",
+    "border-radius": "12px",
+  } as const;
+
+  const labelStyle = {
+    color: "#526071",
+    "font-size": "13px",
+    "line-height": "18px",
+    "font-weight": 700,
+    "letter-spacing": "0.8px",
+  } as const;
+
+  return (
+    <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
+      <span
+        style={{
+          color: "#18202b",
+          "font-size": "20px",
+          "line-height": "26px",
+          "font-weight": 700,
+          "letter-spacing": "-0.3px",
+        }}
+      >
+        Typography
+      </span>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <div style={panelStyle}>
+          <span style={labelStyle}>FONT STACK · STYLE · SPACING</span>
+          <span
+            style={{
+              color: "#312e81",
+              "font-family": '"Charter", Georgia, serif',
+              "font-size": "22px",
+              "line-height": "30px",
+              "font-style": "italic",
+              "letter-spacing": "1px",
+              "word-spacing": "5px",
+            }}
+          >
+            Fallback fonts stay expressive.
+          </span>
+          <span
+            style={{
+              color: "#475569",
+              "font-family": '"JetBrains Mono", monospace',
+              "font-size": "13px",
+              "line-height": "19px",
+            }}
+          >
+            "JetBrains Mono", monospace
+          </span>
+        </div>
+        <div style={panelStyle}>
+          <span style={labelStyle}>ALIGNMENT · DECORATION</span>
+          <div
+            style={{
+              width: "100%",
+              color: "#0f766e",
+              "font-size": "17px",
+              "line-height": "25px",
+              "font-weight": 700,
+              "text-align": "center",
+              "text-decoration": "underline overline #14b8a6",
+            }}
+          >
+            Centered, underlined, overlined
+          </div>
+          <div
+            style={{
+              width: "100%",
+              color: "#7c2d12",
+              "font-size": "15px",
+              "line-height": "23px",
+              "text-align": "right",
+              "text-decoration-line": "line-through",
+              "text-decoration-color": "#fb923c",
+            }}
+          >
+            Right aligned with a custom color
+          </div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <div style={panelStyle}>
+          <span style={labelStyle}>WHITE-SPACE: PRE-WRAP</span>
+          <span
+            style={{
+              color: "#334155",
+              "font-family": "monospace",
+              "font-size": "14px",
+              "line-height": "21px",
+              "white-space": "pre-wrap",
+            }}
+          >
+            {"spaces   remain\nline breaks remain too"}
+          </span>
+        </div>
+        <div style={panelStyle}>
+          <span style={labelStyle}>OVERFLOW-WRAP · WORD-BREAK</span>
+          <span
+            style={{
+              width: "100%",
+              color: "#334155",
+              "font-size": "14px",
+              "line-height": "20px",
+              "overflow-wrap": "anywhere",
+            }}
+          >
+            a-very-long-unbroken-identifier-can-wrap-anywhere
+          </span>
+          <span
+            style={{
+              width: "100%",
+              color: "#64748b",
+              "font-size": "13px",
+              "line-height": "18px",
+              "word-break": "break-all",
+            }}
+          >
+            word-break: break-all
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [remaining, setRemaining] = createSignal(10);
   const interval = setInterval(() => {
@@ -231,6 +369,7 @@ function App() {
           <GridExample />
         </ExampleCard>
       </div>
+      <TypographyExamples />
     </div>
   );
 }
