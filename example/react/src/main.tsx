@@ -12,14 +12,21 @@ function App() {
     <div
       style={{
         display: "flex",
-        width: 720,
-        height: 620,
+        width: "100%",
+        height: "100%",
         overflow: "auto",
-        padding: 18,
         backgroundColor: palette.canvas,
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", width: 666, gap: 14 }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          width: 666,
+          gap: 14,
+          padding: 18,
+        }}
+      >
         <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "4px 2px 10px" }}>
           <span style={{ color: palette.ink, fontSize: 30, lineHeight: "36px", fontWeight: 700 }}>
             Burokku React feature gallery
