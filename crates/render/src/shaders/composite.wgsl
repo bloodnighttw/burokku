@@ -108,7 +108,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     var color = textureSample(source_texture, source_sampler, input.uv);
     if color.a > 0.0001 {
-        color.rgb /= color.a;
+        color = vec4(color.rgb / color.a, color.a);
     }
     color.a *= composite.transform_x.w * clip_coverage;
     return color;

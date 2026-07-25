@@ -12,4 +12,5 @@ thiserror = "2"
 wgpu = "29"
 
 [dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
 tokio = { version = "1", features = ["macros", "rt"] }

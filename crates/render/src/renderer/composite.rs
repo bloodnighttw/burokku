@@ -286,6 +286,12 @@ mod tests {
     use crate::{CornerRadius, CornerSize, Rect};
 
     #[test]
+    fn composite_shader_is_valid_wgsl() {
+        naga::front::wgsl::parse_str(include_str!("../shaders/composite.wgsl"))
+            .expect("group composite shader should parse");
+    }
+
+    #[test]
     fn composite_clip_preserves_elliptical_corner_radii() {
         let clip = Clip::new(
             Rect::new(0.0, 0.0, 100.0, 50.0),
