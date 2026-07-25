@@ -906,6 +906,13 @@ mod tests {
     use crate::{Border, BorderSide, BorderStyle, CornerRadius, CornerSize, GradientStop};
 
     #[test]
+    fn shape_shader_is_valid_wgsl_and_gradient_stops_are_two_vec4s() {
+        naga::front::wgsl::parse_str(include_str!("../shaders/shape.wgsl"))
+            .expect("shape shader should parse");
+        assert_eq!(std::mem::size_of::<GpuGradientStop>(), 32);
+    }
+
+    #[test]
     fn shape_instance_preserves_and_clamps_each_border_width() {
         let instance = ShapeInstance::new(
             Rect::new(0.0, 0.0, 30.0, 20.0),

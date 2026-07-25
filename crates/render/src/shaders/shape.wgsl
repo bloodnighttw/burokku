@@ -26,8 +26,7 @@ var background_image_sampler: sampler;
 
 struct GradientStop {
     color: vec4<f32>,
-    position: f32,
-    _padding: vec3<f32>,
+    position_padding: vec4<f32>,
 }
 
 @group(0) @binding(4)
@@ -294,14 +293,18 @@ fn sample_gradient(position: f32, range: vec2<f32>) -> vec4<f32> {
         return vec4(0.0);
     }
     var previous = gradient_stops[start];
-    if position <= previous.position || count == 1u {
+    if position <= previous.position_padding.x || count == 1u {
         return previous.color;
     }
     for (var index = 1u; index < count; index += 1u) {
         let current = gradient_stops[start + index];
-        if position <= current.position {
-            let span = max(current.position - previous.position, 0.0001);
-            return mix(previous.color, current.color, clamp((position - previous.position) / span, 0.0, 1.0));
+        if position <= current.position_padding.x {
+            let span = max(current.position_padding.x - previous.position_padding.x, 0.0001);
+            return mix(
+                previous.color,
+                current.color,
+                clamp((position - previous.position_padding.x) / span, 0.0, 1.0),
+            );
         }
         previous = current;
     }
