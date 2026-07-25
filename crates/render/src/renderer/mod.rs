@@ -18,9 +18,10 @@ use text::TextRenderer;
 
 pub use surface::SurfaceSize;
 
-/// CPU-side timing for submitting one rendered frame to the GPU queue.
+/// CPU-side timings for rendering and submitting one frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderTimings {
+    pub total: Duration,
     pub queue_submit: Duration,
 }
 
@@ -141,6 +142,7 @@ impl Renderer {
         text_system: &mut TextSystem,
         on_pre_present: impl FnOnce(),
     ) -> Result<RenderTimings, RenderError> {
+        let render_started_at = Instant::now();
         let frame = self.surface.acquire(surface)?;
         let view = frame
             .texture
@@ -148,7 +150,10 @@ impl Renderer {
         let queue_submit = self.draw_to_view(&view, canvas, self.surface.size(), text_system)?;
         on_pre_present();
         frame.present();
-        Ok(RenderTimings { queue_submit })
+        Ok(RenderTimings {
+            total: render_started_at.elapsed(),
+            queue_submit,
+        })
     }
 
     fn draw_to_view(
@@ -186,8 +191,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.shapes.draw(&mut pass);
+            self.shapes.draw_base(&mut pass);
             self.text.draw(&mut pass)?;
+            self.shapes.draw_overlay(&mut pass);
         }
         let submit_started_at = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);
@@ -200,7 +206,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Border, BoxStyle, Color, CornerRadius, Outline, Rect, TextStyle};
+    use crate::{Border, BoxStyle, Clip, Color, CornerRadius, Outline, Rect, TextStyle};
 
     #[tokio::test(flavor = "current_thread")]
     async fn renders_box_border_outline_text_and_readback() {
@@ -292,6 +298,44 @@ mod tests {
         .expect("cached text test render");
         assert_eq!(cached_text_image.pixels, text_image.pixels);
 
+        drop(adapter);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clips_shape_pixels_to_a_rounded_command_clip() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(64, 64),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+        canvas.draw_box_clipped(
+            Rect::new(4.0, 4.0, 56.0, 56.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                ..BoxStyle::default()
+            },
+            Clip::new(Rect::new(24.0, 24.0, 16.0, 16.0), CornerRadius::all(8.0)),
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(64, 64),
+            &mut text_system,
+        )
+        .expect("off-screen clipped render");
+
+        assert_eq!(image.pixel(16, 32), Some([255, 255, 255, 255]));
+        assert_eq!(image.pixel(32, 16), Some([255, 255, 255, 255]));
+        assert_eq!(image.pixel(24, 24), Some([255, 255, 255, 255]));
+        let inside = image.pixel(32, 32).expect("inside clipped shape");
+        assert!(inside[0] > 180 && inside[1] < 80 && inside[2] < 90);
         drop(adapter);
     }
 }

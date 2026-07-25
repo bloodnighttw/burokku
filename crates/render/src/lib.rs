@@ -8,7 +8,7 @@ mod renderer;
 mod text_system;
 
 pub use drawing::{
-    Border, BoxStyle, Canvas, Color, CornerRadius, DrawCommand, FontFamily, Outline, Rect,
+    Border, BoxStyle, Canvas, Clip, Color, CornerRadius, DrawCommand, FontFamily, Outline, Rect,
     TextStyle, TextWrap,
 };
 pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};

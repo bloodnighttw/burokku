@@ -16,6 +16,23 @@ impl Rect {
             height,
         }
     }
+
+    pub fn intersection(self, other: Self) -> Self {
+        let left = self.x.max(other.x);
+        let top = self.y.max(other.y);
+        let right = (self.x + self.width).min(other.x + other.width);
+        let bottom = (self.y + self.height).min(other.y + other.height);
+        Self::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+    }
+
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        self.width > 0.0
+            && self.height > 0.0
+            && x >= self.x
+            && x < self.x + self.width
+            && y >= self.y
+            && y < self.y + self.height
+    }
 }
 
 /// Per-corner radii, in top-left, top-right, bottom-right, bottom-left order.
@@ -56,5 +73,54 @@ impl CornerRadius {
             self.bottom_right.clamp(0.0, max),
             self.bottom_left.clamp(0.0, max),
         ]
+    }
+}
+
+/// A rectangular clip edge with optional rounded corners.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Clip {
+    pub rect: Rect,
+    pub corner_radius: CornerRadius,
+}
+
+impl Clip {
+    pub const fn new(rect: Rect, corner_radius: CornerRadius) -> Self {
+        Self {
+            rect,
+            corner_radius,
+        }
+    }
+
+    pub const fn rectangular(rect: Rect) -> Self {
+        Self::new(rect, CornerRadius::ZERO)
+    }
+
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        if !self.rect.contains(x, y) {
+            return false;
+        }
+
+        let half_size = [self.rect.width * 0.5, self.rect.height * 0.5];
+        let position = [
+            x - (self.rect.x + half_size[0]),
+            y - (self.rect.y + half_size[1]),
+        ];
+        let radii = self.corner_radius.normalized(self.rect);
+        let radius = if position[1] < 0.0 {
+            if position[0] < 0.0 {
+                radii[0]
+            } else {
+                radii[1]
+            }
+        } else if position[0] < 0.0 {
+            radii[3]
+        } else {
+            radii[2]
+        };
+        let q = [
+            position[0].abs() - half_size[0] + radius,
+            position[1].abs() - half_size[1] + radius,
+        ];
+        q[0].max(q[1]).min(0.0) + q[0].max(0.0).hypot(q[1].max(0.0)) <= 0.0
     }
 }
