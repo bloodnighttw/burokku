@@ -1,4 +1,6 @@
-use crate::ui::elements::styles::{Isolation, Style as ElementStyle, ZIndex};
+use taffy::Display;
+
+use crate::ui::elements::styles::{Isolation, Position, Style as ElementStyle, ZIndex};
 
 use super::Layout;
 
@@ -10,11 +12,23 @@ use super::Layout;
 pub struct StackingLayer {
     z_index: Option<i32>,
     isolated: bool,
+    flex_or_grid: bool,
+    not_static: bool,
 }
 
 impl StackingLayer {
-    pub const fn new(z_index: Option<i32>, isolated: bool) -> Self {
-        Self { z_index, isolated }
+    pub const fn new(
+        z_index: Option<i32>,
+        isolated: bool,
+        flex_or_grid: bool,
+        not_static: bool,
+    ) -> Self {
+        Self {
+            z_index,
+            isolated,
+            flex_or_grid,
+            not_static,
+        }
     }
 
     pub const fn z_index(self) -> Option<i32> {
@@ -31,9 +45,8 @@ impl StackingLayer {
     /// a numeric `z-index` and `isolation: isolate`. Add future conditions
     /// such as opacity or transforms here when their styles are implemented.
     pub const fn establishes_context(self) -> bool {
-        self.z_index.is_some() || self.isolated
+        self.z_index.is_some() || self.isolated || self.flex_or_grid || self.not_static
     }
-
 
     pub const fn index(self) -> i32 {
         match self.z_index {
@@ -47,8 +60,10 @@ impl StackingLayer {
             ZIndex::Auto => None,
             ZIndex::Value(index) => Some(index),
         };
-        let isolated = style.isolation == Isolation::Isolate;
-        Self::new(z_index, isolated)
+        let isolated = matches!(style.isolation, Isolation::Isolate);
+        let flex_or_grid = matches!(style.display, Display::Flex | Display::Grid);
+        let is_static = matches!(style.position, Position::Relative);
+        Self::new(z_index, isolated, flex_or_grid, !is_static)
     }
 }
 

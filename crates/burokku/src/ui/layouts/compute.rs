@@ -1392,9 +1392,9 @@ mod tests {
 
         assert_eq!(
             children[0].stacking_layer(),
-            StackingLayer::new(Some(-7), false)
+            StackingLayer::new(Some(-7), false, false, false)
         );
-        assert_eq!(children[1].stacking_layer(), StackingLayer::new(None, true));
+        assert_eq!(children[1].stacking_layer(), StackingLayer::new(None, true, false, false));
     }
 
     #[test]
