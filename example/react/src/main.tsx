@@ -313,6 +313,161 @@ function TypographyExamples({ remaining }: { remaining: number }) {
   );
 }
 
+function PaintExamples() {
+  const rasterBackground =
+    'url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=")';
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <span
+        style={{
+          color: "#18202b",
+          fontSize: 20,
+          lineHeight: "26px",
+          fontWeight: 700,
+          letterSpacing: -0.3,
+        }}
+      >
+        Paint
+      </span>
+      <div style={{ display: "flex", gap: 12 }}>
+        <ExampleCard title="Linear gradient · box shadow">
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              height: 104,
+              padding: 16,
+              gap: 5,
+              backgroundImage:
+                "linear-gradient(125deg, hsl(252 88% 67%) 0%, rgb(37 99 235) 52%, rgb(6 182 212) 100%)",
+              borderRadius: 12,
+              boxShadow: "0px 12px 24px -10px rgba(37, 99, 235, 0.75)",
+            }}
+          >
+            <span
+              style={{
+                color: "white",
+                fontSize: 21,
+                lineHeight: "27px",
+                fontWeight: 700,
+                textShadow: "0px 2px 5px rgba(15, 23, 42, 0.45)",
+              }}
+            >
+              Aurora
+            </span>
+            <span style={{ color: "rgba(255, 255, 255, 0.82)", fontSize: 13, lineHeight: "18px" }}>
+              HSL + RGB color stops
+            </span>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Radial gradient · inset shadow">
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              height: 104,
+              padding: 16,
+              gap: 5,
+              backgroundColor: "rebeccapurple",
+              backgroundImage:
+                "radial-gradient(hsla(48, 100%, 88%, 0.95) 0%, rgba(244, 114, 182, 0.82) 42%, rebeccapurple 100%)",
+              borderRadius: 12,
+              boxShadow: "inset 0px 0px 22px rgba(49, 46, 129, 0.55)",
+            }}
+          >
+            <span
+              style={{
+                color: "lightgoldenrodyellow",
+                fontSize: 21,
+                lineHeight: "27px",
+                fontWeight: 700,
+                textShadow: "1px 2px 4px navy, -1px 0px 3px rgba(255, 255, 255, 0.4)",
+              }}
+            >
+              Solar bloom
+            </span>
+            <span style={{ color: "rgb(255 255 255 / 78%)", fontSize: 13, lineHeight: "18px" }}>
+              HSLA + expanded named colors
+            </span>
+          </div>
+        </ExampleCard>
+      </div>
+      <div style={{ display: "flex", gap: 12 }}>
+        <ExampleCard title="Opacity · transform group">
+          <div
+            style={{
+              display: "flex",
+              height: 92,
+              padding: 16,
+              backgroundColor: "hsl(220 33% 96%)",
+              borderRadius: 12,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                width: 215,
+                padding: 14,
+                gap: 3,
+                opacity: 0.72,
+                transform: "translate(22px, 1px) rotate(-4deg) scale(1.04)",
+                backgroundColor: "rgb(16 185 129)",
+                borderRadius: 10,
+                boxShadow: "0px 8px 15px rgba(6, 95, 70, 0.4)",
+              }}
+            >
+              <span style={{ color: "white", fontSize: 17, lineHeight: "22px", fontWeight: 700 }}>
+                Composited card
+              </span>
+              <span style={{ color: "rgba(255, 255, 255, 0.9)", fontSize: 12, lineHeight: "17px" }}>
+                72% opacity · rotate · scale
+              </span>
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="PNG data URL · text shadow">
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              height: 92,
+              padding: 16,
+              gap: 4,
+              backgroundImage: rasterBackground,
+              borderRadius: 12,
+              boxShadow: "0px 8px 18px -8px rgba(15, 23, 42, 0.65)",
+            }}
+          >
+            <span
+              style={{
+                color: "white",
+                fontSize: 19,
+                lineHeight: "25px",
+                fontWeight: 700,
+                textShadow: "0px 2px 4px black",
+              }}
+            >
+              Raster fill
+            </span>
+            <span
+              style={{
+                color: "white",
+                fontSize: 12,
+                lineHeight: "17px",
+                textShadow: "0px 1px 3px black",
+              }}
+            >
+              Decoded from an embedded PNG
+            </span>
+          </div>
+        </ExampleCard>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [remaining, setRemaining] = useState(10);
 
@@ -399,6 +554,7 @@ function App() {
         </ExampleCard>
       </div>
       <TypographyExamples remaining={remaining} />
+      <PaintExamples />
     </div>
   );
 }
