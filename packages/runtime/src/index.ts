@@ -20,7 +20,12 @@ export type BurokkuStyle = Partial<{
   padding: number | string;
   margin: number | string;
   backgroundColor: string;
+  backgroundImage: string;
   color: string;
+  opacity: number | string;
+  transform: string;
+  boxShadow: string;
+  textShadow: string;
   borderColor: string;
   borderWidth: number | string;
   borderRadius: number | string;
