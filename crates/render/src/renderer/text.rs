@@ -7,7 +7,7 @@ use glyphon::{Buffer, Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBo
 
 use crate::{Canvas, Clip, Color, DrawCommand, Rect, TextSpan, TextStyle, TextSystem};
 
-use super::{RenderError, SurfaceSize};
+use super::{RenderError, TargetViewport};
 
 pub(super) struct TextRenderer {
     swash_cache: SwashCache,
@@ -61,14 +61,14 @@ impl TextRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         canvas: &Canvas,
-        size: SurfaceSize,
+        viewport: TargetViewport,
         text_system: &mut TextSystem,
     ) -> Result<(), RenderError> {
         self.viewport.update(
             queue,
             Resolution {
-                width: size.width,
-                height: size.height,
+                width: viewport.size.width,
+                height: viewport.size.height,
             },
         );
         let commands: Vec<_> = canvas
@@ -147,10 +147,10 @@ impl TextRenderer {
 
         let areas = self.placements.iter().map(|placement| TextArea {
             buffer: &self.buffers[placement.buffer_index].buffer,
-            left: placement.bounds.x,
-            top: placement.bounds.y,
+            left: placement.bounds.x - viewport.origin[0],
+            top: placement.bounds.y - viewport.origin[1],
             scale: 1.0,
-            bounds: clipped_bounds(placement.bounds, &placement.clips, size),
+            bounds: clipped_bounds(placement.bounds, &placement.clips, viewport),
             default_color: glyphon_color(placement.color),
             custom_glyphs: &[],
         });
@@ -340,15 +340,19 @@ fn hash_text_layout_style(style: &TextStyle, hasher: &mut DefaultHasher) {
     style.wrap.hash(hasher);
 }
 
-fn clipped_bounds(mut bounds: Rect, clips: &[Clip], size: SurfaceSize) -> TextBounds {
+fn clipped_bounds(mut bounds: Rect, clips: &[Clip], viewport: TargetViewport) -> TextBounds {
     for clip in clips {
         bounds = bounds.intersection(clip.rect);
     }
+    let left = bounds.x - viewport.origin[0];
+    let top = bounds.y - viewport.origin[1];
+    let right = bounds.x + bounds.width - viewport.origin[0];
+    let bottom = bounds.y + bounds.height - viewport.origin[1];
     TextBounds {
-        left: bounds.x.floor().max(0.0) as i32,
-        top: bounds.y.floor().max(0.0) as i32,
-        right: (bounds.x + bounds.width).ceil().min(size.width as f32) as i32,
-        bottom: (bounds.y + bounds.height).ceil().min(size.height as f32) as i32,
+        left: left.floor().max(0.0) as i32,
+        top: top.floor().max(0.0) as i32,
+        right: right.ceil().min(viewport.size.width as f32) as i32,
+        bottom: bottom.ceil().min(viewport.size.height as f32) as i32,
     }
 }
 

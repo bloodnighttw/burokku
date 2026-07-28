@@ -7,7 +7,7 @@ use crate::{
     PaintLayer, RasterImage, Rect, Transform,
 };
 
-use super::SurfaceSize;
+use super::TargetViewport;
 
 const MAX_BACKGROUND_ATLAS_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GRADIENT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
@@ -50,7 +50,7 @@ impl ShapeRenderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -185,15 +185,15 @@ impl ShapeRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         canvas: &Canvas,
-        size: SurfaceSize,
+        viewport: TargetViewport,
     ) {
         self.prepare_images(device, queue, canvas);
         queue.write_buffer(
             &self.screen_buffer,
             0,
             bytemuck::bytes_of(&ScreenUniform {
-                size: [size.width as f32, size.height as f32],
-                _padding: [0.0; 2],
+                size: [viewport.size.width as f32, viewport.size.height as f32],
+                origin: viewport.origin,
             }),
         );
         self.instances.clear();
@@ -724,7 +724,7 @@ fn create_pipeline(
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct ScreenUniform {
     size: [f32; 2],
-    _padding: [f32; 2],
+    origin: [f32; 2],
 }
 
 #[repr(C)]

@@ -11,14 +11,43 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::{Canvas, PaintLayer, TextSystem};
-use composite::{CompositeEffect, CompositeItem, CompositeRenderer};
+use crate::{
+    BoxDecoration, BoxStyle, Canvas, Color, DecorationStyle, DrawCommand, PaintLayer, Rect,
+    TextStyle, TextSystem, Transform,
+};
+use composite::{CompositeEffect, CompositeRenderer};
 use gpu::Gpu;
 use shape::ShapeRenderer;
 use surface::SurfaceState;
 use text::TextRenderer;
 
 pub use surface::SurfaceSize;
+
+const MAX_GROUP_DEPTH: usize = 256;
+
+#[derive(Clone, Copy, Debug)]
+struct TargetViewport {
+    size: SurfaceSize,
+    origin: [f32; 2],
+}
+
+impl TargetViewport {
+    const fn surface(size: SurfaceSize) -> Self {
+        Self {
+            size,
+            origin: [0.0, 0.0],
+        }
+    }
+
+    fn rect(self) -> Rect {
+        Rect::new(
+            self.origin[0],
+            self.origin[1],
+            self.size.width as f32,
+            self.size.height as f32,
+        )
+    }
+}
 
 /// CPU-side timings for rendering and submitting one frame.
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,6 +80,12 @@ pub enum RenderError {
     PrepareText(#[from] glyphon::PrepareError),
     #[error("text rendering failed: {0}")]
     RenderText(#[from] glyphon::RenderError),
+    #[error("a stacking group has more clips than the GPU can accept")]
+    TooManyGroupClips,
+    #[error("stacking groups are nested more than {MAX_GROUP_DEPTH} levels deep")]
+    GroupNestingTooDeep,
+    #[error("stacking group target dimensions exceed the GPU texture limit")]
+    GroupTargetTooLarge,
     #[cfg(test)]
     #[error("GPU readback failed: {0}")]
     Readback(#[from] wgpu::BufferAsyncError),
@@ -168,41 +203,62 @@ impl Renderer {
         size: SurfaceSize,
         text_system: &mut TextSystem,
     ) -> Result<Duration, RenderError> {
-        let bytes_per_target = u64::from(size.width)
-            .saturating_mul(u64::from(size.height))
-            .saturating_mul(u64::from(
-                self.surface.format().block_copy_size(None).unwrap_or(16),
-            ));
-        let mut budget = GroupBudget {
-            used: 0,
-            maximum: (128 * 1024 * 1024_u64)
-                .min(self.gpu.device.limits().max_buffer_size.saturating_mul(2)),
-            bytes_per_target,
-            maximum_depth: 32,
-        };
-        self.draw_canvas_to_view(view, canvas, size, text_system, &mut budget, 0)
+        self.draw_canvas_to_view(
+            view,
+            canvas,
+            TargetViewport::surface(size),
+            text_system,
+            0,
+            false,
+        )
     }
 
     fn draw_canvas_to_view(
         &mut self,
         view: &wgpu::TextureView,
         canvas: &Canvas,
-        size: SurfaceSize,
+        viewport: TargetViewport,
         text_system: &mut TextSystem,
-        budget: &mut GroupBudget,
         depth: usize,
+        already_initialized: bool,
     ) -> Result<Duration, RenderError> {
-        let mut composite_items: [Vec<CompositeItem>; PaintLayer::COUNT] =
-            std::array::from_fn(|_| Vec::new());
-        let mut reserved = 0_u64;
-        // Render groups to transparent textures before the parent pass. Their
-        // completed pixels can then be inserted atomically into the requested
-        // parent paint layer.
-        if depth < budget.maximum_depth {
+        if depth > MAX_GROUP_DEPTH {
+            return Err(RenderError::GroupNestingTooDeep);
+        }
+
+        let mut queue_submit = Duration::ZERO;
+        let mut target_initialized = already_initialized;
+        let mut shapes_prepared = false;
+
+        // Each child group is rendered and composited immediately. Sibling
+        // targets therefore do not accumulate in GPU memory while preserving
+        // the existing shape -> group -> text order inside every paint layer.
+        for layer in PaintLayer::ALL {
+            if canvas_has_shapes_in_layer(canvas, layer) {
+                if !shapes_prepared {
+                    self.shapes
+                        .prepare(&self.gpu.device, &self.gpu.queue, canvas, viewport);
+                    shapes_prepared = true;
+                }
+                let mut encoder = self.create_encoder("render shape layer encoder");
+                {
+                    let mut pass = begin_drawing_pass(
+                        &mut encoder,
+                        view,
+                        canvas,
+                        target_initialized,
+                        "render shape layer",
+                    );
+                    self.shapes.draw_layer(&mut pass, layer);
+                }
+                queue_submit += self.submit(encoder);
+                target_initialized = true;
+            }
+
             for command in canvas.commands() {
-                let crate::DrawCommand::Group {
-                    layer,
-                    canvas,
+                let DrawCommand::Group {
+                    layer: command_layer,
+                    canvas: group,
                     origin,
                     transform,
                     opacity,
@@ -211,14 +267,46 @@ impl Renderer {
                 else {
                     continue;
                 };
-                if !budget.reserve() {
+                if *command_layer != layer {
                     continue;
                 }
+                if group_can_draw_directly(group, *transform, *opacity, clips) {
+                    if !target_initialized {
+                        let mut encoder = self.create_encoder("render parent clear encoder");
+                        drop(begin_drawing_pass(
+                            &mut encoder,
+                            view,
+                            canvas,
+                            false,
+                            "render parent clear",
+                        ));
+                        queue_submit += self.submit(encoder);
+                        target_initialized = true;
+                    }
+                    queue_submit += self.draw_canvas_to_view(
+                        view,
+                        group,
+                        viewport,
+                        text_system,
+                        depth + 1,
+                        true,
+                    )?;
+                    shapes_prepared = false;
+                    continue;
+                }
+                let Some(source) = group_target_viewport(
+                    group,
+                    viewport,
+                    self.gpu.device.limits().max_texture_dimension_2d,
+                )?
+                else {
+                    continue;
+                };
                 let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("render transient group target"),
+                    label: Some("render bounded transient group target"),
                     size: wgpu::Extent3d {
-                        width: size.width,
-                        height: size.height,
+                        width: source.size.width,
+                        height: source.size.height,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
@@ -230,104 +318,342 @@ impl Renderer {
                     view_formats: &[],
                 });
                 let group_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                self.draw_canvas_to_view(
+                queue_submit += self.draw_canvas_to_view(
                     &group_view,
-                    canvas,
-                    size,
+                    group,
+                    source,
                     text_system,
-                    budget,
                     depth + 1,
+                    false,
                 )?;
+                shapes_prepared = false;
+
                 let item = self.composites.item(
                     &self.gpu.device,
                     texture,
-                    size,
+                    viewport,
+                    source,
                     CompositeEffect {
                         origin: *origin,
                         transform: *transform,
                         opacity: *opacity,
                         clips: clips.clone(),
                     },
-                );
-                if let Some(item) = item {
-                    composite_items[layer.index()].push(item);
-                    reserved = reserved.saturating_add(budget.bytes_per_target);
-                } else {
-                    budget.release(budget.bytes_per_target);
+                )?;
+                let mut encoder = self.create_encoder("render group composite encoder");
+                {
+                    let mut pass = begin_drawing_pass(
+                        &mut encoder,
+                        view,
+                        canvas,
+                        target_initialized,
+                        "render group composite",
+                    );
+                    self.composites
+                        .draw(&mut pass, std::slice::from_ref(&item), viewport);
                 }
+                queue_submit += self.submit(encoder);
+                target_initialized = true;
             }
-        }
-        self.shapes
-            .prepare(&self.gpu.device, &self.gpu.queue, canvas, size);
-        self.text
-            .prepare(&self.gpu.device, &self.gpu.queue, canvas, size, text_system)?;
 
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render frame encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("render drawing pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(canvas.clear_color.as_wgpu_clear()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // Shapes, atomic groups, and text meet only at these explicit
-            // stages. This is what lets a caller place block backgrounds below
-            // text while keeping positioned contexts and outlines above it.
-            for layer in PaintLayer::ALL {
-                self.shapes.draw_layer(&mut pass, layer);
-                self.composites
-                    .draw(&mut pass, &composite_items[layer.index()], size);
-                if layer == PaintLayer::Content {
+            if layer == PaintLayer::Content && canvas_has_text(canvas) {
+                self.text.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    canvas,
+                    viewport,
+                    text_system,
+                )?;
+                let mut encoder = self.create_encoder("render text layer encoder");
+                {
+                    let mut pass = begin_drawing_pass(
+                        &mut encoder,
+                        view,
+                        canvas,
+                        target_initialized,
+                        "render text layer",
+                    );
                     self.text.draw(&mut pass)?;
                 }
+                queue_submit += self.submit(encoder);
+                target_initialized = true;
             }
         }
-        let submit_started_at = Instant::now();
-        self.gpu.queue.submit([encoder.finish()]);
-        let queue_submit = submit_started_at.elapsed();
+
+        if !target_initialized {
+            let mut encoder = self.create_encoder("render empty canvas encoder");
+            drop(begin_drawing_pass(
+                &mut encoder,
+                view,
+                canvas,
+                false,
+                "render empty canvas",
+            ));
+            queue_submit += self.submit(encoder);
+        }
         self.text.finish_frame();
-        budget.release(reserved);
         Ok(queue_submit)
     }
+
+    fn create_encoder(&self, label: &'static str) -> wgpu::CommandEncoder {
+        self.gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
+    }
+
+    fn submit(&self, encoder: wgpu::CommandEncoder) -> Duration {
+        let started_at = Instant::now();
+        self.gpu.queue.submit([encoder.finish()]);
+        started_at.elapsed()
+    }
 }
 
-struct GroupBudget {
-    used: u64,
-    maximum: u64,
-    bytes_per_target: u64,
-    maximum_depth: usize,
+fn begin_drawing_pass<'encoder>(
+    encoder: &'encoder mut wgpu::CommandEncoder,
+    view: &'encoder wgpu::TextureView,
+    canvas: &Canvas,
+    initialized: bool,
+    label: &'static str,
+) -> wgpu::RenderPass<'encoder> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: if initialized {
+                    wgpu::LoadOp::Load
+                } else {
+                    wgpu::LoadOp::Clear(canvas.clear_color.as_wgpu_clear())
+                },
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
 }
 
-impl GroupBudget {
-    fn reserve(&mut self) -> bool {
-        let Some(next) = self.used.checked_add(self.bytes_per_target) else {
-            return false;
+fn canvas_has_shapes_in_layer(canvas: &Canvas, layer: PaintLayer) -> bool {
+    canvas.commands().iter().any(|command| match command {
+        DrawCommand::Decoration {
+            layer: command_layer,
+            ..
+        } => *command_layer == layer,
+        DrawCommand::Box { .. } => layer == PaintLayer::Block,
+        DrawCommand::OverlayBox { .. } => layer == PaintLayer::Overlay,
+        DrawCommand::Text { .. } | DrawCommand::Group { .. } => false,
+    })
+}
+
+fn canvas_has_text(canvas: &Canvas) -> bool {
+    canvas
+        .commands()
+        .iter()
+        .any(|command| matches!(command, DrawCommand::Text { .. }))
+}
+
+fn group_can_draw_directly(
+    canvas: &Canvas,
+    transform: Transform,
+    opacity: f32,
+    clips: &[crate::Clip],
+) -> bool {
+    canvas.clear_color == Color::TRANSPARENT
+        && transform == Transform::IDENTITY
+        && opacity >= 1.0
+        && clips.is_empty()
+}
+
+fn group_target_viewport(
+    canvas: &Canvas,
+    parent: TargetViewport,
+    maximum_dimension: u32,
+) -> Result<Option<TargetViewport>, RenderError> {
+    let Some(bounds) = canvas_visual_bounds(canvas, parent) else {
+        return Ok(None);
+    };
+    let left = bounds.x.floor();
+    let top = bounds.y.floor();
+    let right = (bounds.x + bounds.width).ceil();
+    let bottom = (bounds.y + bounds.height).ceil();
+    if ![left, top, right, bottom].into_iter().all(f32::is_finite) || right <= left || bottom <= top
+    {
+        return Ok(None);
+    }
+    let width = right - left;
+    let height = bottom - top;
+    if width > maximum_dimension as f32 || height > maximum_dimension as f32 {
+        return Err(RenderError::GroupTargetTooLarge);
+    }
+    Ok(Some(TargetViewport {
+        size: SurfaceSize::new(width as u32, height as u32),
+        origin: [left, top],
+    }))
+}
+
+fn canvas_visual_bounds(canvas: &Canvas, fallback: TargetViewport) -> Option<Rect> {
+    let mut bounds = (canvas.clear_color != Color::TRANSPARENT).then(|| fallback.rect());
+    for command in canvas.commands() {
+        let command_bounds = match command {
+            DrawCommand::Decoration {
+                rect,
+                decoration,
+                style,
+                ..
+            } => decoration_bounds(*rect, decoration, *style),
+            DrawCommand::Box { rect, style, .. } | DrawCommand::OverlayBox { rect, style, .. } => {
+                box_bounds(*rect, style)
+            }
+            DrawCommand::Text {
+                bounds,
+                style,
+                spans,
+                ..
+            } => {
+                let mut visual = text_bounds(*bounds, style);
+                for span in spans {
+                    visual = union_rect(visual, text_bounds(*bounds, &span.style));
+                }
+                visual
+            }
+            DrawCommand::Group {
+                canvas,
+                origin,
+                transform,
+                clips,
+                ..
+            } => {
+                let Some(child) = canvas_visual_bounds(canvas, fallback) else {
+                    continue;
+                };
+                let mut visual = transformed_rect(child, *transform, *origin);
+                for clip in clips {
+                    visual = visual.intersection(clip.bounds());
+                }
+                visual
+            }
         };
-        if self.bytes_per_target == 0 || next > self.maximum {
-            return false;
+        if command_bounds.width > 0.0 && command_bounds.height > 0.0 {
+            bounds = Some(bounds.map_or(command_bounds, |current| {
+                union_rect(current, command_bounds)
+            }));
         }
-        self.used = next;
-        true
     }
+    bounds
+}
 
-    fn release(&mut self, bytes: u64) {
-        self.used = self.used.saturating_sub(bytes);
+fn decoration_bounds(rect: Rect, decoration: &BoxDecoration, style: DecorationStyle) -> Rect {
+    let visual = match decoration {
+        BoxDecoration::Outline(outline) => {
+            expand_rect(rect, (outline.offset + outline.width).max(0.0))
+        }
+        BoxDecoration::Shadow(shadow) if !shadow.inset => {
+            let mut shadow_rect =
+                expand_rect(rect, shadow.spread.max(0.0) + shadow.blur.max(0.0) * 2.0);
+            shadow_rect.x += shadow.offset[0];
+            shadow_rect.y += shadow.offset[1];
+            shadow_rect
+        }
+        BoxDecoration::Background { .. } | BoxDecoration::Border(_) | BoxDecoration::Shadow(_) => {
+            rect
+        }
+    };
+    expand_rect(
+        transformed_rect(visual, style.transform, rect_center(rect)),
+        2.0,
+    )
+}
+
+fn box_bounds(rect: Rect, style: &BoxStyle) -> Rect {
+    let mut visual = rect;
+    if let Some(outline) = style.outline {
+        visual = union_rect(
+            visual,
+            expand_rect(rect, (outline.offset + outline.width).max(0.0)),
+        );
     }
+    for shadow in style.shadows.iter().filter(|shadow| !shadow.inset) {
+        let mut shadow_rect =
+            expand_rect(rect, shadow.spread.max(0.0) + shadow.blur.max(0.0) * 2.0);
+        shadow_rect.x += shadow.offset[0];
+        shadow_rect.y += shadow.offset[1];
+        visual = union_rect(visual, shadow_rect);
+    }
+    expand_rect(
+        transformed_rect(visual, style.transform, rect_center(rect)),
+        2.0,
+    )
+}
+
+fn text_bounds(bounds: Rect, style: &TextStyle) -> Rect {
+    let transformed = transformed_rect(bounds, style.transform, rect_center(bounds));
+    let mut visual = transformed;
+    for shadow in &style.shadows {
+        let mut shadow_rect = expand_rect(transformed, shadow.blur.max(0.0));
+        shadow_rect.x += shadow.offset[0];
+        shadow_rect.y += shadow.offset[1];
+        visual = union_rect(visual, shadow_rect);
+    }
+    expand_rect(visual, 2.0)
+}
+
+fn rect_center(rect: Rect) -> [f32; 2] {
+    [rect.x + rect.width * 0.5, rect.y + rect.height * 0.5]
+}
+
+fn transformed_rect(rect: Rect, transform: Transform, origin: [f32; 2]) -> Rect {
+    let [a, b, c, d, tx, ty] = transform.matrix;
+    let corners = [
+        [rect.x, rect.y],
+        [rect.x + rect.width, rect.y],
+        [rect.x, rect.y + rect.height],
+        [rect.x + rect.width, rect.y + rect.height],
+    ];
+    let transformed = corners.map(|point| {
+        let relative = [point[0] - origin[0], point[1] - origin[1]];
+        [
+            origin[0] + a * relative[0] + c * relative[1] + tx,
+            origin[1] + b * relative[0] + d * relative[1] + ty,
+        ]
+    });
+    let min_x = transformed
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = transformed
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = transformed
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min);
+    let max_y = transformed
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+fn expand_rect(rect: Rect, amount: f32) -> Rect {
+    Rect::new(
+        rect.x - amount,
+        rect.y - amount,
+        rect.width + amount * 2.0,
+        rect.height + amount * 2.0,
+    )
+}
+
+fn union_rect(left: Rect, right: Rect) -> Rect {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    let right_edge = (left.x + left.width).max(right.x + right.width);
+    let bottom = (left.y + left.height).max(right.y + right.height);
+    Rect::new(x, y, right_edge - x, bottom - y)
 }
 
 #[cfg(test)]
@@ -984,19 +1310,103 @@ mod tests {
         drop(adapter);
     }
 
-    #[test]
-    fn group_budget_rejects_excess_targets_and_depth_is_explicit() {
-        let mut budget = GroupBudget {
-            used: 0,
-            maximum: 128,
-            bytes_per_target: 64,
-            maximum_depth: 3,
+    #[tokio::test(flavor = "current_thread")]
+    async fn deeply_nested_groups_are_not_silently_omitted() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
         };
-        assert!(budget.reserve());
-        assert!(budget.reserve());
-        assert!(!budget.reserve());
-        budget.release(64);
-        assert!(budget.reserve());
-        assert_eq!(budget.maximum_depth, 3);
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(32, 32),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut nested = Canvas::new();
+        nested.draw_box(
+            Rect::new(8.0, 8.0, 16.0, 16.0),
+            BoxStyle {
+                background: Color::from_rgba8(220, 30, 40, 255),
+                ..BoxStyle::default()
+            },
+        );
+        for _ in 0..40 {
+            let mut parent = Canvas::new();
+            parent.draw_group(nested, [16.0, 16.0], Transform::IDENTITY, 0.999, []);
+            nested = parent;
+        }
+        nested.clear_color = Color::WHITE;
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &nested,
+            SurfaceSize::new(32, 32),
+            &mut text_system,
+        )
+        .expect("deep stacking groups");
+
+        let center = image.pixel(16, 16).unwrap();
+        assert!(center[0] > 180 && center[1] < 80 && center[2] < 90);
+        drop(adapter);
+    }
+
+    #[test]
+    fn group_targets_are_cropped_to_their_content() {
+        let mut group = Canvas::new();
+        group.draw_box(
+            Rect::new(10.0, 20.0, 30.0, 40.0),
+            BoxStyle {
+                background: Color::WHITE,
+                ..BoxStyle::default()
+            },
+        );
+
+        let viewport = group_target_viewport(
+            &group,
+            TargetViewport::surface(SurfaceSize::new(1920, 1080)),
+            8192,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(viewport.origin, [8.0, 18.0]);
+        assert_eq!(viewport.size, SurfaceSize::new(34, 44));
+    }
+
+    #[test]
+    fn empty_transparent_groups_do_not_allocate_targets() {
+        let viewport = group_target_viewport(
+            &Canvas::new(),
+            TargetViewport::surface(SurfaceSize::new(1920, 1080)),
+            8192,
+        )
+        .unwrap();
+
+        assert!(viewport.is_none());
+    }
+
+    #[test]
+    fn plain_stacking_groups_can_draw_without_an_offscreen_target() {
+        let group = Canvas::new();
+        assert!(group_can_draw_directly(
+            &group,
+            Transform::IDENTITY,
+            1.0,
+            &[],
+        ));
+        assert!(!group_can_draw_directly(
+            &group,
+            Transform::IDENTITY,
+            0.5,
+            &[],
+        ));
+        assert!(!group_can_draw_directly(
+            &group,
+            Transform {
+                matrix: [1.0, 0.0, 0.0, 1.0, 2.0, 0.0],
+            },
+            1.0,
+            &[],
+        ));
     }
 }
