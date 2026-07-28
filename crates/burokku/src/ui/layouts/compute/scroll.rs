@@ -6,6 +6,7 @@ use crate::ui::elements::styles::Overflow as ElementOverflow;
 use super::paint::box_style;
 use super::{Layout, LayoutNode, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis};
 
+#[derive(Clone, Copy)]
 pub(super) struct OffsetContext {
     offset: ScrollOffset,
     max_offset: ScrollOffset,
@@ -81,8 +82,7 @@ pub(super) fn scroll_container(
                 ScrollbarAxis::Horizontal,
                 viewport.width,
                 content_width,
-                offset.x,
-                max_offset.x,
+                offsets,
                 MIN_THUMB,
             ),
         }
@@ -109,8 +109,7 @@ pub(super) fn scroll_container(
                 ScrollbarAxis::Vertical,
                 viewport.height,
                 content_height,
-                offset.y,
-                max_offset.y,
+                offsets,
                 MIN_THUMB,
             ),
         }
@@ -133,10 +132,13 @@ fn scrollbar_thumb(
     axis: ScrollbarAxis,
     viewport_size: f32,
     content_size: f32,
-    offset: f32,
-    max_offset: f32,
+    offsets: OffsetContext,
     min_thumb: f32,
 ) -> RenderRect {
+    let (offset, max_offset) = match axis {
+        ScrollbarAxis::Horizontal => (offsets.offset.x, offsets.max_offset.x),
+        ScrollbarAxis::Vertical => (offsets.offset.y, offsets.max_offset.y),
+    };
     let track_size = match axis {
         ScrollbarAxis::Horizontal => track.width,
         ScrollbarAxis::Vertical => track.height,
