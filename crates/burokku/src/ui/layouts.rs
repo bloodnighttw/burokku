@@ -8,7 +8,7 @@ mod stacking;
 use render::{BoxStyle, Clip, Rect, TextRunMetrics, TextSpan, TextStyle, TextSystem};
 use std::collections::HashMap;
 
-use crate::ui::elements::{Document, BODY_ID};
+use crate::ui::elements::Document;
 
 pub use crate::ui::elements::styles::Position;
 
@@ -122,6 +122,7 @@ pub enum LayoutKind {
         isolated: bool,
         position: Position,
         fixed_containing_block: Option<u64>,
+        fixed_to_viewport: bool,
         flex_or_grid_item: bool,
         children: Vec<Layout>,
     },
@@ -252,7 +253,7 @@ impl Layout {
         matches!(
             self.kind,
             LayoutKind::Box {
-                fixed_containing_block: Some(BODY_ID),
+                fixed_to_viewport: true,
                 ..
             }
         )
@@ -416,6 +417,7 @@ mod tests {
                 isolated,
                 position,
                 fixed_containing_block: None,
+                fixed_to_viewport: false,
                 flex_or_grid_item: false,
                 children,
             },
@@ -454,6 +456,7 @@ mod tests {
                 isolated: false,
                 position: Position::Static,
                 fixed_containing_block: None,
+                fixed_to_viewport: false,
                 flex_or_grid_item: false,
                 children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
             },
