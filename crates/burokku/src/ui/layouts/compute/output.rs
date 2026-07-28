@@ -46,7 +46,7 @@ impl ElementLayoutTree<'_> {
         parent_transform: Transform,
         flex_or_grid_item: bool,
     ) -> Layout {
-        self.to_layout_with_fixed_containing_block(
+        self.to_layout_with_containing_blocks(
             node,
             parent_location,
             ancestor_clips,
@@ -71,9 +71,9 @@ impl ElementLayoutTree<'_> {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "retained output needs normal and fixed containing-block state"
+        reason = "retained output needs normal and out-of-flow containing-block state"
     )]
-    fn to_layout_with_fixed_containing_block(
+    fn to_layout_with_containing_blocks(
         &self,
         node: usize,
         parent_location: Point<f32>,
@@ -242,7 +242,7 @@ impl ElementLayoutTree<'_> {
                                 } else {
                                     (child_parent, descendant_clips.as_slice(), world_transform)
                                 };
-                            self.to_layout_with_fixed_containing_block(
+                            self.to_layout_with_containing_blocks(
                                 *child,
                                 parent_location,
                                 clips,
@@ -350,7 +350,7 @@ impl ElementLayoutTree<'_> {
                                     } else {
                                         (child_parent, descendant_clips.as_slice(), world_transform)
                                     };
-                                self.to_layout_with_fixed_containing_block(
+                                self.to_layout_with_containing_blocks(
                                     *child,
                                     parent_location,
                                     clips,
