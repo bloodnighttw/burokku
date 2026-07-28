@@ -22,7 +22,12 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
     }
 }
 
-fn box_layout(element_id: u64, stacking_layer: StackingLayer, children: Vec<Layout>) -> Layout {
+fn box_layout(
+    element_id: u64,
+    z_index: Option<i32>,
+    isolated: bool,
+    children: Vec<Layout>,
+) -> Layout {
     Layout {
         element_id,
         x: 0.0,
@@ -34,7 +39,8 @@ fn box_layout(element_id: u64, stacking_layer: StackingLayer, children: Vec<Layo
         scroll: None,
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
-            stacking_layer,
+            z_index,
+            isolated,
             children,
         },
     }
@@ -67,7 +73,8 @@ fn hit_testing_returns_the_topmost_child() {
         scroll: None,
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
-            stacking_layer: StackingLayer::default(),
+            z_index: None,
+            isolated: false,
             children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
         },
     };
@@ -78,13 +85,14 @@ fn hit_testing_returns_the_topmost_child() {
 
 #[test]
 fn iterator_uses_stacking_context_render_order() {
-    let high_descendant = box_layout(3, StackingLayer::new(Some(10), false), vec![]);
-    let ordinary_parent = box_layout(2, StackingLayer::default(), vec![high_descendant]);
-    let middle_context = box_layout(4, StackingLayer::new(Some(5), false), vec![]);
-    let negative_context = box_layout(5, StackingLayer::new(Some(-1), false), vec![]);
+    let high_descendant = box_layout(3, Some(10), false, vec![]);
+    let ordinary_parent = box_layout(2, None, false, vec![high_descendant]);
+    let middle_context = box_layout(4, Some(5), false, vec![]);
+    let negative_context = box_layout(5, Some(-1), false, vec![]);
     let root = box_layout(
         1,
-        StackingLayer::default(),
+        None,
+        false,
         vec![ordinary_parent, middle_context, negative_context],
     );
 
@@ -94,14 +102,10 @@ fn iterator_uses_stacking_context_render_order() {
 
 #[test]
 fn isolation_contains_descendant_z_indices() {
-    let high_descendant = box_layout(3, StackingLayer::new(Some(10), false), vec![]);
-    let isolated_parent = box_layout(2, StackingLayer::new(None, true), vec![high_descendant]);
-    let middle_context = box_layout(4, StackingLayer::new(Some(5), false), vec![]);
-    let root = box_layout(
-        1,
-        StackingLayer::default(),
-        vec![isolated_parent, middle_context],
-    );
+    let high_descendant = box_layout(3, Some(10), false, vec![]);
+    let isolated_parent = box_layout(2, None, true, vec![high_descendant]);
+    let middle_context = box_layout(4, Some(5), false, vec![]);
+    let root = box_layout(1, None, false, vec![isolated_parent, middle_context]);
 
     assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
     assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 4);
@@ -109,10 +113,10 @@ fn isolation_contains_descendant_z_indices() {
 
 #[test]
 fn reverse_iterator_is_the_exact_reverse_render_order() {
-    let low = box_layout(2, StackingLayer::new(Some(-2), false), vec![]);
-    let automatic = box_layout(3, StackingLayer::default(), vec![text_layout(4, 0.0, 0.0)]);
-    let high = box_layout(5, StackingLayer::new(Some(8), false), vec![]);
-    let root = box_layout(1, StackingLayer::default(), vec![high, automatic, low]);
+    let low = box_layout(2, Some(-2), false, vec![]);
+    let automatic = box_layout(3, None, false, vec![text_layout(4, 0.0, 0.0)]);
+    let high = box_layout(5, Some(8), false, vec![]);
+    let root = box_layout(1, None, false, vec![high, automatic, low]);
 
     let forward = element_ids(root.iter());
     let reverse = element_ids(root.iter_rev());

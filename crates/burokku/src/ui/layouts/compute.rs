@@ -28,17 +28,15 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        Color as ElementColor, FontStyleValue, LengthPercentageValue, LineHeightValue,
+        Color as ElementColor, FontStyleValue, Isolation, LengthPercentageValue, LineHeightValue,
         MaxSizeValue, Overflow as ElementOverflow, OverflowWrapValue, SizeValue,
         Style as ElementStyle, TextAlignValue, TextDecorationLineValue, WhiteSpaceValue,
-        WordBreakValue,
+        WordBreakValue, ZIndex,
     },
     Document, ElementKind, BODY_ID,
 };
 
-use super::{
-    Layout, LayoutKind, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis, StackingLayer,
-};
+use super::{Layout, LayoutKind, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis};
 
 /// Computes a renderable layout tree from an element document.
 ///
@@ -490,7 +488,11 @@ impl ElementLayoutTree<'_> {
                                     matrix: data.paint_style.transform.matrix,
                                 },
                             ),
-                            stacking_layer: StackingLayer::from_style(&data.paint_style),
+                            z_index: match data.paint_style.z_index {
+                                ZIndex::Auto => None,
+                                ZIndex::Value(index) => Some(index),
+                            },
+                            isolated: data.paint_style.isolation == Isolation::Isolate,
                             children,
                         },
                         scroll,
@@ -1873,7 +1875,7 @@ mod tests {
     }
 
     #[test]
-    fn carries_z_index_and_isolation_into_layout_layers() {
+    fn carries_z_index_and_isolation_into_layout() {
         let mut document = Document::new();
         let indexed = document.create_node(ElementKind::Div);
         let isolated = document.create_node(ElementKind::Div);
@@ -1887,11 +1889,23 @@ mod tests {
         let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
         let children = layout.children();
 
-        assert_eq!(
-            children[0].stacking_layer(),
-            StackingLayer::new(Some(-7), false)
-        );
-        assert_eq!(children[1].stacking_layer(), StackingLayer::new(None, true));
+        let LayoutKind::Box {
+            z_index, isolated, ..
+        } = &children[0].kind
+        else {
+            panic!("indexed child should be a box");
+        };
+        assert_eq!(*z_index, Some(-7));
+        assert!(!isolated);
+
+        let LayoutKind::Box {
+            z_index, isolated, ..
+        } = &children[1].kind
+        else {
+            panic!("isolated child should be a box");
+        };
+        assert_eq!(*z_index, None);
+        assert!(*isolated);
     }
 
     #[test]

@@ -1,66 +1,42 @@
-use crate::ui::elements::styles::{Isolation, Style as ElementStyle, ZIndex};
+use super::{Layout, LayoutKind};
 
-use super::Layout;
+pub(super) trait Stacking {
+    fn z_index(&self) -> Option<i32>;
 
-/// The stacking properties attached to a rendered box.
-///
-/// A numeric z-index or isolation creates a stacking context. An isolated box
-/// with an automatic z-index participates at layer zero in its parent context.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct StackingLayer {
-    z_index: Option<i32>,
-    isolated: bool,
-    effect_context: bool,
+    fn is_isolated(&self) -> bool;
+
+    // determine that this stacking need to create new stacking context or not.
+    fn establishes_stacking_context(&self) -> bool;
+
+    fn stacking_index(&self) -> i32 {
+        self.z_index().unwrap_or(0)
+    }
 }
 
-impl StackingLayer {
-    pub const fn new(z_index: Option<i32>, isolated: bool) -> Self {
-        Self {
-            z_index,
-            isolated,
-            effect_context: false,
+impl Stacking for Layout {
+    fn z_index(&self) -> Option<i32> {
+        match &self.kind {
+            LayoutKind::Box { z_index, .. } => *z_index,
+            LayoutKind::Text { .. } => None,
         }
     }
 
-    pub const fn z_index(self) -> Option<i32> {
-        self.z_index
-    }
-
-    pub const fn is_isolated(self) -> bool {
-        self.isolated
-    }
-
-    /// Whether this layer establishes a new stacking context.
-    ///
-    /// Burokku currently supports numeric `z-index`, `isolation: isolate`,
-    /// opacity, and transforms as context-creating style conditions.
-    pub const fn establishes_context(self) -> bool {
-        self.z_index.is_some() || self.isolated || self.effect_context
-    }
-
-    /// Compatibility alias for [`Self::establishes_context`].
-    pub const fn creates_context(self) -> bool {
-        self.establishes_context()
-    }
-
-    pub const fn index(self) -> i32 {
-        match self.z_index {
-            Some(index) => index,
-            None => 0,
+    fn is_isolated(&self) -> bool {
+        match &self.kind {
+            LayoutKind::Box { isolated, .. } => *isolated,
+            LayoutKind::Text { .. } => false,
         }
     }
 
-    pub(crate) fn from_style(style: &ElementStyle) -> Self {
-        let z_index = match style.z_index {
-            ZIndex::Auto => None,
-            ZIndex::Value(index) => Some(index),
+    fn establishes_stacking_context(&self) -> bool {
+        let creates_effect_context = match &self.kind {
+            LayoutKind::Box { style, .. } => {
+                style.opacity < 1.0 || style.transform != Default::default()
+            }
+            LayoutKind::Text { .. } => false,
         };
-        let isolated = style.isolation == Isolation::Isolate;
-        Self {
-            z_index,
-            isolated,
-            effect_context: style.opacity < 1.0 || style.transform != Default::default(),
-        }
+
+        self.z_index().is_some() || self.is_isolated() || creates_effect_context
     }
 }
 
@@ -76,7 +52,7 @@ pub(super) fn descendant_contexts(root: &Layout) -> Vec<&Layout> {
     while let Some(mut children) = pending.pop() {
         if let Some(layout) = children.next() {
             pending.push(children);
-            if layout.stacking_layer().establishes_context() {
+            if layout.establishes_stacking_context() {
                 contexts.push(layout);
             } else {
                 pending.push(layout.children().iter());
@@ -84,57 +60,45 @@ pub(super) fn descendant_contexts(root: &Layout) -> Vec<&Layout> {
         }
     }
 
-    contexts.sort_by_key(|layout| layout.stacking_layer().index());
+    contexts.sort_by_key(|layout| layout.stacking_index());
     contexts
 }
 
 #[cfg(test)]
 mod tests {
+    use render::TextSystem;
+
+    use crate::ui::elements::{Document, ElementKind, BODY_ID};
+
     use super::*;
+    use crate::ui::layouts::compute_layout;
 
-    #[test]
-    fn numeric_z_index_establishes_a_context() {
-        let style = ElementStyle {
-            z_index: ZIndex::Value(3),
-            ..ElementStyle::default()
-        };
+    fn styled_child(property: &str, value: &str) -> Layout {
+        let mut document = Document::new();
+        let child = document.create_node(ElementKind::Div);
+        document.set_style(child, property, Some(value)).unwrap();
+        document.insert(BODY_ID, child, None).unwrap();
 
-        assert!(StackingLayer::from_style(&style).establishes_context());
+        compute_layout(&document, 100.0, 100.0, &mut TextSystem::new())
+            .children()
+            .first()
+            .cloned()
+            .expect("document should contain the styled child")
     }
 
     #[test]
-    fn isolation_establishes_a_context_at_layer_zero() {
-        let style = ElementStyle {
-            isolation: Isolation::Isolate,
-            ..ElementStyle::default()
-        };
-        let layer = StackingLayer::from_style(&style);
+    fn default_box_does_not_establish_a_context() {
+        let child = styled_child("display", "block");
 
-        assert!(layer.establishes_context());
-        assert_eq!(layer.index(), 0);
-    }
-
-    #[test]
-    fn automatic_styles_do_not_establish_a_context() {
-        let layer = StackingLayer::from_style(&ElementStyle::default());
-
-        assert!(!layer.establishes_context());
+        assert!(!child.establishes_stacking_context());
     }
 
     #[test]
     fn opacity_and_transforms_establish_contexts() {
-        let opacity = ElementStyle {
-            opacity: 0.5,
-            ..ElementStyle::default()
-        };
-        let transformed = ElementStyle {
-            transform: crate::ui::elements::styles::Transform {
-                matrix: [1.0, 0.0, 0.0, 1.0, 4.0, 0.0],
-            },
-            ..ElementStyle::default()
-        };
+        let opacity = styled_child("opacity", "0.5");
+        let transformed = styled_child("transform", "translateX(4px)");
 
-        assert!(StackingLayer::from_style(&opacity).establishes_context());
-        assert!(StackingLayer::from_style(&transformed).establishes_context());
+        assert!(opacity.establishes_stacking_context());
+        assert!(transformed.establishes_stacking_context());
     }
 }
