@@ -17,7 +17,7 @@ use taffy::{
 use crate::ui::elements::{styles::Position, Document, BODY_ID};
 
 use super::{Layout, ScrollOffset};
-use tree::{add_element, establish_fixed_containing_blocks, ElementLayoutTree};
+use tree::{add_element, establish_positioning_containing_blocks, ElementLayoutTree};
 
 #[cfg(test)]
 use super::LayoutKind;
@@ -57,9 +57,12 @@ pub(super) fn compute_layout_with_scroll(
     };
     let mut nodes = Vec::new();
     let root = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
-    let has_fixed = nodes
-        .iter()
-        .any(|node| node.paint_style.position == Position::Fixed);
+    let has_out_of_flow = nodes.iter().any(|node| {
+        matches!(
+            node.paint_style.position,
+            Position::Absolute | Position::Fixed
+        )
+    });
     nodes[root].style.size = Size {
         width: Dimension::length(viewport.width),
         height: Dimension::length(viewport.height),
@@ -70,13 +73,13 @@ pub(super) fn compute_layout_with_scroll(
         text_system,
         scroll_offsets,
     };
-    if has_fixed {
+    if has_out_of_flow {
         compute_root_layout(
             &mut tree,
             NodeId::from(root),
             viewport.map(AvailableSpace::Definite),
         );
-        establish_fixed_containing_blocks(&mut tree.nodes, root);
+        establish_positioning_containing_blocks(&mut tree.nodes, root);
         tree.clear_layout_caches();
     }
     compute_root_layout(
@@ -626,6 +629,92 @@ mod tests {
 
         assert_eq!((first.x, first.y), (0.0, 0.0));
         assert_eq!((second.x, second.y), (0.0, 20.0));
+    }
+
+    #[test]
+    fn absolute_boxes_use_the_nearest_positioned_ancestor() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let static_wrapper = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("width", "300px"),
+            ("height", "100px"),
+        ] {
+            document
+                .set_style(positioned, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("margin-left", "50px"),
+            ("width", "100px"),
+            ("height", "20px"),
+        ] {
+            document
+                .set_style(static_wrapper, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "absolute"),
+            ("right", "0px"),
+            ("top", "5px"),
+            ("width", "10px"),
+            ("height", "10px"),
+        ] {
+            document.set_style(absolute, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, static_wrapper, None).unwrap();
+        document.insert(static_wrapper, absolute, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 200.0, &mut TextSystem::new());
+        let positioned = &layout.children()[0];
+        let static_wrapper = &positioned.children()[0];
+        let absolute = &static_wrapper.children()[0];
+
+        assert_eq!((static_wrapper.x, static_wrapper.y), (50.0, 0.0));
+        assert_eq!((absolute.x, absolute.y), (290.0, 5.0));
+    }
+
+    #[test]
+    fn absolute_auto_insets_preserve_their_static_position() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let preceding = document.create_node(ElementKind::Div);
+        let static_wrapper = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        document
+            .set_style(positioned, "position", Some("relative"))
+            .unwrap();
+        document
+            .set_style(positioned, "width", Some("300px"))
+            .unwrap();
+        document
+            .set_style(preceding, "height", Some("20px"))
+            .unwrap();
+        document
+            .set_style(static_wrapper, "margin-left", Some("30px"))
+            .unwrap();
+        document
+            .set_style(static_wrapper, "height", Some("40px"))
+            .unwrap();
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document.set_style(absolute, "width", Some("10px")).unwrap();
+        document
+            .set_style(absolute, "height", Some("10px"))
+            .unwrap();
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, preceding, None).unwrap();
+        document.insert(positioned, static_wrapper, None).unwrap();
+        document.insert(static_wrapper, absolute, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 200.0, &mut TextSystem::new());
+        let absolute = &layout.children()[0].children()[1].children()[0];
+
+        assert_eq!((absolute.x, absolute.y), (30.0, 20.0));
     }
 
     #[test]

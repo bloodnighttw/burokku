@@ -57,8 +57,8 @@ pub(super) fn add_element(
         rendered_spans: Vec::new(),
         children: Vec::with_capacity(element.children.len()),
         layout_children: Vec::with_capacity(element.children.len()),
-        fixed_containing_block: None,
-        fixed_static_offset: Point::ZERO,
+        positioning_containing_block: None,
+        static_offset: Point::ZERO,
         cache: Cache::new(),
         layout: TaffyLayout::new(),
         first_baseline: None,
@@ -84,29 +84,28 @@ pub(super) fn add_element(
     node_id
 }
 
-/// Reparents viewport-fixed boxes in the layout tree without changing the
+/// Reparents out-of-flow boxes in the layout tree without changing the
 /// retained DOM/paint tree.
 ///
-/// Taffy models fixed boxes as absolutely positioned boxes. Making them direct
-/// layout children of the viewport—or of the nearest transformed ancestor—
-/// gives them the CSS fixed-positioning containing block while preserving
-/// their original ancestry for inheritance and stacking.
-pub(super) fn establish_fixed_containing_blocks(nodes: &mut [LayoutNode], root: usize) {
+/// Taffy lays absolute boxes out against their direct layout parent. CSS
+/// instead uses the nearest positioned ancestor for absolute boxes and the
+/// viewport or nearest transformed ancestor for fixed boxes.
+pub(super) fn establish_positioning_containing_blocks(nodes: &mut [LayoutNode], root: usize) {
     let mut absolute_locations = vec![Point::ZERO; nodes.len()];
     collect_absolute_locations(nodes, root, Point::ZERO, &mut absolute_locations);
 
     for node in nodes.iter_mut() {
         node.layout_children.clear();
-        node.fixed_containing_block = None;
-        node.fixed_static_offset = Point::ZERO;
+        node.positioning_containing_block = None;
+        node.static_offset = Point::ZERO;
     }
-    rebuild_layout_children(nodes, root, root, false);
+    rebuild_layout_children(nodes, root, root, root, false);
 
     for node in 0..nodes.len() {
-        let Some(owner) = nodes[node].fixed_containing_block else {
+        let Some(owner) = nodes[node].positioning_containing_block else {
             continue;
         };
-        nodes[node].fixed_static_offset = Point {
+        nodes[node].static_offset = Point {
             x: absolute_locations[node].x - absolute_locations[owner].x,
             y: absolute_locations[node].y - absolute_locations[owner].y,
         };
@@ -132,33 +131,47 @@ fn collect_absolute_locations(
 fn rebuild_layout_children(
     nodes: &mut [LayoutNode],
     node: usize,
+    absolute_containing_block: usize,
     fixed_containing_block: usize,
     ancestor_hidden: bool,
 ) {
     let children = nodes[node].children.clone();
     let descendants_hidden = ancestor_hidden || nodes[node].style.display == Display::None;
+    let establishes_absolute_containing_block = node == absolute_containing_block
+        || nodes[node].paint_style.position.is_positioned()
+        || !nodes[node].paint_style.transform.is_none();
+    let descendant_absolute_containing_block = if establishes_absolute_containing_block {
+        node
+    } else {
+        absolute_containing_block
+    };
+    let descendant_fixed_containing_block = if !nodes[node].paint_style.transform.is_none() {
+        node
+    } else {
+        fixed_containing_block
+    };
 
     for child in children {
-        let is_fixed = !descendants_hidden && nodes[child].paint_style.position == Position::Fixed;
-        let layout_parent = if is_fixed {
-            fixed_containing_block
+        let out_of_flow_owner = if descendants_hidden {
+            None
         } else {
-            node
+            match nodes[child].paint_style.position {
+                Position::Absolute => Some(descendant_absolute_containing_block),
+                Position::Fixed => Some(descendant_fixed_containing_block),
+                Position::Static | Position::Relative => None,
+            }
         };
-        if is_fixed {
-            nodes[child].fixed_containing_block = Some(fixed_containing_block);
+        let layout_parent = out_of_flow_owner.unwrap_or(node);
+        if let Some(owner) = out_of_flow_owner {
+            nodes[child].positioning_containing_block = Some(owner);
         }
         nodes[layout_parent].layout_children.push(child);
 
-        let child_fixed_containing_block = if !nodes[child].paint_style.transform.is_none() {
-            child
-        } else {
-            fixed_containing_block
-        };
         rebuild_layout_children(
             nodes,
             child,
-            child_fixed_containing_block,
+            descendant_absolute_containing_block,
+            descendant_fixed_containing_block,
             descendants_hidden,
         );
     }
@@ -226,10 +239,10 @@ pub(super) struct LayoutNode {
     pub(super) children: Vec<usize>,
     /// Children participating directly in this node's Taffy layout.
     pub(super) layout_children: Vec<usize>,
-    /// The viewport or transformed ancestor used to lay out a fixed box.
-    pub(super) fixed_containing_block: Option<usize>,
-    /// Hypothetical in-flow position, relative to the fixed containing block.
-    pub(super) fixed_static_offset: Point<f32>,
+    /// The CSS containing block used to lay out an absolute or fixed box.
+    pub(super) positioning_containing_block: Option<usize>,
+    /// Hypothetical in-flow position, relative to the positioning containing block.
+    pub(super) static_offset: Point<f32>,
     cache: Cache,
     pub(super) layout: TaffyLayout,
     first_baseline: Option<f32>,
