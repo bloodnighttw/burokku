@@ -1,6 +1,10 @@
+use crate::ui::elements::BODY_ID;
+
 use super::{Layout, LayoutKind};
 
 pub(super) trait Stacking {
+    fn is_root(&self) -> bool;
+
     fn z_index(&self) -> Option<i32>;
 
     fn is_isolated(&self) -> bool;
@@ -18,6 +22,10 @@ pub(super) trait Stacking {
 }
 
 impl Stacking for Layout {
+    fn is_root(&self) -> bool {
+        self.element_id == BODY_ID
+    }
+
     fn z_index(&self) -> Option<i32> {
         match &self.kind {
             LayoutKind::Box { z_index, .. } => *z_index,
@@ -59,7 +67,7 @@ impl Stacking for Layout {
         let creates_indexed_context =
             self.z_index().is_some() && (self.is_positioned() || self.is_flex_or_grid_item());
 
-        creates_indexed_context || self.is_isolated() || creates_effect_context
+        self.is_root() || creates_indexed_context || self.is_isolated() || creates_effect_context
     }
 }
 
@@ -133,7 +141,17 @@ mod tests {
     fn default_box_does_not_establish_a_context() {
         let child = styled_child(None, &[]);
 
+        assert!(!child.is_root());
         assert!(!child.establishes_stacking_context());
+    }
+
+    #[test]
+    fn root_always_establishes_a_context() {
+        let document = Document::new();
+        let root = compute_layout(&document, 100.0, 100.0, &mut TextSystem::new());
+
+        assert!(root.is_root());
+        assert!(root.establishes_stacking_context());
     }
 
     #[test]
