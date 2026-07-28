@@ -13,6 +13,7 @@ use crate::ui::elements::Document;
 pub use crate::ui::elements::styles::Position;
 
 pub use iter::{LayoutIter, ReverseLayoutIter};
+pub(crate) use stacking::{descendant_contexts, zero_level_entries, Stacking, ZeroLevelEntry};
 
 /// Computes a renderable layout tree from an element document.
 pub fn compute_layout(
@@ -483,6 +484,18 @@ mod tests {
 
         assert_eq!(forward, [1, 2, 3, 4, 5]);
         assert_eq!(reverse, [5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn iterator_separates_block_decorations_from_text_content() {
+        let first =
+            box_layout_with_positioning(2, None, false, false, vec![text_layout(3, 20.0, 20.0)]);
+        let second = box_layout_with_positioning(4, None, false, false, vec![]);
+        let root = box_layout(1, None, false, vec![first, second]);
+
+        assert_eq!(element_ids(root.iter()), [1, 2, 4, 3]);
+        assert_eq!(element_ids(root.iter_rev()), [3, 4, 2, 1]);
+        assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 3);
     }
 
     #[test]

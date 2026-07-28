@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::{Canvas, TextSystem};
+use crate::{Canvas, PaintLayer, TextSystem};
 use composite::{CompositeEffect, CompositeItem, CompositeRenderer};
 use gpu::Gpu;
 use shape::ShapeRenderer;
@@ -192,11 +192,16 @@ impl Renderer {
         budget: &mut GroupBudget,
         depth: usize,
     ) -> Result<Duration, RenderError> {
-        let mut composite_items = Vec::<CompositeItem>::new();
+        let mut composite_items: [Vec<CompositeItem>; PaintLayer::COUNT] =
+            std::array::from_fn(|_| Vec::new());
         let mut reserved = 0_u64;
+        // Render groups to transparent textures before the parent pass. Their
+        // completed pixels can then be inserted atomically into the requested
+        // parent paint layer.
         if depth < budget.maximum_depth {
             for command in canvas.commands() {
                 let crate::DrawCommand::Group {
+                    layer,
                     canvas,
                     origin,
                     transform,
@@ -245,7 +250,7 @@ impl Renderer {
                     },
                 );
                 if let Some(item) = item {
-                    composite_items.push(item);
+                    composite_items[layer.index()].push(item);
                     reserved = reserved.saturating_add(budget.bytes_per_target);
                 } else {
                     budget.release(budget.bytes_per_target);
@@ -280,10 +285,17 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.shapes.draw_base(&mut pass);
-            self.composites.draw(&mut pass, &composite_items, size);
-            self.text.draw(&mut pass)?;
-            self.shapes.draw_overlay(&mut pass);
+            // Shapes, atomic groups, and text meet only at these explicit
+            // stages. This is what lets a caller place block backgrounds below
+            // text while keeping positioned contexts and outlines above it.
+            for layer in PaintLayer::ALL {
+                self.shapes.draw_layer(&mut pass, layer);
+                self.composites
+                    .draw(&mut pass, &composite_items[layer.index()], size);
+                if layer == PaintLayer::Content {
+                    self.text.draw(&mut pass)?;
+                }
+            }
         }
         let submit_started_at = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);
@@ -322,9 +334,59 @@ impl GroupBudget {
 mod tests {
     use super::*;
     use crate::{
-        BackgroundImage, Border, BoxShadow, BoxStyle, Clip, Color, CornerRadius, GradientStop,
-        Outline, RasterImage, Rect, TextStyle, Transform,
+        BackgroundImage, Border, BoxDecoration, BoxShadow, BoxStyle, Clip, Color, CornerRadius,
+        DecorationStyle, GradientStop, Outline, PaintLayer, RasterImage, Rect, TextStyle,
+        Transform,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn renders_small_decorations_in_layer_order() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok((gpu, adapter)) = Gpu::new(&instance, None).await else {
+            return;
+        };
+        let surface = SurfaceState::offscreen(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            SurfaceSize::new(32, 32),
+        );
+        let mut renderer = Renderer::from_gpu(gpu, surface);
+        let mut text_system = TextSystem::new();
+        let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
+
+        // Submit the front decoration first to prove paint layers, rather than
+        // insertion order across layers, decide the final composition.
+        canvas.draw_decoration(
+            PaintLayer::Outline,
+            Rect::new(8.0, 8.0, 16.0, 16.0),
+            BoxDecoration::Background {
+                color: Color::from_rgba8(0, 0, 255, 255),
+                image: None,
+            },
+            DecorationStyle::default(),
+        );
+        canvas.draw_decoration(
+            PaintLayer::ContextBackground,
+            Rect::new(0.0, 0.0, 32.0, 32.0),
+            BoxDecoration::Background {
+                color: Color::from_rgba8(255, 0, 0, 255),
+                image: None,
+            },
+            DecorationStyle::default(),
+        );
+
+        let image = readback::draw_to_image(
+            &mut renderer,
+            &canvas,
+            SurfaceSize::new(32, 32),
+            &mut text_system,
+        )
+        .expect("off-screen layered decoration render");
+        let center = image.pixel(16, 16).unwrap();
+        assert!(center[2] > 220 && center[0] < 40, "{center:?}");
+        let edge = image.pixel(2, 2).unwrap();
+        assert!(edge[0] > 220 && edge[2] < 40, "{edge:?}");
+        drop(adapter);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn renders_box_border_outline_text_and_readback() {

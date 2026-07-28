@@ -22,10 +22,16 @@ enum Task<'a> {
     /// Paint a positioned `z-index: auto` subtree in the zero-level phase
     /// without containing descendant stacking contexts.
     PositionedAuto(&'a Layout),
-    /// Visit an ordinary layout in the middle, in-flow paint phase.
-    Middle(&'a Layout),
+    /// Visit an ordinary layout in one in-flow paint phase.
+    Middle(&'a Layout, MiddlePhase),
     /// Continue visiting ordinary children from first to last.
-    MiddleChildren(std::slice::Iter<'a, Layout>),
+    MiddleChildren(std::slice::Iter<'a, Layout>, MiddlePhase),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MiddlePhase {
+    Box,
+    Text,
 }
 
 impl<'a> LayoutIter<'a> {
@@ -50,23 +56,31 @@ impl<'a> Iterator for LayoutIter<'a> {
                     return Some(layout);
                 }
                 Task::PositionedAuto(layout) => {
-                    self.pending
-                        .push(Task::MiddleChildren(layout.children().iter()));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Text,
+                    ));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Box,
+                    ));
                     return Some(layout);
                 }
-                Task::Middle(layout) => {
+                Task::Middle(layout, phase) => {
                     if layout.establishes_stacking_context() || layout.is_positioned_auto() {
                         continue;
                     }
 
                     self.pending
-                        .push(Task::MiddleChildren(layout.children().iter()));
-                    return Some(layout);
+                        .push(Task::MiddleChildren(layout.children().iter(), phase));
+                    if phase.matches(layout) {
+                        return Some(layout);
+                    }
                 }
-                Task::MiddleChildren(mut children) => {
+                Task::MiddleChildren(mut children, phase) => {
                     if let Some(child) = children.next() {
-                        self.pending.push(Task::MiddleChildren(children));
-                        self.pending.push(Task::Middle(child));
+                        self.pending.push(Task::MiddleChildren(children, phase));
+                        self.pending.push(Task::Middle(child, phase));
                     }
                 }
             }
@@ -98,8 +112,14 @@ impl<'a> LayoutIter<'a> {
                 ZeroLevelEntry::Context(layout) => Task::Context(layout),
                 ZeroLevelEntry::PositionedAuto(layout) => Task::PositionedAuto(layout),
             }));
-        self.pending
-            .push(Task::MiddleChildren(context_root.children().iter()));
+        self.pending.push(Task::MiddleChildren(
+            context_root.children().iter(),
+            MiddlePhase::Text,
+        ));
+        self.pending.push(Task::MiddleChildren(
+            context_root.children().iter(),
+            MiddlePhase::Box,
+        ));
         self.pending.extend(
             contexts
                 .iter()
@@ -107,5 +127,15 @@ impl<'a> LayoutIter<'a> {
                 .filter(|layout| layout.stacking_index() < 0)
                 .map(|layout| Task::Context(layout)),
         );
+    }
+}
+
+impl MiddlePhase {
+    fn matches(self, layout: &Layout) -> bool {
+        matches!(
+            (self, &layout.kind),
+            (Self::Box, super::super::LayoutKind::Box { .. })
+                | (Self::Text, super::super::LayoutKind::Text { .. })
+        )
     }
 }
