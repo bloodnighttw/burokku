@@ -2,9 +2,11 @@ use render::{Clip, CornerRadius, Rect as RenderRect, Transform};
 use taffy::geometry::Point;
 
 use crate::ui::elements::styles::Overflow as ElementOverflow;
+use crate::ui::layouts::{ScrollContainer, Scrollbar, ScrollbarAxis};
 
 use super::paint::box_style;
-use super::{Layout, LayoutNode, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis};
+use super::tree::LayoutNode;
+use super::{Layout, ScrollOffset};
 
 #[derive(Clone, Copy)]
 pub(super) struct OffsetContext {
