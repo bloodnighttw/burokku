@@ -116,6 +116,7 @@ impl ScrollContainer {
 pub enum LayoutKind {
     Box {
         style: BoxStyle,
+        has_transform: bool,
         z_index: Option<i32>,
         isolated: bool,
         positioned: bool,
@@ -126,6 +127,7 @@ pub enum LayoutKind {
         text: String,
         spans: Vec<TextSpan>,
         style: TextStyle,
+        has_transform: bool,
         line_count: usize,
         runs: Vec<TextRunMetrics>,
     },

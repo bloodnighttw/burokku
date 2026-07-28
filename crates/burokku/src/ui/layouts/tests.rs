@@ -16,6 +16,7 @@ fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
             text: "Burokku".into(),
             spans: vec![TextSpan::new("Burokku", TextStyle::default())],
             style: TextStyle::default(),
+            has_transform: false,
             line_count: 1,
             runs: Vec::new(),
         },
@@ -39,6 +40,7 @@ fn box_layout(
         scroll: None,
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
+            has_transform: false,
             z_index,
             isolated,
             positioned: true,
@@ -75,6 +77,7 @@ fn hit_testing_returns_the_topmost_child() {
         scroll: None,
         kind: LayoutKind::Box {
             style: BoxStyle::default(),
+            has_transform: false,
             z_index: None,
             isolated: false,
             positioned: false,

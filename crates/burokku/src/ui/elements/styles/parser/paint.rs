@@ -13,9 +13,9 @@ use super::{
 
 pub(super) fn parse_transform(name: &str, value: &str) -> Result<Transform, StyleError> {
     if value.eq_ignore_ascii_case("none") {
-        return Ok(Transform::IDENTITY);
+        return Ok(Transform::None);
     }
-    let mut result = Transform::IDENTITY.matrix;
+    let mut result = Transform::IDENTITY_MATRIX;
     let mut rest = value.trim();
     while !rest.is_empty() {
         let open = rest
@@ -121,7 +121,7 @@ pub(super) fn parse_transform(name: &str, value: &str) -> Result<Transform, Styl
         result = multiply_affine(result, matrix);
         rest = rest[close + 1..].trim();
     }
-    Ok(Transform { matrix: result })
+    Ok(Transform::Matrix(result))
 }
 
 pub(super) fn multiply_affine(left: [f32; 6], right: [f32; 6]) -> [f32; 6] {
