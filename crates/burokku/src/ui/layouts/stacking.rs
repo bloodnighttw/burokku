@@ -19,6 +19,10 @@ pub(super) trait Stacking {
     fn stacking_index(&self) -> i32 {
         self.z_index().unwrap_or(0)
     }
+
+    fn is_positioned_auto(&self) -> bool {
+        self.is_positioned() && self.z_index().is_none()
+    }
 }
 
 impl Stacking for Layout {
@@ -99,6 +103,47 @@ pub(super) fn descendant_contexts(root: &Layout) -> Vec<&Layout> {
 
     contexts.sort_by_key(|layout| layout.stacking_index());
     contexts
+}
+
+/// An entry in the zero stack level of `root`.
+///
+/// A real stacking context at stack level zero paints atomically. A
+/// positioned box with `z-index: auto` paints in the same phase, but does not
+/// establish a context: stacking-context descendants still participate in
+/// `root`.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ZeroLevelEntry<'a> {
+    Context(&'a Layout),
+    PositionedAuto(&'a Layout),
+}
+
+/// Finds zero-level contexts and positioned `z-index: auto` boxes in tree
+/// order.
+///
+/// Traversal stops at real context boundaries. It continues through
+/// positioned-auto boxes because their descendant contexts belong to `root`.
+pub(super) fn zero_level_entries(root: &Layout) -> Vec<ZeroLevelEntry<'_>> {
+    let mut entries = Vec::new();
+    let mut pending = vec![root.children().iter()];
+
+    while let Some(mut children) = pending.pop() {
+        if let Some(layout) = children.next() {
+            pending.push(children);
+            if layout.establishes_stacking_context() {
+                if layout.stacking_index() == 0 {
+                    entries.push(ZeroLevelEntry::Context(layout));
+                }
+                continue;
+            }
+
+            if layout.is_positioned_auto() {
+                entries.push(ZeroLevelEntry::PositionedAuto(layout));
+            }
+            pending.push(layout.children().iter());
+        }
+    }
+
+    entries
 }
 
 #[cfg(test)]
