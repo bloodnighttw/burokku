@@ -3,7 +3,7 @@ use taffy::{
     prelude::Display,
     style::{
         GridAutoTracks, GridPlacement, GridTemplateComponent, GridTemplateTracks,
-        Style as TaffyStyle,
+        Position as TaffyPosition, Style as TaffyStyle,
     },
 };
 
@@ -32,6 +32,10 @@ pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyS
             bottom: style.bottom.into(),
         }
     };
+    let position = match style.position {
+        Position::Static | Position::Relative => TaffyPosition::Relative,
+        Position::Absolute | Position::Fixed => TaffyPosition::Absolute,
+    };
     TaffyStyle {
         display: if matches!(kind, ElementKind::Comment(_)) {
             Display::None
@@ -39,7 +43,7 @@ pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyS
             style.display
         },
         box_sizing: style.box_sizing,
-        position: style.position.into(),
+        position,
         overflow: Point {
             x: style.overflow_x.into(),
             y: style.overflow_y.into(),
