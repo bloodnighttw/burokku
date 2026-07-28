@@ -17,10 +17,16 @@ pub struct ReverseLayoutIter<'a> {
 
 #[derive(Debug)]
 enum Task<'a> {
+    /// Enter an atomic stacking context and schedule its layers front to back.
     Context(&'a Layout),
+    /// Visit a positioned `z-index: auto` subtree without containing its
+    /// descendant stacking contexts.
     PositionedAuto(&'a Layout),
+    /// Visit an ordinary layout after scheduling its children.
     Middle(&'a Layout),
+    /// Continue visiting ordinary children from last to first.
     MiddleChildren(std::slice::Iter<'a, Layout>),
+    /// Yield a layout after all content painted above it has been visited.
     Yield(&'a Layout),
 }
 
@@ -36,6 +42,9 @@ impl<'a> Iterator for ReverseLayoutIter<'a> {
     type Item = &'a Layout;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // This state machine mirrors the forward traversal without collecting
+        // it first. Children and higher stack levels are scheduled before
+        // `Yield`, so visually frontmost layouts are returned first.
         while let Some(task) = self.pending.pop() {
             match task {
                 Task::Context(layout) => self.schedule_context(layout),
@@ -74,6 +83,9 @@ impl<'a> ReverseLayoutIter<'a> {
         let contexts = descendant_contexts(context_root);
         let zero_level = zero_level_entries(context_root);
 
+        // `pending` is LIFO. Push the context root and lower layers first so
+        // positive contexts, zero-level entries, ordinary content, negative
+        // contexts, and finally the root are visited in reverse paint order.
         self.pending.push(Task::Yield(context_root));
         self.pending.extend(
             contexts
