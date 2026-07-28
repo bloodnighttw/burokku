@@ -17,9 +17,14 @@ pub struct LayoutIter<'a> {
 
 #[derive(Debug)]
 enum Task<'a> {
+    /// Enter an atomic stacking context, yielding its root before its layers.
     Context(&'a Layout),
+    /// Paint a positioned `z-index: auto` subtree in the zero-level phase
+    /// without containing descendant stacking contexts.
     PositionedAuto(&'a Layout),
+    /// Visit an ordinary layout in the middle, in-flow paint phase.
     Middle(&'a Layout),
+    /// Continue visiting ordinary children from first to last.
     MiddleChildren(std::slice::Iter<'a, Layout>),
 }
 
@@ -35,6 +40,9 @@ impl<'a> Iterator for LayoutIter<'a> {
     type Item = &'a Layout;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Tasks form an explicit depth-first traversal stack. Each branch
+        // schedules the work that must follow the returned layout, allowing
+        // the iterator to yield one layout without flattening the whole tree.
         while let Some(task) = self.pending.pop() {
             match task {
                 Task::Context(layout) => {
@@ -75,6 +83,9 @@ impl<'a> LayoutIter<'a> {
         let contexts = descendant_contexts(context_root);
         let zero_level = zero_level_entries(context_root);
 
+        // `pending` is LIFO, so phases are pushed from frontmost to backmost.
+        // They are consequently visited as negative contexts, ordinary
+        // content, zero-level entries, and finally positive contexts.
         self.pending.extend(
             contexts
                 .iter()
