@@ -602,6 +602,33 @@ mod tests {
     }
 
     #[test]
+    fn static_boxes_ignore_inset_properties() {
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "static"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "50px"),
+            ("height", "20px"),
+        ] {
+            document.set_style(first, property, Some(value)).unwrap();
+        }
+        document.set_style(second, "width", Some("50px")).unwrap();
+        document.set_style(second, "height", Some("20px")).unwrap();
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(BODY_ID, second, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let first = &layout.children()[0];
+        let second = &layout.children()[1];
+
+        assert_eq!((first.x, first.y), (0.0, 0.0));
+        assert_eq!((second.x, second.y), (0.0, 20.0));
+    }
+
+    #[test]
     fn carries_z_index_and_isolation_into_layout() {
         let mut document = Document::new();
         let indexed = document.create_node(ElementKind::Div);
