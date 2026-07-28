@@ -1,9 +1,17 @@
+use crate::ui::elements::BODY_ID;
+
 use super::{Layout, LayoutKind};
 
 pub(super) trait Stacking {
+    fn is_root(&self) -> bool;
+
     fn z_index(&self) -> Option<i32>;
 
     fn is_isolated(&self) -> bool;
+
+    fn is_positioned(&self) -> bool;
+
+    fn is_flex_or_grid_item(&self) -> bool;
 
     // determine that this stacking need to create new stacking context or not.
     fn establishes_stacking_context(&self) -> bool;
@@ -14,6 +22,10 @@ pub(super) trait Stacking {
 }
 
 impl Stacking for Layout {
+    fn is_root(&self) -> bool {
+        self.element_id == BODY_ID
+    }
+
     fn z_index(&self) -> Option<i32> {
         match &self.kind {
             LayoutKind::Box { z_index, .. } => *z_index,
@@ -28,15 +40,40 @@ impl Stacking for Layout {
         }
     }
 
+    fn is_positioned(&self) -> bool {
+        match &self.kind {
+            LayoutKind::Box { positioned, .. } => *positioned,
+            LayoutKind::Text { .. } => false,
+        }
+    }
+
+    fn is_flex_or_grid_item(&self) -> bool {
+        match &self.kind {
+            LayoutKind::Box {
+                flex_or_grid_item, ..
+            } => *flex_or_grid_item,
+            LayoutKind::Text { .. } => false,
+        }
+    }
+
     fn establishes_stacking_context(&self) -> bool {
         let creates_effect_context = match &self.kind {
-            LayoutKind::Box { style, .. } => {
-                style.opacity < 1.0 || style.transform != Default::default()
-            }
-            LayoutKind::Text { .. } => false,
+            LayoutKind::Box {
+                style,
+                has_transform,
+                ..
+            } => style.opacity < 1.0 || *has_transform,
+            LayoutKind::Text {
+                style,
+                has_transform,
+                ..
+            } => style.opacity < 1.0 || *has_transform,
         };
 
-        self.z_index().is_some() || self.is_isolated() || creates_effect_context
+        let creates_indexed_context =
+            self.z_index().is_some() && (self.is_positioned() || self.is_flex_or_grid_item());
+
+        self.is_root() || creates_indexed_context || self.is_isolated() || creates_effect_context
     }
 }
 
@@ -73,32 +110,77 @@ mod tests {
     use super::*;
     use crate::ui::layouts::compute_layout;
 
-    fn styled_child(property: &str, value: &str) -> Layout {
+    fn styled_child(parent_display: Option<&str>, styles: &[(&str, &str)]) -> Layout {
         let mut document = Document::new();
+        let parent = parent_display.map(|display| {
+            let parent = document.create_node(ElementKind::Div);
+            document
+                .set_style(parent, "display", Some(display))
+                .unwrap();
+            document.insert(BODY_ID, parent, None).unwrap();
+            parent
+        });
         let child = document.create_node(ElementKind::Div);
-        document.set_style(child, property, Some(value)).unwrap();
-        document.insert(BODY_ID, child, None).unwrap();
+        for (property, value) in styles {
+            document.set_style(child, property, Some(value)).unwrap();
+        }
+        document
+            .insert(parent.unwrap_or(BODY_ID), child, None)
+            .unwrap();
 
-        compute_layout(&document, 100.0, 100.0, &mut TextSystem::new())
+        let layout = compute_layout(&document, 100.0, 100.0, &mut TextSystem::new());
+        let parent = layout
             .children()
             .first()
-            .cloned()
-            .expect("document should contain the styled child")
+            .expect("document should contain a child");
+        parent_display
+            .map_or(parent, |_: &str| {
+                parent
+                    .children()
+                    .first()
+                    .expect("parent should contain the styled child")
+            })
+            .clone()
     }
 
     #[test]
     fn default_box_does_not_establish_a_context() {
-        let child = styled_child("display", "block");
+        let child = styled_child(None, &[]);
 
+        assert!(!child.is_root());
         assert!(!child.establishes_stacking_context());
     }
 
     #[test]
+    fn root_always_establishes_a_context() {
+        let document = Document::new();
+        let root = compute_layout(&document, 100.0, 100.0, &mut TextSystem::new());
+
+        assert!(root.is_root());
+        assert!(root.establishes_stacking_context());
+    }
+
+    #[test]
+    fn z_index_requires_positioning_or_a_flex_or_grid_item() {
+        let static_box = styled_child(None, &[("z-index", "1")]);
+        let positioned_box = styled_child(None, &[("position", "relative"), ("z-index", "1")]);
+        let flex_item = styled_child(Some("flex"), &[("z-index", "1")]);
+        let grid_item = styled_child(Some("grid"), &[("z-index", "1")]);
+
+        assert!(!static_box.establishes_stacking_context());
+        assert!(positioned_box.establishes_stacking_context());
+        assert!(flex_item.establishes_stacking_context());
+        assert!(grid_item.establishes_stacking_context());
+    }
+
+    #[test]
     fn opacity_and_transforms_establish_contexts() {
-        let opacity = styled_child("opacity", "0.5");
-        let transformed = styled_child("transform", "translateX(4px)");
+        let opacity = styled_child(None, &[("opacity", "0.5")]);
+        let transformed = styled_child(None, &[("transform", "translateX(4px)")]);
+        let identity_transform = styled_child(None, &[("transform", "translateX(0px)")]);
 
         assert!(opacity.establishes_stacking_context());
         assert!(transformed.establishes_stacking_context());
+        assert!(identity_transform.establishes_stacking_context());
     }
 }

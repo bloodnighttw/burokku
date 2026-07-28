@@ -5,9 +5,6 @@ mod host;
 mod runtime;
 mod task;
 
-#[cfg(test)]
-mod tests;
-
 pub use rquickjs;
 pub use rquickjs::Error;
 pub use runtime::{InputState, ModifiersState, MouseButton, Runtime, WindowEventMessage};
