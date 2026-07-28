@@ -324,6 +324,8 @@ impl LayoutKind {
 mod tests {
     use render::{BoxStyle, TextSpan, TextStyle};
 
+    use crate::ui::elements::{ElementKind, BODY_ID};
+
     use super::*;
 
     fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
@@ -503,5 +505,38 @@ mod tests {
 
         assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
         assert_eq!(element_ids(root.iter_rev()), [4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn effect_contexts_paint_after_ordinary_content_in_tree_order() {
+        let mut document = Document::new();
+        let isolated = document.create_node(ElementKind::Div);
+        let translucent = document.create_node(ElementKind::Div);
+        let transformed = document.create_node(ElementKind::Div);
+        let ordinary = document.create_node(ElementKind::Div);
+
+        document
+            .set_style(isolated, "isolation", Some("isolate"))
+            .unwrap();
+        document
+            .set_style(translucent, "opacity", Some("0.5"))
+            .unwrap();
+        document
+            .set_style(transformed, "transform", Some("translateX(4px)"))
+            .unwrap();
+        for child in [isolated, translucent, transformed, ordinary] {
+            document.insert(BODY_ID, child, None).unwrap();
+        }
+
+        let layout = compute_layout(&document, 100.0, 100.0, &mut TextSystem::new());
+
+        assert_eq!(
+            element_ids(layout.iter()),
+            [BODY_ID, ordinary, isolated, translucent, transformed]
+        );
+        assert_eq!(
+            element_ids(layout.iter_rev()),
+            [transformed, translucent, isolated, ordinary, BODY_ID]
+        );
     }
 }
