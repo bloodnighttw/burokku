@@ -12,7 +12,7 @@
 - [x] Recompute `line-height: normal` when the effective font size changes.
 - [ ] Support elliptical border radii and the `border-radius` slash syntax.
 - [x] Distinguish `position: static` from `position: relative`.
-- [ ] Implement viewport-relative behavior for `position: fixed`.
+- [x] Implement viewport-relative behavior for `position: fixed`.
 
 ## Layout
 

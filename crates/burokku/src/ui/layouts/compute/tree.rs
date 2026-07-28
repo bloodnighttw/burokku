@@ -4,7 +4,7 @@ use render::{TextConstraints, TextRunMetrics, TextSpan, TextStyle, TextSystem};
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
     compute_hidden_layout, compute_leaf_layout,
-    geometry::Size,
+    geometry::{Point, Size},
     prelude::{AvailableSpace, Display, NodeId},
     style::Style as TaffyStyle,
     tree::{
@@ -16,7 +16,10 @@ use taffy::{
 };
 
 use crate::ui::{
-    elements::{styles::Style as ElementStyle, Document, ElementKind},
+    elements::{
+        styles::{Position, Style as ElementStyle},
+        Document, ElementKind,
+    },
     layouts::ScrollOffset,
 };
 
@@ -53,6 +56,9 @@ pub(super) fn add_element(
         inline_spans: inline_spans.clone(),
         rendered_spans: Vec::new(),
         children: Vec::with_capacity(element.children.len()),
+        layout_children: Vec::with_capacity(element.children.len()),
+        fixed_containing_block: None,
+        fixed_static_offset: Point::ZERO,
         cache: Cache::new(),
         layout: TaffyLayout::new(),
         first_baseline: None,
@@ -73,8 +79,89 @@ pub(super) fn add_element(
     if matches!(element.style.display, Display::Flex | Display::Grid) {
         children.sort_by_key(|child| nodes[*child].paint_style.order);
     }
-    nodes[node_id].children = children;
+    nodes[node_id].children = children.clone();
+    nodes[node_id].layout_children = children;
     node_id
+}
+
+/// Reparents viewport-fixed boxes in the layout tree without changing the
+/// retained DOM/paint tree.
+///
+/// Taffy models fixed boxes as absolutely positioned boxes. Making them direct
+/// layout children of the viewport—or of the nearest transformed ancestor—
+/// gives them the CSS fixed-positioning containing block while preserving
+/// their original ancestry for inheritance and stacking.
+pub(super) fn establish_fixed_containing_blocks(nodes: &mut [LayoutNode], root: usize) {
+    let mut absolute_locations = vec![Point::ZERO; nodes.len()];
+    collect_absolute_locations(nodes, root, Point::ZERO, &mut absolute_locations);
+
+    for node in nodes.iter_mut() {
+        node.layout_children.clear();
+        node.fixed_containing_block = None;
+        node.fixed_static_offset = Point::ZERO;
+    }
+    rebuild_layout_children(nodes, root, root, false);
+
+    for node in 0..nodes.len() {
+        let Some(owner) = nodes[node].fixed_containing_block else {
+            continue;
+        };
+        nodes[node].fixed_static_offset = Point {
+            x: absolute_locations[node].x - absolute_locations[owner].x,
+            y: absolute_locations[node].y - absolute_locations[owner].y,
+        };
+    }
+}
+
+fn collect_absolute_locations(
+    nodes: &[LayoutNode],
+    node: usize,
+    parent_location: Point<f32>,
+    locations: &mut [Point<f32>],
+) {
+    let location = Point {
+        x: parent_location.x + nodes[node].layout.location.x,
+        y: parent_location.y + nodes[node].layout.location.y,
+    };
+    locations[node] = location;
+    for child in &nodes[node].children {
+        collect_absolute_locations(nodes, *child, location, locations);
+    }
+}
+
+fn rebuild_layout_children(
+    nodes: &mut [LayoutNode],
+    node: usize,
+    fixed_containing_block: usize,
+    ancestor_hidden: bool,
+) {
+    let children = nodes[node].children.clone();
+    let descendants_hidden = ancestor_hidden || nodes[node].style.display == Display::None;
+
+    for child in children {
+        let is_fixed = !descendants_hidden && nodes[child].paint_style.position == Position::Fixed;
+        let layout_parent = if is_fixed {
+            fixed_containing_block
+        } else {
+            node
+        };
+        if is_fixed {
+            nodes[child].fixed_containing_block = Some(fixed_containing_block);
+        }
+        nodes[layout_parent].layout_children.push(child);
+
+        let child_fixed_containing_block = if !nodes[child].paint_style.transform.is_none() {
+            child
+        } else {
+            fixed_containing_block
+        };
+        rebuild_layout_children(
+            nodes,
+            child,
+            child_fixed_containing_block,
+            descendants_hidden,
+        );
+    }
 }
 
 fn should_collect_inline_spans(document: &Document, children: &[u64]) -> bool {
@@ -135,7 +222,14 @@ pub(super) struct LayoutNode {
     pub(super) text_style: TextStyle,
     pub(super) inline_spans: Option<Vec<TextSpan>>,
     pub(super) rendered_spans: Vec<TextSpan>,
+    /// Children in DOM/order-modified tree order, used for painting.
     pub(super) children: Vec<usize>,
+    /// Children participating directly in this node's Taffy layout.
+    pub(super) layout_children: Vec<usize>,
+    /// The viewport or transformed ancestor used to lay out a fixed box.
+    pub(super) fixed_containing_block: Option<usize>,
+    /// Hypothetical in-flow position, relative to the fixed containing block.
+    pub(super) fixed_static_offset: Point<f32>,
     cache: Cache,
     pub(super) layout: TaffyLayout,
     first_baseline: Option<f32>,
@@ -150,6 +244,13 @@ pub(super) struct ElementLayoutTree<'a> {
 }
 
 impl ElementLayoutTree<'_> {
+    pub(super) fn clear_layout_caches(&mut self) {
+        for node in &mut self.nodes {
+            node.cache.clear();
+            node.first_baseline = None;
+        }
+    }
+
     fn compute_node(
         &mut self,
         node_id: NodeId,
@@ -165,7 +266,7 @@ impl ElementLayoutTree<'_> {
             let display = tree.nodes[index].style.display;
             let is_text = matches!(tree.nodes[index].kind, ElementKind::Text(_))
                 || tree.nodes[index].inline_spans.is_some();
-            let has_children = !tree.nodes[index].children.is_empty();
+            let has_children = !tree.nodes[index].layout_children.is_empty();
 
             match (display, is_text, has_children) {
                 (Display::None, _, _) => compute_hidden_layout(tree, node_id),
@@ -173,7 +274,7 @@ impl ElementLayoutTree<'_> {
                 (Display::Block, false, true) => {
                     let mut output = compute_block_layout(tree, node_id, inputs, block_context);
                     output.first_baselines.y = tree.nodes[index]
-                        .children
+                        .layout_children
                         .iter()
                         .filter(|child| {
                             tree.nodes[**child].style.display != Display::None
@@ -272,15 +373,15 @@ impl TraversePartialTree for ElementLayoutTree<'_> {
         Self: 'a;
 
     fn child_ids(&self, node_id: NodeId) -> Self::ChildIter<'_> {
-        ChildIter(self.nodes[usize::from(node_id)].children.iter())
+        ChildIter(self.nodes[usize::from(node_id)].layout_children.iter())
     }
 
     fn child_count(&self, node_id: NodeId) -> usize {
-        self.nodes[usize::from(node_id)].children.len()
+        self.nodes[usize::from(node_id)].layout_children.len()
     }
 
     fn get_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
-        NodeId::from(self.nodes[usize::from(node_id)].children[index])
+        NodeId::from(self.nodes[usize::from(node_id)].layout_children[index])
     }
 }
 

@@ -35,12 +35,12 @@ pub(super) fn padding_box(
     )
 }
 
-pub(super) fn scroll_content_size(
-    children: &[Layout],
+pub(super) fn scroll_content_size<'a>(
+    children: impl IntoIterator<Item = &'a Layout>,
     viewport: RenderRect,
     offset: ScrollOffset,
 ) -> (f32, f32) {
-    children.iter().fold(
+    children.into_iter().fold(
         (viewport.width, viewport.height),
         |(width, height), child| {
             (

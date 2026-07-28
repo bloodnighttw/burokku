@@ -8,7 +8,7 @@ mod stacking;
 use render::{BoxStyle, Clip, Rect, TextRunMetrics, TextSpan, TextStyle, TextSystem};
 use std::collections::HashMap;
 
-use crate::ui::elements::Document;
+use crate::ui::elements::{Document, BODY_ID};
 
 pub use crate::ui::elements::styles::Position;
 
@@ -121,6 +121,7 @@ pub enum LayoutKind {
         z_index: Option<i32>,
         isolated: bool,
         position: Position,
+        fixed_containing_block: Option<u64>,
         flex_or_grid_item: bool,
         children: Vec<Layout>,
     },
@@ -230,6 +231,9 @@ impl Layout {
         let stationary_clip_count = self.clips.len() + 1;
         if let LayoutKind::Box { children, .. } = &mut self.kind {
             for child in children {
+                if child.is_fixed_to_viewport() {
+                    continue;
+                }
                 child.translate_scrolled_subtree(translation, stationary_clip_count);
             }
         }
@@ -242,6 +246,16 @@ impl Layout {
             position_scrollbar_thumb(scrollbar, offset.y, scroll.max_offset.y);
         }
         true
+    }
+
+    pub(crate) fn is_fixed_to_viewport(&self) -> bool {
+        matches!(
+            self.kind,
+            LayoutKind::Box {
+                fixed_containing_block: Some(BODY_ID),
+                ..
+            }
+        )
     }
 
     fn translate_scrolled_subtree(
@@ -269,6 +283,9 @@ impl Layout {
 
         if let LayoutKind::Box { children, .. } = &mut self.kind {
             for child in children {
+                if child.is_fixed_to_viewport() {
+                    continue;
+                }
                 child.translate_scrolled_subtree(translation, stationary_clip_count);
             }
         }
@@ -398,6 +415,7 @@ mod tests {
                 z_index,
                 isolated,
                 position,
+                fixed_containing_block: None,
                 flex_or_grid_item: false,
                 children,
             },
@@ -435,6 +453,7 @@ mod tests {
                 z_index: None,
                 isolated: false,
                 position: Position::Static,
+                fixed_containing_block: None,
                 flex_or_grid_item: false,
                 children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
             },

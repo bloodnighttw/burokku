@@ -14,10 +14,10 @@ use taffy::{
     prelude::{AvailableSpace, Dimension, NodeId},
 };
 
-use crate::ui::elements::{Document, BODY_ID};
+use crate::ui::elements::{styles::Position, Document, BODY_ID};
 
 use super::{Layout, ScrollOffset};
-use tree::{add_element, ElementLayoutTree};
+use tree::{add_element, establish_fixed_containing_blocks, ElementLayoutTree};
 
 #[cfg(test)]
 use super::LayoutKind;
@@ -57,6 +57,9 @@ pub(super) fn compute_layout_with_scroll(
     };
     let mut nodes = Vec::new();
     let root = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
+    let has_fixed = nodes
+        .iter()
+        .any(|node| node.paint_style.position == Position::Fixed);
     nodes[root].style.size = Size {
         width: Dimension::length(viewport.width),
         height: Dimension::length(viewport.height),
@@ -67,6 +70,15 @@ pub(super) fn compute_layout_with_scroll(
         text_system,
         scroll_offsets,
     };
+    if has_fixed {
+        compute_root_layout(
+            &mut tree,
+            NodeId::from(root),
+            viewport.map(AvailableSpace::Definite),
+        );
+        establish_fixed_containing_blocks(&mut tree.nodes, root);
+        tree.clear_layout_caches();
+    }
     compute_root_layout(
         &mut tree,
         NodeId::from(root),
@@ -621,6 +633,194 @@ mod tests {
         };
         assert_eq!(*z_index, None);
         assert!(*isolated);
+    }
+
+    #[test]
+    fn fixed_boxes_use_the_viewport_for_layout_and_escape_ancestor_clips() {
+        let mut document = Document::new();
+        let clipped_parent = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "100px"),
+            ("height", "60px"),
+            ("overflow", "hidden"),
+        ] {
+            document
+                .set_style(clipped_parent, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "25%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, clipped_parent, None).unwrap();
+        document.insert(clipped_parent, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+
+        assert_eq!((fixed.x, fixed.y), (215.0, 165.0));
+        assert_eq!((fixed.width, fixed.height), (75.0, 20.0));
+        assert!(fixed.clips.is_empty());
+        assert!(fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
+    fn viewport_fixed_auto_insets_keep_their_static_position() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let preceding = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("margin-top", "50px"),
+            ("width", "100px"),
+            ("height", "100px"),
+        ] {
+            document.set_style(parent, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(preceding, "height", Some("20px"))
+            .unwrap();
+        for (property, value) in [("position", "fixed"), ("width", "10px"), ("height", "10px")] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, preceding, None).unwrap();
+        document.insert(parent, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[1];
+
+        assert_eq!((fixed.x, fixed.y), (0.0, 70.0));
+    }
+
+    #[test]
+    fn retained_scrolling_does_not_move_viewport_fixed_descendants() {
+        let mut document = Document::new();
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        for (property, value) in [
+            ("position", "fixed"),
+            ("left", "9px"),
+            ("top", "8px"),
+            ("width", "20px"),
+            ("height", "10px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+        document.insert(scroller, fixed, None).unwrap();
+
+        let mut layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let before_content_y = layout.children()[0].children()[0].y;
+        let before_fixed = {
+            let fixed = &layout.children()[0].children()[1];
+            (fixed.x, fixed.y)
+        };
+
+        assert!(layout.apply_scroll_offset(scroller, ScrollOffset::new(0.0, 30.0)));
+
+        let scroller = &layout.children()[0];
+        assert_eq!(scroller.children()[0].y, before_content_y - 30.0);
+        assert_eq!(
+            (scroller.children()[1].x, scroller.children()[1].y),
+            before_fixed
+        );
+        assert!(scroller.children()[1].clips.is_empty());
+
+        let rebuilt = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(scroller.element_id, ScrollOffset::new(0.0, 30.0))]),
+        );
+        let rebuilt_scroller = &rebuilt.children()[0];
+        assert_eq!(
+            (
+                rebuilt_scroller.children()[0].y,
+                rebuilt_scroller.children()[1].x,
+                rebuilt_scroller.children()[1].y,
+            ),
+            (
+                scroller.children()[0].y,
+                scroller.children()[1].x,
+                scroller.children()[1].y,
+            )
+        );
+    }
+
+    #[test]
+    fn transformed_ancestors_contain_fixed_boxes() {
+        let mut document = Document::new();
+        let transformed = document.create_node(ElementKind::Div);
+        let intermediate = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "100px"),
+            ("height", "60px"),
+            ("overflow", "hidden"),
+            ("transform", "translateX(0px)"),
+        ] {
+            document
+                .set_style(transformed, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "20px"),
+            ("top", "10px"),
+            ("width", "40px"),
+            ("height", "30px"),
+            ("overflow", "hidden"),
+        ] {
+            document
+                .set_style(intermediate, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "25%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, transformed, None).unwrap();
+        document.insert(transformed, intermediate, None).unwrap();
+        document.insert(intermediate, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0].children()[0];
+
+        assert_eq!((fixed.x, fixed.y), (105.0, 55.0));
+        assert_eq!((fixed.width, fixed.height), (25.0, 20.0));
+        assert_eq!(fixed.clips.len(), 2);
+        assert!(!fixed.is_fixed_to_viewport());
     }
 
     #[test]
