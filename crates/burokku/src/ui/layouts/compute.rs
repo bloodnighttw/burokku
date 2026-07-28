@@ -634,6 +634,33 @@ mod tests {
     }
 
     #[test]
+    fn relative_boxes_offset_without_moving_siblings() {
+        let mut document = Document::new();
+        let relative = document.create_node(ElementKind::Div);
+        let sibling = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "50px"),
+            ("height", "20px"),
+        ] {
+            document.set_style(relative, property, Some(value)).unwrap();
+        }
+        document.set_style(sibling, "width", Some("50px")).unwrap();
+        document.set_style(sibling, "height", Some("20px")).unwrap();
+        document.insert(BODY_ID, relative, None).unwrap();
+        document.insert(BODY_ID, sibling, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let relative = &layout.children()[0];
+        let sibling = &layout.children()[1];
+
+        assert_eq!((relative.x, relative.y), (40.0, 30.0));
+        assert_eq!((sibling.x, sibling.y), (0.0, 20.0));
+    }
+
+    #[test]
     fn absolute_boxes_use_the_nearest_positioned_ancestor() {
         let mut document = Document::new();
         let positioned = document.create_node(ElementKind::Div);
@@ -968,6 +995,67 @@ mod tests {
                 scroller.children()[1].y,
             )
         );
+    }
+
+    #[test]
+    fn absolute_descendants_keep_dom_scroll_and_clip_state() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("width", "300px"),
+            ("height", "200px"),
+        ] {
+            document
+                .set_style(positioned, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        for (property, value) in [
+            ("position", "absolute"),
+            ("left", "10px"),
+            ("top", "80px"),
+            ("width", "20px"),
+            ("height", "10px"),
+        ] {
+            document.set_style(absolute, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+        document.insert(scroller, absolute, None).unwrap();
+
+        let mut retained = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        assert!(retained.apply_scroll_offset(scroller, ScrollOffset::new(0.0, 30.0)));
+        let retained_absolute = &retained.children()[0].children()[0].children()[1];
+
+        let rebuilt = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(scroller, ScrollOffset::new(0.0, 30.0))]),
+        );
+        let rebuilt_absolute = &rebuilt.children()[0].children()[0].children()[1];
+
+        assert_eq!((retained_absolute.x, retained_absolute.y), (10.0, 50.0));
+        assert_eq!(
+            (rebuilt_absolute.x, rebuilt_absolute.y),
+            (retained_absolute.x, retained_absolute.y)
+        );
+        assert_eq!(rebuilt_absolute.clips.len(), 1);
     }
 
     #[test]

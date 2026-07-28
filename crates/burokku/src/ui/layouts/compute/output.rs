@@ -23,6 +23,17 @@ struct ContainingBlock {
     child_parent: Point<f32>,
     world_transform: Transform,
     viewport: bool,
+    scroll_offset: ScrollOffset,
+}
+
+fn scrolled_containing_block_parent(
+    containing_block: ContainingBlock,
+    scroll_offset: ScrollOffset,
+) -> Point<f32> {
+    Point {
+        x: containing_block.child_parent.x - (scroll_offset.x - containing_block.scroll_offset.x),
+        y: containing_block.child_parent.y - (scroll_offset.y - containing_block.scroll_offset.y),
+    }
 }
 
 impl ElementLayoutTree<'_> {
@@ -42,15 +53,18 @@ impl ElementLayoutTree<'_> {
             viewport,
             parent_transform,
             flex_or_grid_item,
+            ScrollOffset::ZERO,
             ContainingBlock {
                 child_parent: Point::ZERO,
                 world_transform: Transform::IDENTITY,
                 viewport: true,
+                scroll_offset: ScrollOffset::ZERO,
             },
             ContainingBlock {
                 child_parent: Point::ZERO,
                 world_transform: Transform::IDENTITY,
                 viewport: true,
+                scroll_offset: ScrollOffset::ZERO,
             },
         )
     }
@@ -67,6 +81,7 @@ impl ElementLayoutTree<'_> {
         viewport: RenderRect,
         parent_transform: Transform,
         flex_or_grid_item: bool,
+        ancestor_scroll_offset: ScrollOffset,
         absolute_containing_block: ContainingBlock,
         fixed_containing_block: ContainingBlock,
     ) -> Layout {
@@ -158,12 +173,17 @@ impl ElementLayoutTree<'_> {
                         x: location.x - offset.x,
                         y: location.y - offset.y,
                     };
+                    let descendant_scroll_offset = ScrollOffset::new(
+                        ancestor_scroll_offset.x + offset.x,
+                        ancestor_scroll_offset.y + offset.y,
+                    );
                     let descendant_fixed_containing_block = if !data.paint_style.transform.is_none()
                     {
                         ContainingBlock {
                             child_parent,
                             world_transform,
                             viewport: false,
+                            scroll_offset: descendant_scroll_offset,
                         }
                     } else {
                         fixed_containing_block
@@ -176,6 +196,7 @@ impl ElementLayoutTree<'_> {
                                 child_parent,
                                 world_transform,
                                 viewport: false,
+                                scroll_offset: descendant_scroll_offset,
                             }
                         } else {
                             absolute_containing_block
@@ -192,7 +213,14 @@ impl ElementLayoutTree<'_> {
                                     && child_data.positioning_containing_block.is_some()
                                 {
                                     (
-                                        descendant_fixed_containing_block.child_parent,
+                                        if descendant_fixed_containing_block.viewport {
+                                            descendant_fixed_containing_block.child_parent
+                                        } else {
+                                            scrolled_containing_block_parent(
+                                                descendant_fixed_containing_block,
+                                                descendant_scroll_offset,
+                                            )
+                                        },
                                         if descendant_fixed_containing_block.viewport {
                                             &[][..]
                                         } else {
@@ -204,7 +232,10 @@ impl ElementLayoutTree<'_> {
                                     && child_data.positioning_containing_block.is_some()
                                 {
                                     (
-                                        descendant_absolute_containing_block.child_parent,
+                                        scrolled_containing_block_parent(
+                                            descendant_absolute_containing_block,
+                                            descendant_scroll_offset,
+                                        ),
                                         descendant_clips.as_slice(),
                                         descendant_absolute_containing_block.world_transform,
                                     )
@@ -218,6 +249,7 @@ impl ElementLayoutTree<'_> {
                                 viewport,
                                 parent_transform,
                                 children_are_flex_or_grid_items,
+                                descendant_scroll_offset,
                                 descendant_absolute_containing_block,
                                 descendant_fixed_containing_block,
                             )
@@ -251,12 +283,17 @@ impl ElementLayoutTree<'_> {
                             x: location.x - offset.x,
                             y: location.y - offset.y,
                         };
+                        let descendant_scroll_offset = ScrollOffset::new(
+                            ancestor_scroll_offset.x + offset.x,
+                            ancestor_scroll_offset.y + offset.y,
+                        );
                         let descendant_fixed_containing_block =
                             if !data.paint_style.transform.is_none() {
                                 ContainingBlock {
                                     child_parent,
                                     world_transform,
                                     viewport: false,
+                                    scroll_offset: descendant_scroll_offset,
                                 }
                             } else {
                                 fixed_containing_block
@@ -269,6 +306,7 @@ impl ElementLayoutTree<'_> {
                                     child_parent,
                                     world_transform,
                                     viewport: false,
+                                    scroll_offset: descendant_scroll_offset,
                                 }
                             } else {
                                 absolute_containing_block
@@ -283,7 +321,14 @@ impl ElementLayoutTree<'_> {
                                         && child_data.positioning_containing_block.is_some()
                                     {
                                         (
-                                            descendant_fixed_containing_block.child_parent,
+                                            if descendant_fixed_containing_block.viewport {
+                                                descendant_fixed_containing_block.child_parent
+                                            } else {
+                                                scrolled_containing_block_parent(
+                                                    descendant_fixed_containing_block,
+                                                    descendant_scroll_offset,
+                                                )
+                                            },
                                             if descendant_fixed_containing_block.viewport {
                                                 &[][..]
                                             } else {
@@ -295,7 +340,10 @@ impl ElementLayoutTree<'_> {
                                         && child_data.positioning_containing_block.is_some()
                                     {
                                         (
-                                            descendant_absolute_containing_block.child_parent,
+                                            scrolled_containing_block_parent(
+                                                descendant_absolute_containing_block,
+                                                descendant_scroll_offset,
+                                            ),
                                             descendant_clips.as_slice(),
                                             descendant_absolute_containing_block.world_transform,
                                         )
@@ -309,6 +357,7 @@ impl ElementLayoutTree<'_> {
                                     viewport,
                                     parent_transform,
                                     children_are_flex_or_grid_items,
+                                    descendant_scroll_offset,
                                     descendant_absolute_containing_block,
                                     descendant_fixed_containing_block,
                                 )
