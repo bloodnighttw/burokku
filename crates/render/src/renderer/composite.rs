@@ -1,9 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::{Clip, Transform};
+use crate::{Clip, Rect, Transform};
 
-use super::SurfaceSize;
+use super::{RenderError, TargetViewport};
 
 pub(super) struct CompositeRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -120,9 +120,10 @@ impl CompositeRenderer {
         &self,
         device: &wgpu::Device,
         texture: wgpu::Texture,
-        size: SurfaceSize,
+        target: TargetViewport,
+        source: TargetViewport,
         effect: CompositeEffect,
-    ) -> Option<CompositeItem> {
+    ) -> Result<CompositeItem, RenderError> {
         let CompositeEffect {
             origin,
             transform,
@@ -137,7 +138,7 @@ impl CompositeRenderer {
             .checked_mul(std::mem::size_of::<CompositeClip>())
             .is_none_or(|bytes| bytes > maximum_clip_bytes)
         {
-            return None;
+            return Err(RenderError::TooManyGroupClips);
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let [a, b, c, d, tx, ty] = transform.matrix;
@@ -154,9 +155,26 @@ impl CompositeRenderer {
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("render group composite uniform"),
             contents: bytemuck::bytes_of(&CompositeUniform {
-                screen_origin: [size.width as f32, size.height as f32, origin[0], origin[1]],
-                transform_x: [a, c, tx, opacity.clamp(0.0, 1.0)],
-                transform_y: [b, d, ty, clips.len() as f32],
+                destination: [
+                    target.size.width as f32,
+                    target.size.height as f32,
+                    target.origin[0],
+                    target.origin[1],
+                ],
+                source: [
+                    source.origin[0],
+                    source.origin[1],
+                    source.size.width as f32,
+                    source.size.height as f32,
+                ],
+                effect: [
+                    origin[0],
+                    origin[1],
+                    opacity.clamp(0.0, 1.0),
+                    clips.len() as f32,
+                ],
+                transform_x: [a, c, tx, 0.0],
+                transform_y: [b, d, ty, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -182,7 +200,7 @@ impl CompositeRenderer {
                 },
             ],
         });
-        Some(CompositeItem {
+        Ok(CompositeItem {
             _texture: texture,
             _uniform: uniform,
             _clip_buffer: clip_buffer,
@@ -195,7 +213,7 @@ impl CompositeRenderer {
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         items: &'pass [CompositeItem],
-        size: SurfaceSize,
+        viewport: TargetViewport,
     ) {
         if items.is_empty() {
             return;
@@ -203,16 +221,25 @@ impl CompositeRenderer {
         pass.set_pipeline(&self.pipeline);
         for item in items {
             let clip = item.clips.iter().fold(
-                crate::Rect::new(0.0, 0.0, size.width as f32, size.height as f32),
+                Rect::new(
+                    viewport.origin[0],
+                    viewport.origin[1],
+                    viewport.size.width as f32,
+                    viewport.size.height as f32,
+                ),
                 |bounds, clip| bounds.intersection(clip.bounds()),
             );
             if clip.width <= 0.0 || clip.height <= 0.0 {
                 continue;
             }
-            let x = clip.x.floor().max(0.0) as u32;
-            let y = clip.y.floor().max(0.0) as u32;
-            let right = (clip.x + clip.width).ceil().min(size.width as f32) as u32;
-            let bottom = (clip.y + clip.height).ceil().min(size.height as f32) as u32;
+            let x = (clip.x - viewport.origin[0]).floor().max(0.0) as u32;
+            let y = (clip.y - viewport.origin[1]).floor().max(0.0) as u32;
+            let right = (clip.x + clip.width - viewport.origin[0])
+                .ceil()
+                .min(viewport.size.width as f32) as u32;
+            let bottom = (clip.y + clip.height - viewport.origin[1])
+                .ceil()
+                .min(viewport.size.height as f32) as u32;
             if right <= x || bottom <= y {
                 continue;
             }
@@ -220,14 +247,16 @@ impl CompositeRenderer {
             pass.set_bind_group(0, &item.bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
-        pass.set_scissor_rect(0, 0, size.width, size.height);
+        pass.set_scissor_rect(0, 0, viewport.size.width, viewport.size.height);
     }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CompositeUniform {
-    screen_origin: [f32; 4],
+    destination: [f32; 4],
+    source: [f32; 4],
+    effect: [f32; 4],
     transform_x: [f32; 4],
     transform_y: [f32; 4],
 }

@@ -1,6 +1,6 @@
 struct Screen {
     size: vec2<f32>,
-    _padding: vec2<f32>,
+    origin: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -87,9 +87,10 @@ fn vertex_main(instance: Instance, @builtin(vertex_index) vertex_index: u32) -> 
         dot(instance.transform_x.xy, local) + instance.transform_x.z,
         dot(instance.transform_y.xy, local) + instance.transform_y.z,
     );
+    let target_pixel = pixel - screen.origin;
     let clip = vec2(
-        pixel.x / screen.size.x * 2.0 - 1.0,
-        1.0 - pixel.y / screen.size.y * 2.0,
+        target_pixel.x / screen.size.x * 2.0 - 1.0,
+        1.0 - target_pixel.y / screen.size.y * 2.0,
     );
 
     var output: VertexOutput;
@@ -172,7 +173,7 @@ fn sample_gradient(position: f32, range: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let pixel = input.clip_position.xy;
+    let pixel = input.clip_position.xy + screen.origin;
     var clip_coverage = 1.0;
     for (var index = 0u; index < input.clip_range.y; index += 1u) {
         let clip = clips[input.clip_range.x + index];
