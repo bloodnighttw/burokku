@@ -1,5 +1,3 @@
-use super::measurement::{Auto, Percent, Px};
-
 /// The supported forms of CSS overflow, preserving `auto` versus `scroll`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Overflow {
@@ -212,40 +210,4 @@ pub(crate) enum WordBreakValue {
     Normal,
     BreakAll,
     KeepAll,
-}
-
-impl From<Px> for SizeValue {
-    fn from(value: Px) -> Self {
-        Self::Px(value.value())
-    }
-}
-
-impl From<Percent> for SizeValue {
-    fn from(value: Percent) -> Self {
-        Self::Percent(value.value())
-    }
-}
-
-impl From<Auto> for SizeValue {
-    fn from(_: Auto) -> Self {
-        Self::Auto
-    }
-}
-
-impl From<Px> for LengthPercentageValue {
-    fn from(value: Px) -> Self {
-        Self::Px(value.value())
-    }
-}
-
-impl From<Percent> for LengthPercentageValue {
-    fn from(value: Percent) -> Self {
-        Self::Percent(value.value())
-    }
-}
-
-impl From<Px> for LengthValue {
-    fn from(value: Px) -> Self {
-        Self::Px(value.value())
-    }
 }
