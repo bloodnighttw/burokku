@@ -9,8 +9,8 @@ use taffy::{
 
 use crate::ui::elements::{
     styles::{
-        LengthPercentageValue, MaxSizeValue, Overflow as ElementOverflow, SizeValue,
-        Style as ElementStyle,
+        LengthPercentageValue, MaxSizeValue, Overflow as ElementOverflow,
+        SizeValue, Style as ElementStyle,
     },
     ElementKind,
 };
@@ -27,7 +27,7 @@ pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyS
             style.display
         },
         box_sizing: style.box_sizing,
-        position: style.position,
+        position: style.position.into(),
         overflow: Point {
             x: taffy_overflow(style.overflow_x),
             y: taffy_overflow(style.overflow_y),

@@ -67,10 +67,11 @@ pub(crate) fn set_style(
             };
         }
         "position" => {
-            (style.position, style.positioned) = match value {
-                "static" => (Position::Relative, false),
-                "relative" => (Position::Relative, true),
-                "absolute" | "fixed" => (Position::Absolute, true),
+            style.position = match value {
+                "static" => Position::Static,
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
                 _ => return invalid(name, value),
             }
         }
@@ -404,10 +405,7 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
     match name {
         "display" => reset!(display),
         "box-sizing" => reset!(box_sizing),
-        "position" => {
-            reset!(position);
-            reset!(positioned);
-        }
+        "position" => reset!(position),
         "overflow" => {
             reset!(overflow_x);
             reset!(overflow_y);
@@ -592,21 +590,24 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_static_from_positioned_boxes() {
+    fn preserves_css_position_values() {
         let mut style = Style::default();
-        assert!(!style.positioned);
+        assert_eq!(style.position, Position::Static);
 
         set_style(&mut style, "position", Some("relative")).unwrap();
-        assert!(style.positioned);
+        assert_eq!(style.position, Position::Relative);
 
         set_style(&mut style, "position", Some("static")).unwrap();
-        assert!(!style.positioned);
+        assert_eq!(style.position, Position::Static);
 
         set_style(&mut style, "position", Some("absolute")).unwrap();
-        assert!(style.positioned);
+        assert_eq!(style.position, Position::Absolute);
+
+        set_style(&mut style, "position", Some("fixed")).unwrap();
+        assert_eq!(style.position, Position::Fixed);
 
         set_style(&mut style, "position", None).unwrap();
-        assert!(!style.positioned);
+        assert_eq!(style.position, Position::Static);
     }
 
     #[test]
