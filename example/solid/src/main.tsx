@@ -135,6 +135,184 @@ function GridExample() {
   );
 }
 
+function PositionExamples() {
+  const stageStyle = {
+    position: "relative",
+    height: "112px",
+    padding: "10px",
+    "background-color": "#eef2f7",
+    "border-color": "#c5cfdd",
+    "border-width": "2px",
+    "border-radius": "10px",
+  } as const;
+
+  const badgeStyle = {
+    display: "flex",
+    height: "24px",
+    padding: "6px",
+    color: "#ffffff",
+    "font-size": "12px",
+    "line-height": "16px",
+    "font-weight": 700,
+    "border-radius": "6px",
+  } as const;
+
+  return (
+    <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
+      <span
+        style={{
+          color: "#18202b",
+          "font-size": "20px",
+          "line-height": "26px",
+          "font-weight": 700,
+          "letter-spacing": "-0.3px",
+        }}
+      >
+        Positioning
+      </span>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <ExampleCard title="Static ignores inset · relative keeps flow">
+          <div style={stageStyle}>
+            <div
+              style={{
+                ...badgeStyle,
+                position: "static",
+                left: "180px",
+                top: "50px",
+                width: "112px",
+                "background-color": "#475569",
+              }}
+            >
+              STATIC · left ignored
+            </div>
+            <div
+              style={{
+                ...badgeStyle,
+                position: "relative",
+                left: "128px",
+                top: "6px",
+                width: "116px",
+                "background-color": "#7c3aed",
+              }}
+            >
+              RELATIVE · shifted
+            </div>
+            <div
+              style={{
+                ...badgeStyle,
+                width: "120px",
+                "background-color": "#0f766e",
+              }}
+            >
+              SIBLING · flow intact
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Absolute skips static wrappers">
+          <div style={stageStyle}>
+            <div
+              style={{
+                width: "118px",
+                height: "74px",
+                "margin-left": "24px",
+                padding: "8px",
+                "background-color": "#dbeafe",
+                "border-color": "#60a5fa",
+                "border-width": "1px",
+                "border-radius": "7px",
+              }}
+            >
+              <span style={{ color: "#1e40af", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
+                STATIC WRAPPER
+              </span>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "absolute",
+                  right: "10px",
+                  top: "10px",
+                  width: "104px",
+                  "background-color": "#dc2626",
+                }}
+              >
+                ABS · outer right
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+      </div>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <ExampleCard title="Absolute retains DOM scroll + clip">
+          <div style={stageStyle}>
+            <div
+              style={{
+                width: "100%",
+                height: "88px",
+                "overflow-y": "scroll",
+                "background-color": "#dbeafe",
+                "border-radius": "7px",
+              }}
+            >
+              <div style={{ height: "180px", padding: "8px" }}>
+                <span style={{ color: "#1e40af", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
+                  Scroll this panel
+                </span>
+              </div>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "absolute",
+                  left: "32px",
+                  top: "76px",
+                  width: "142px",
+                  "background-color": "#ea580c",
+                }}
+              >
+                ABS · moves + clips
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Transform contains fixed">
+          <div
+            style={{
+              ...stageStyle,
+              overflow: "hidden",
+              transform: "translateX(0px)",
+            }}
+          >
+            <div
+              style={{
+                width: "120px",
+                height: "58px",
+                padding: "8px",
+                "background-color": "#dcfce7",
+                "border-radius": "7px",
+              }}
+            >
+              <span style={{ color: "#166534", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
+                STATIC DESCENDANT
+              </span>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "fixed",
+                  right: "10px",
+                  bottom: "10px",
+                  width: "126px",
+                  "background-color": "#059669",
+                }}
+              >
+                FIXED · transformed CB
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+      </div>
+    </div>
+  );
+}
+
 function ExampleCard(props: { title: string; children: JSX.Element }) {
   return (
     <div
@@ -546,12 +724,35 @@ function App() {
           <GridExample />
         </ExampleCard>
       </div>
+      <PositionExamples />
       <TypographyExamples remaining={remaining()} />
       <PaintExamples />
+      <div
+        style={{
+          display: "flex",
+          position: "fixed",
+          right: "12px",
+          bottom: "12px",
+          width: "154px",
+          padding: "10px",
+          color: "#ffffff",
+          "font-size": "12px",
+          "line-height": "16px",
+          "font-weight": 700,
+          "background-color": "#0f172a",
+          "border-radius": "8px",
+          "box-shadow": "0px 8px 18px rgba(15, 23, 42, 0.35)",
+        }}
+      >
+        FIXED · viewport corner
+      </div>
     </div>
   );
 }
 
+document.body.style.padding = "12px";
+document.body.style.borderWidth = "4px";
+document.body.style.borderColor = "#94a3b8";
 document.body.style.overflowY = "auto";
 document.body.style.overflowX = "auto";
 
