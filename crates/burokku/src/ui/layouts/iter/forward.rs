@@ -1,6 +1,9 @@
 use std::iter::FusedIterator;
 
-use super::super::{stacking::descendant_contexts, Layout};
+use super::super::{
+    stacking::{descendant_contexts, Stacking},
+    Layout,
+};
 
 /// An iterator over layouts from back to front in paint order.
 ///
@@ -38,9 +41,8 @@ impl<'a> Iterator for LayoutIter<'a> {
                     return Some(layout);
                 }
                 Task::Middle(layout) => {
-                    let layer = layout.stacking_layer();
-                    if layer.establishes_context() {
-                        if layer.index() == 0 {
+                    if layout.establishes_stacking_context() {
+                        if layout.stacking_index() == 0 {
                             self.pending.push(Task::Context(layout));
                         }
                         continue;
@@ -73,7 +75,7 @@ impl<'a> LayoutIter<'a> {
             contexts
                 .iter()
                 .rev()
-                .filter(|layout| layout.stacking_layer().index() > 0)
+                .filter(|layout| layout.stacking_index() > 0)
                 .map(|layout| Task::Context(layout)),
         );
         self.pending
@@ -82,7 +84,7 @@ impl<'a> LayoutIter<'a> {
             contexts
                 .iter()
                 .rev()
-                .filter(|layout| layout.stacking_layer().index() < 0)
+                .filter(|layout| layout.stacking_index() < 0)
                 .map(|layout| Task::Context(layout)),
         );
     }

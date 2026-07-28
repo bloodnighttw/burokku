@@ -1,6 +1,9 @@
 use std::iter::FusedIterator;
 
-use super::super::{stacking::descendant_contexts, Layout};
+use super::super::{
+    stacking::{descendant_contexts, Stacking},
+    Layout,
+};
 
 /// An iterator over layouts from front to back in reverse paint order.
 ///
@@ -36,9 +39,8 @@ impl<'a> Iterator for ReverseLayoutIter<'a> {
             match task {
                 Task::Context(layout) => self.schedule_context(layout),
                 Task::Middle(layout) => {
-                    let layer = layout.stacking_layer();
-                    if layer.establishes_context() {
-                        if layer.index() == 0 {
+                    if layout.establishes_stacking_context() {
+                        if layout.stacking_index() == 0 {
                             self.pending.push(Task::Context(layout));
                         }
                         continue;
@@ -72,7 +74,7 @@ impl<'a> ReverseLayoutIter<'a> {
         self.pending.extend(
             contexts
                 .iter()
-                .filter(|layout| layout.stacking_layer().index() < 0)
+                .filter(|layout| layout.stacking_index() < 0)
                 .map(|layout| Task::Context(layout)),
         );
         self.pending
@@ -80,7 +82,7 @@ impl<'a> ReverseLayoutIter<'a> {
         self.pending.extend(
             contexts
                 .iter()
-                .filter(|layout| layout.stacking_layer().index() > 0)
+                .filter(|layout| layout.stacking_index() > 0)
                 .map(|layout| Task::Context(layout)),
         );
     }

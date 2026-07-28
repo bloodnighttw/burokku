@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn canvas_commands_follow_stacking_layer_order() {
+    fn canvas_commands_follow_stacking_context_order() {
         let mut document = Document::new();
         let ordinary = document.create_node(ElementKind::Div);
         let high_descendant = document.create_node(ElementKind::Div);

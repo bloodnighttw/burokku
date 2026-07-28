@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use crate::ui::elements::Document;
 
 pub use iter::{LayoutIter, ReverseLayoutIter};
-pub use stacking::StackingLayer;
 
 /// Computes a renderable layout tree from an element document.
 pub fn compute_layout(
@@ -117,7 +116,8 @@ impl ScrollContainer {
 pub enum LayoutKind {
     Box {
         style: BoxStyle,
-        stacking_layer: StackingLayer,
+        z_index: Option<i32>,
+        isolated: bool,
         children: Vec<Layout>,
     },
     Text {
@@ -166,13 +166,6 @@ impl Layout {
     /// visually topmost layout is visited first.
     pub fn iter_rev(&self) -> ReverseLayoutIter<'_> {
         ReverseLayoutIter::new(self)
-    }
-
-    pub fn stacking_layer(&self) -> StackingLayer {
-        match &self.kind {
-            LayoutKind::Box { stacking_layer, .. } => *stacking_layer,
-            LayoutKind::Text { .. } => StackingLayer::default(),
-        }
     }
 
     pub fn children(&self) -> &[Layout] {
