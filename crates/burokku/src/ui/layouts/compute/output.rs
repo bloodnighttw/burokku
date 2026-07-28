@@ -2,7 +2,10 @@ use render::{Clip, Rect as RenderRect, Transform};
 use taffy::{geometry::Point, prelude::Display};
 
 use crate::ui::{
-    elements::{styles::Overflow as ElementOverflow, ElementKind},
+    elements::{
+        styles::{Overflow as ElementOverflow, SizeValue},
+        ElementKind, BODY_ID,
+    },
     layouts::{Layout, LayoutKind, ScrollOffset},
 };
 
@@ -15,6 +18,13 @@ use super::{
     tree::ElementLayoutTree,
 };
 
+#[derive(Clone, Copy)]
+struct FixedContainingBlock {
+    child_parent: Point<f32>,
+    world_transform: Transform,
+    viewport: bool,
+}
+
 impl ElementLayoutTree<'_> {
     pub(super) fn to_layout(
         &self,
@@ -25,10 +35,50 @@ impl ElementLayoutTree<'_> {
         parent_transform: Transform,
         flex_or_grid_item: bool,
     ) -> Layout {
+        self.to_layout_with_fixed_containing_block(
+            node,
+            parent_location,
+            ancestor_clips,
+            viewport,
+            parent_transform,
+            flex_or_grid_item,
+            FixedContainingBlock {
+                child_parent: Point::ZERO,
+                world_transform: Transform::IDENTITY,
+                viewport: true,
+            },
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "retained output needs normal and fixed containing-block state"
+    )]
+    fn to_layout_with_fixed_containing_block(
+        &self,
+        node: usize,
+        parent_location: Point<f32>,
+        ancestor_clips: &[Clip],
+        viewport: RenderRect,
+        parent_transform: Transform,
+        flex_or_grid_item: bool,
+        fixed_containing_block: FixedContainingBlock,
+    ) -> Layout {
         let data = &self.nodes[node];
+        let mut relative_location = data.layout.location;
+        if data.fixed_containing_block.is_some() {
+            if data.paint_style.left == SizeValue::Auto && data.paint_style.right == SizeValue::Auto
+            {
+                relative_location.x = data.fixed_static_offset.x;
+            }
+            if data.paint_style.top == SizeValue::Auto && data.paint_style.bottom == SizeValue::Auto
+            {
+                relative_location.y = data.fixed_static_offset.y;
+            }
+        }
         let location = Point {
-            x: parent_location.x + data.layout.location.x,
-            y: parent_location.y + data.layout.location.y,
+            x: parent_location.x + relative_location.x,
+            y: parent_location.y + relative_location.y,
         };
         let width = data.layout.size.width;
         let height = data.layout.size.height;
@@ -102,25 +152,61 @@ impl ElementLayoutTree<'_> {
                         x: location.x - offset.x,
                         y: location.y - offset.y,
                     };
+                    let descendant_fixed_containing_block = if data.element_id == BODY_ID {
+                        FixedContainingBlock {
+                            child_parent: Point::ZERO,
+                            world_transform,
+                            viewport: true,
+                        }
+                    } else if !data.paint_style.transform.is_none() {
+                        FixedContainingBlock {
+                            child_parent,
+                            world_transform,
+                            viewport: false,
+                        }
+                    } else {
+                        fixed_containing_block
+                    };
                     let children_are_flex_or_grid_items =
                         matches!(data.paint_style.display, Display::Flex | Display::Grid);
                     let mut children: Vec<_> = data
                         .children
                         .iter()
                         .map(|child| {
-                            self.to_layout(
+                            let child_data = &self.nodes[*child];
+                            let (parent_location, clips, parent_transform) =
+                                if child_data.fixed_containing_block.is_some() {
+                                    (
+                                        descendant_fixed_containing_block.child_parent,
+                                        if descendant_fixed_containing_block.viewport {
+                                            &[][..]
+                                        } else {
+                                            descendant_clips.as_slice()
+                                        },
+                                        descendant_fixed_containing_block.world_transform,
+                                    )
+                                } else {
+                                    (child_parent, descendant_clips.as_slice(), world_transform)
+                                };
+                            self.to_layout_with_fixed_containing_block(
                                 *child,
-                                child_parent,
-                                &descendant_clips,
+                                parent_location,
+                                clips,
                                 viewport,
-                                world_transform,
+                                parent_transform,
                                 children_are_flex_or_grid_items,
+                                descendant_fixed_containing_block,
                             )
                         })
                         .collect();
                     let scroll_viewport = padding_box(data, location, width, height);
-                    let (content_width, content_height) =
-                        scroll_content_size(&children, scroll_viewport, offset);
+                    let (content_width, content_height) = scroll_content_size(
+                        children
+                            .iter()
+                            .filter(|child| !child.is_fixed_to_viewport()),
+                        scroll_viewport,
+                        offset,
+                    );
                     let max_offset = ScrollOffset::new(
                         if scrolls_x {
                             (content_width - scroll_viewport.width).max(0.0)
@@ -141,17 +227,48 @@ impl ElementLayoutTree<'_> {
                             x: location.x - offset.x,
                             y: location.y - offset.y,
                         };
+                        let descendant_fixed_containing_block = if data.element_id == BODY_ID {
+                            FixedContainingBlock {
+                                child_parent: Point::ZERO,
+                                world_transform,
+                                viewport: true,
+                            }
+                        } else if !data.paint_style.transform.is_none() {
+                            FixedContainingBlock {
+                                child_parent,
+                                world_transform,
+                                viewport: false,
+                            }
+                        } else {
+                            fixed_containing_block
+                        };
                         children = data
                             .children
                             .iter()
                             .map(|child| {
-                                self.to_layout(
+                                let child_data = &self.nodes[*child];
+                                let (parent_location, clips, parent_transform) =
+                                    if child_data.fixed_containing_block.is_some() {
+                                        (
+                                            descendant_fixed_containing_block.child_parent,
+                                            if descendant_fixed_containing_block.viewport {
+                                                &[][..]
+                                            } else {
+                                                descendant_clips.as_slice()
+                                            },
+                                            descendant_fixed_containing_block.world_transform,
+                                        )
+                                    } else {
+                                        (child_parent, descendant_clips.as_slice(), world_transform)
+                                    };
+                                self.to_layout_with_fixed_containing_block(
                                     *child,
-                                    child_parent,
-                                    &descendant_clips,
+                                    parent_location,
+                                    clips,
                                     viewport,
-                                    world_transform,
+                                    parent_transform,
                                     children_are_flex_or_grid_items,
+                                    descendant_fixed_containing_block,
                                 )
                             })
                             .collect();
@@ -180,6 +297,9 @@ impl ElementLayoutTree<'_> {
                             z_index: data.paint_style.z_index.into(),
                             isolated: data.paint_style.isolation.into(),
                             position: data.paint_style.position,
+                            fixed_containing_block: data
+                                .fixed_containing_block
+                                .map(|owner| self.nodes[owner].element_id),
                             flex_or_grid_item,
                             children,
                         },
