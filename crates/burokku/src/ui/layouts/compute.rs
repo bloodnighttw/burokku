@@ -348,7 +348,7 @@ impl ElementLayoutTree<'_> {
             parent_transform,
             anchored_transform(
                 Transform {
-                    matrix: data.paint_style.transform.matrix,
+                    matrix: data.paint_style.transform.matrix(),
                 },
                 center,
             ),
@@ -371,7 +371,7 @@ impl ElementLayoutTree<'_> {
             let mut style = data.text_style.clone();
             style.opacity = data.paint_style.opacity;
             style.transform = Transform {
-                matrix: data.paint_style.transform.matrix,
+                matrix: data.paint_style.transform.matrix(),
             };
             (
                 LayoutKind::Text {
@@ -382,6 +382,7 @@ impl ElementLayoutTree<'_> {
                         .collect(),
                     spans: data.rendered_spans.clone(),
                     style,
+                    has_transform: !data.paint_style.transform.is_none(),
                     line_count: data.text_line_count,
                     runs: data.text_runs.clone(),
                 },
@@ -493,9 +494,10 @@ impl ElementLayoutTree<'_> {
                                 height,
                                 data.paint_style.opacity,
                                 Transform {
-                                    matrix: data.paint_style.transform.matrix,
+                                    matrix: data.paint_style.transform.matrix(),
                                 },
                             ),
+                            has_transform: !data.paint_style.transform.is_none(),
                             z_index: match data.paint_style.z_index {
                                 ZIndex::Auto => None,
                                 ZIndex::Value(index) => Some(index),

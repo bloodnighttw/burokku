@@ -58,10 +58,16 @@ impl Stacking for Layout {
 
     fn establishes_stacking_context(&self) -> bool {
         let creates_effect_context = match &self.kind {
-            LayoutKind::Box { style, .. } => {
-                style.opacity < 1.0 || style.transform != Default::default()
-            }
-            LayoutKind::Text { .. } => false,
+            LayoutKind::Box {
+                style,
+                has_transform,
+                ..
+            } => style.opacity < 1.0 || *has_transform,
+            LayoutKind::Text {
+                style,
+                has_transform,
+                ..
+            } => style.opacity < 1.0 || *has_transform,
         };
 
         let creates_indexed_context =
@@ -171,8 +177,10 @@ mod tests {
     fn opacity_and_transforms_establish_contexts() {
         let opacity = styled_child(None, &[("opacity", "0.5")]);
         let transformed = styled_child(None, &[("transform", "translateX(4px)")]);
+        let identity_transform = styled_child(None, &[("transform", "translateX(0px)")]);
 
         assert!(opacity.establishes_stacking_context());
         assert!(transformed.establishes_stacking_context());
+        assert!(identity_transform.establishes_stacking_context());
     }
 }

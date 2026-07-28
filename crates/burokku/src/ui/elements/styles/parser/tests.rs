@@ -2,7 +2,7 @@ use taffy::AlignItems;
 
 use crate::ui::elements::styles::{
     BackgroundImage, GradientStop, LengthPercentageValue, LineHeightValue, MaxSizeValue, Overflow,
-    SizeValue, TextDecorationLineValue,
+    SizeValue, TextDecorationLineValue, Transform,
 };
 
 use super::*;
@@ -230,7 +230,10 @@ fn parses_opacity_transform_and_shadows() {
     set_style(&mut style, "text-shadow", Some("1px 2px 3px navy")).unwrap();
 
     assert_eq!(style.opacity, 0.35);
-    assert_eq!(style.transform.matrix, [2.0, 0.0, 0.0, 2.0, 10.0, 20.0]);
+    assert_eq!(
+        style.transform,
+        Transform::Matrix([2.0, 0.0, 0.0, 2.0, 10.0, 20.0])
+    );
     assert_eq!(style.box_shadow[0].spread, 2.0);
     assert_eq!(style.box_shadow[0].color, [0, 0, 0, 128]);
     assert_eq!(style.text_shadow[0].color, [0, 0, 128, 255]);
@@ -257,7 +260,16 @@ fn parses_opacity_transform_and_shadows() {
     assert_eq!(style.text_shadow.len(), 2);
 
     set_style(&mut style, "transform", Some("skewX(45deg)")).unwrap();
-    assert!((style.transform.matrix[2] - 1.0).abs() < 0.0001);
+    assert!((style.transform.matrix()[2] - 1.0).abs() < 0.0001);
+
+    set_style(&mut style, "transform", Some("none")).unwrap();
+    assert_eq!(style.transform, Transform::None);
+
+    set_style(&mut style, "transform", Some("translateX(0px)")).unwrap();
+    assert_eq!(
+        style.transform,
+        Transform::Matrix(Transform::IDENTITY_MATRIX)
+    );
 }
 
 #[test]
