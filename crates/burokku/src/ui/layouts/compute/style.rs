@@ -7,13 +7,31 @@ use taffy::{
     },
 };
 
-use crate::ui::elements::{styles::Style as ElementStyle, ElementKind};
+use crate::ui::elements::{
+    styles::{Position, SizeValue, Style as ElementStyle},
+    ElementKind,
+};
 
 pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
     let (grid_template_rows, grid_template_row_names) =
         grid_template(style.grid_template_rows.as_deref());
     let (grid_template_columns, grid_template_column_names) =
         grid_template(style.grid_template_columns.as_deref());
+    let inset = if style.position == Position::Static {
+        Rect {
+            left: SizeValue::Auto.into(),
+            right: SizeValue::Auto.into(),
+            top: SizeValue::Auto.into(),
+            bottom: SizeValue::Auto.into(),
+        }
+    } else {
+        Rect {
+            left: style.left.into(),
+            right: style.right.into(),
+            top: style.top.into(),
+            bottom: style.bottom.into(),
+        }
+    };
     TaffyStyle {
         display: if matches!(kind, ElementKind::Comment(_)) {
             Display::None
@@ -26,12 +44,7 @@ pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyS
             x: style.overflow_x.into(),
             y: style.overflow_y.into(),
         },
-        inset: Rect {
-            left: style.left.into(),
-            right: style.right.into(),
-            top: style.top.into(),
-            bottom: style.bottom.into(),
-        },
+        inset,
         size: Size {
             width: style.width.into(),
             height: style.height.into(),
