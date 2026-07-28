@@ -6,6 +6,17 @@ use crate::ui::elements::styles::Overflow as ElementOverflow;
 use super::paint::box_style;
 use super::{Layout, LayoutNode, ScrollContainer, ScrollOffset, Scrollbar, ScrollbarAxis};
 
+pub(super) struct OffsetContext {
+    offset: ScrollOffset,
+    max_offset: ScrollOffset,
+}
+
+impl OffsetContext {
+    pub(super) fn new(offset: ScrollOffset, max_offset: ScrollOffset) -> Self {
+        Self { offset, max_offset }
+    }
+}
+
 pub(super) fn padding_box(
     data: &LayoutNode,
     location: Point<f32>,
@@ -42,8 +53,7 @@ pub(super) fn scroll_container(
     clip: Clip,
     content_width: f32,
     content_height: f32,
-    offset: ScrollOffset,
-    max_offset: ScrollOffset,
+    offsets: OffsetContext,
     always_show_horizontal: bool,
     always_show_vertical: bool,
 ) -> ScrollContainer {
@@ -52,6 +62,7 @@ pub(super) fn scroll_container(
     const CROSS_AXIS_SPACE: f32 = 12.0;
     const MIN_THUMB: f32 = 24.0;
 
+    let OffsetContext { offset, max_offset } = offsets;
     let has_horizontal = always_show_horizontal || max_offset.x > 0.0;
     let has_vertical = always_show_vertical || max_offset.y > 0.0;
     let horizontal = has_horizontal.then(|| {

@@ -9,7 +9,7 @@ use paint::{
     anchored_transform, box_style, multiply_transform, relative_transform,
     relative_transform_matrix,
 };
-use scroll::{overflow_clip, padding_box, scroll_container, scroll_content_size};
+use scroll::{overflow_clip, padding_box, scroll_container, scroll_content_size, OffsetContext};
 use style::to_taffy_style;
 use text::{merge_text_style, normalize_text_spans, normalize_white_space};
 
@@ -480,8 +480,7 @@ impl ElementLayoutTree<'_> {
                             own_clip.expect("scroll containers establish an overflow clip"),
                             content_width,
                             content_height,
-                            offset,
-                            max_offset,
+                            OffsetContext::new(offset, max_offset),
                             data.paint_style.overflow_x == ElementOverflow::Scroll,
                             data.paint_style.overflow_y == ElementOverflow::Scroll,
                         )
