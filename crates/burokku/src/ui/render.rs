@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 
 use render::{
-    Border, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, Outline, Rect,
-    TextDecorationLine, TextRunMetrics, TextShadow, TextSpan, TextStyle, TextSystem, Transform,
+    Border, BoxDecoration, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, DecorationStyle,
+    Outline, PaintLayer, Rect, TextDecorationLine, TextRunMetrics, TextShadow, TextSpan, TextStyle,
+    TextSystem, Transform,
 };
 
 use super::{
     elements::Document,
-    layouts::{compute_layout, compute_layout_with_scroll, Layout, LayoutKind, ScrollOffset},
+    layouts::{
+        compute_layout, compute_layout_with_scroll, descendant_contexts, zero_level_entries,
+        Layout, LayoutKind, ScrollOffset, Stacking, ZeroLevelEntry,
+    },
 };
 
 /// The computed UI geometry and the drawing commands produced from it.
@@ -90,16 +94,17 @@ pub fn build_canvas(
 
 fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
     if establishes_effect_group(layout) {
-        paint_group(
+        paint_atomic_context(
             layout,
             viewport,
             scale_factor,
             0,
+            PaintLayer::ContextBackground,
             Transform::IDENTITY,
             canvas,
         );
     } else {
-        paint_context(
+        paint_stacking_context(
             layout,
             viewport,
             scale_factor,
@@ -111,7 +116,7 @@ fn paint_layout(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut
     }
 }
 
-fn paint_context(
+fn paint_stacking_context(
     root: &Layout,
     viewport: Rect,
     scale_factor: f32,
@@ -120,62 +125,120 @@ fn paint_context(
     context_world: Transform,
     canvas: &mut Canvas,
 ) {
-    let flattened = root.iter().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < flattened.len() {
-        let layout = flattened[index];
-        if layout.element_id != root.element_id && establishes_effect_group(layout) {
-            paint_group(
+    paint_phased_layout(
+        root,
+        PaintLayer::ContextBackground,
+        viewport,
+        scale_factor,
+        clip_skip,
+        strip_root_effect,
+        context_world,
+        canvas,
+    );
+
+    let contexts = descendant_contexts(root);
+    for context in contexts
+        .iter()
+        .copied()
+        .filter(|layout| layout.stacking_index() < 0)
+    {
+        paint_atomic_context(
+            context,
+            viewport,
+            scale_factor,
+            clip_skip,
+            PaintLayer::Negative,
+            context_world,
+            canvas,
+        );
+    }
+
+    paint_ordinary_descendants(
+        root,
+        viewport,
+        scale_factor,
+        clip_skip,
+        context_world,
+        canvas,
+    );
+
+    for entry in zero_level_entries(root) {
+        match entry {
+            ZeroLevelEntry::Context(context) => paint_atomic_context(
+                context,
+                viewport,
+                scale_factor,
+                clip_skip,
+                PaintLayer::Positioned,
+                context_world,
+                canvas,
+            ),
+            ZeroLevelEntry::PositionedAuto(layout) => paint_positioned_auto(
                 layout,
                 viewport,
                 scale_factor,
                 clip_skip,
                 context_world,
                 canvas,
-            );
-            index += layout.iter().count();
-        } else {
-            paint_one(
-                layout,
-                viewport,
-                scale_factor,
-                clip_skip,
-                strip_root_effect && layout.element_id == root.element_id,
-                context_world,
-                canvas,
-            );
-            index += 1;
+            ),
         }
+    }
+
+    for context in contexts
+        .iter()
+        .copied()
+        .filter(|layout| layout.stacking_index() > 0)
+    {
+        paint_atomic_context(
+            context,
+            viewport,
+            scale_factor,
+            clip_skip,
+            PaintLayer::Positioned,
+            context_world,
+            canvas,
+        );
     }
 }
 
-fn paint_group(
+fn paint_atomic_context(
     layout: &Layout,
     viewport: Rect,
     scale_factor: f32,
     clip_skip: usize,
+    layer: PaintLayer,
     parent_context_world: Transform,
     canvas: &mut Canvas,
 ) {
     let mut group = Canvas::new();
-    paint_context(
+    let has_effect = establishes_effect_group(layout);
+    let context_world = if has_effect {
+        layout_world_transform(layout)
+    } else {
+        parent_context_world
+    };
+    paint_stacking_context(
         layout,
         viewport,
         scale_factor,
         layout.clips.len(),
-        true,
-        layout_world_transform(layout),
+        has_effect,
+        context_world,
         &mut group,
     );
+    if group.commands().is_empty() {
+        return;
+    }
     let (opacity, transform) = layout_effect(layout);
-    canvas.draw_group(
+    canvas.draw_group_in_layer(
+        layer,
         group,
         [
             (layout.x + layout.width * 0.5) * scale_factor,
             (layout.y + layout.height * 0.5) * scale_factor,
         ],
         scaled_transform(transform, scale_factor),
-        opacity,
+        if has_effect { opacity } else { 1.0 },
         layout
             .clips
             .iter()
@@ -186,8 +249,93 @@ fn paint_group(
     );
 }
 
-fn paint_one(
+fn paint_positioned_auto(
     layout: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    parent_context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let mut group = Canvas::new();
+    paint_phased_layout(
+        layout,
+        PaintLayer::ContextBackground,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        false,
+        parent_context_world,
+        &mut group,
+    );
+    paint_ordinary_descendants(
+        layout,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        parent_context_world,
+        &mut group,
+    );
+    if group.commands().is_empty() {
+        return;
+    }
+    canvas.draw_group_in_layer(
+        PaintLayer::Positioned,
+        group,
+        [
+            (layout.x + layout.width * 0.5) * scale_factor,
+            (layout.y + layout.height * 0.5) * scale_factor,
+        ],
+        Transform::IDENTITY,
+        1.0,
+        layout
+            .clips
+            .iter()
+            .skip(clip_skip)
+            .copied()
+            .map(|clip| localize_clip(clip, parent_context_world))
+            .map(|clip| scaled_clip(clip, scale_factor)),
+    );
+}
+
+fn paint_ordinary_descendants(
+    root: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let mut pending = vec![root.children().iter()];
+    while let Some(mut children) = pending.pop() {
+        let Some(layout) = children.next() else {
+            continue;
+        };
+        pending.push(children);
+        if layout.establishes_stacking_context() || layout.is_positioned_auto() {
+            continue;
+        }
+        paint_phased_layout(
+            layout,
+            PaintLayer::Block,
+            viewport,
+            scale_factor,
+            clip_skip,
+            false,
+            context_world,
+            canvas,
+        );
+        pending.push(layout.children().iter());
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "painting one retained layout needs its phase and render context"
+)]
+fn paint_phased_layout(
+    layout: &Layout,
+    box_layer: PaintLayer,
     viewport: Rect,
     scale_factor: f32,
     clip_skip: usize,
@@ -223,10 +371,12 @@ fn paint_one(
                 style.transform = Transform::IDENTITY;
             }
             if style != BoxStyle::default() {
-                canvas.draw_box_with_clips(
+                paint_box_decorations(
                     bounds,
                     scaled_box_style(style, scale_factor),
+                    box_layer,
                     clips.iter().copied(),
+                    canvas,
                 );
             }
         }
@@ -255,6 +405,68 @@ fn paint_one(
                 canvas,
             );
         }
+    }
+}
+
+fn paint_box_decorations(
+    bounds: Rect,
+    style: BoxStyle,
+    layer: PaintLayer,
+    clips: impl IntoIterator<Item = Clip> + Clone,
+    canvas: &mut Canvas,
+) {
+    let decoration_style = DecorationStyle {
+        corner_radius: style.corner_radius,
+        opacity: style.opacity,
+        transform: style.transform,
+    };
+    for shadow in style.shadows.iter().rev().filter(|shadow| !shadow.inset) {
+        canvas.draw_decoration_with_clips(
+            layer,
+            bounds,
+            BoxDecoration::Shadow(*shadow),
+            decoration_style,
+            clips.clone(),
+        );
+    }
+    if style.background != Color::TRANSPARENT || style.background_image.is_some() {
+        canvas.draw_decoration_with_clips(
+            layer,
+            bounds,
+            BoxDecoration::Background {
+                color: style.background,
+                image: style.background_image,
+            },
+            decoration_style,
+            clips.clone(),
+        );
+    }
+    for shadow in style.shadows.iter().rev().filter(|shadow| shadow.inset) {
+        canvas.draw_decoration_with_clips(
+            layer,
+            bounds,
+            BoxDecoration::Shadow(*shadow),
+            decoration_style,
+            clips.clone(),
+        );
+    }
+    if let Some(border) = style.border {
+        canvas.draw_decoration_with_clips(
+            layer,
+            bounds,
+            BoxDecoration::Border(border),
+            decoration_style,
+            clips.clone(),
+        );
+    }
+    if let Some(outline) = style.outline {
+        canvas.draw_decoration_with_clips(
+            PaintLayer::Outline,
+            bounds,
+            BoxDecoration::Outline(outline),
+            decoration_style,
+            clips,
+        );
     }
 }
 
@@ -677,6 +889,47 @@ mod tests {
     use crate::ui::elements::{ElementKind, BODY_ID};
     use render::{BackgroundImage, DrawCommand};
 
+    fn ordered_commands(canvas: &Canvas) -> Vec<&DrawCommand> {
+        fn append<'a>(canvas: &'a Canvas, commands: &mut Vec<&'a DrawCommand>) {
+            for layer in PaintLayer::ALL {
+                for command in canvas.commands() {
+                    let command_layer = match command {
+                        DrawCommand::Decoration { layer, .. }
+                        | DrawCommand::Group { layer, .. } => *layer,
+                        DrawCommand::Box { .. } => PaintLayer::Block,
+                        DrawCommand::Text { .. } => PaintLayer::Content,
+                        DrawCommand::OverlayBox { .. } => PaintLayer::Overlay,
+                    };
+                    if command_layer != layer {
+                        continue;
+                    }
+                    match command {
+                        DrawCommand::Group { canvas, .. } => append(canvas, commands),
+                        _ => commands.push(command),
+                    }
+                }
+            }
+        }
+
+        let mut commands = Vec::new();
+        append(canvas, &mut commands);
+        commands
+    }
+
+    fn background_colors(canvas: &Canvas) -> Vec<Color> {
+        ordered_commands(canvas)
+            .into_iter()
+            .filter_map(|command| match command {
+                DrawCommand::Decoration {
+                    decoration: BoxDecoration::Background { color, .. },
+                    ..
+                } => Some(*color),
+                DrawCommand::Box { style, .. } => Some(style.background),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn builds_canvas_from_computed_ui_layout() {
         let mut document = Document::new();
@@ -746,16 +999,36 @@ mod tests {
         };
         assert_eq!(*opacity, 0.5);
         assert_eq!(transform.matrix[4..], [6.0, 8.0]);
-        let DrawCommand::Box { style, .. } = &canvas.commands()[0] else {
-            panic!("expected a grouped box command");
-        };
-        assert_eq!(style.opacity, 1.0);
-        assert_eq!(style.transform, Transform::IDENTITY);
-        assert_eq!(style.shadows[0].offset, [2.0, 4.0]);
+        let background = canvas
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Decoration {
+                    decoration: BoxDecoration::Background { image, .. },
+                    style,
+                    ..
+                } => Some((image, style)),
+                _ => None,
+            })
+            .expect("grouped background decoration");
+        assert_eq!(background.1.opacity, 1.0);
+        assert_eq!(background.1.transform, Transform::IDENTITY);
         assert!(matches!(
-            style.background_image,
+            background.0,
             Some(BackgroundImage::LinearGradient { .. })
         ));
+        let shadow = canvas
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Decoration {
+                    decoration: BoxDecoration::Shadow(shadow),
+                    ..
+                } => Some(shadow),
+                _ => None,
+            })
+            .expect("grouped shadow decoration");
+        assert_eq!(shadow.offset, [2.0, 4.0]);
     }
 
     #[test]
@@ -771,12 +1044,20 @@ mod tests {
         document.insert(BODY_ID, card, None).unwrap();
 
         let canvas = build_canvas(&document, 100.0, 50.0, 1.0, &mut TextSystem::new());
-        let DrawCommand::Box { style, .. } = &canvas.commands()[0] else {
-            panic!("expected a box command");
-        };
-        let Some(BackgroundImage::Raster(image)) = &style.background_image else {
-            panic!("expected raster background");
-        };
+        let image = ordered_commands(&canvas)
+            .into_iter()
+            .find_map(|command| match command {
+                DrawCommand::Decoration {
+                    decoration:
+                        BoxDecoration::Background {
+                            image: Some(BackgroundImage::Raster(image)),
+                            ..
+                        },
+                    ..
+                } => Some(image),
+                _ => None,
+            })
+            .expect("expected raster background decoration");
         assert_eq!((image.width, image.height), (2, 1));
     }
 
@@ -822,7 +1103,7 @@ mod tests {
         assert!(canvas
             .commands()
             .iter()
-            .any(|command| matches!(command, DrawCommand::Box { .. })));
+            .any(|command| matches!(command, DrawCommand::Decoration { .. })));
     }
 
     #[test]
@@ -854,7 +1135,7 @@ mod tests {
             .commands()
             .iter()
             .find_map(|command| match command {
-                DrawCommand::Box { clips, .. } if !clips.is_empty() => Some(clips[0]),
+                DrawCommand::Decoration { clips, .. } if !clips.is_empty() => Some(clips[0]),
                 _ => None,
             })
             .expect("overflow clip on child");
@@ -1007,12 +1288,21 @@ mod tests {
         document.insert(BODY_ID, card, None).unwrap();
 
         let canvas = build_canvas(&document, 800.0, 600.0, 2.0, &mut TextSystem::new());
-        let render::DrawCommand::Box { rect, style, .. } = &canvas.commands()[0] else {
-            panic!("card should produce a box command");
-        };
+        let (rect, border, style) = ordered_commands(&canvas)
+            .into_iter()
+            .find_map(|command| match command {
+                DrawCommand::Decoration {
+                    rect,
+                    decoration: BoxDecoration::Border(border),
+                    style,
+                    ..
+                } => Some((rect, border, style)),
+                _ => None,
+            })
+            .expect("card should produce a border decoration");
 
         assert_eq!((rect.width, rect.height), (208.0, 108.0));
-        assert_eq!(style.border.expect("border").width, 4.0);
+        assert_eq!(border.width, 4.0);
         assert_eq!(style.corner_radius.top_left, 8.0);
     }
 
@@ -1053,16 +1343,7 @@ mod tests {
         document.insert(BODY_ID, negative, None).unwrap();
 
         let canvas = build_canvas(&document, 100.0, 100.0, 1.0, &mut TextSystem::new());
-        let backgrounds: Vec<_> = canvas
-            .commands()
-            .iter()
-            .filter_map(|command| match command {
-                render::DrawCommand::Box { style, .. } => Some(style.background),
-                render::DrawCommand::OverlayBox { .. }
-                | render::DrawCommand::Text { .. }
-                | render::DrawCommand::Group { .. } => None,
-            })
-            .collect();
+        let backgrounds = background_colors(&canvas);
 
         assert_eq!(
             backgrounds,
@@ -1073,6 +1354,103 @@ mod tests {
                 Color::from_rgba8(0, 0xff, 0, 0xff),
             ]
         );
+    }
+
+    #[test]
+    fn block_decorations_paint_before_inline_text_and_outlines_paint_last() {
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let text = document.create_node(ElementKind::Text("front".into()));
+        let second = document.create_node(ElementKind::Div);
+        let positive = document.create_node(ElementKind::Div);
+
+        document
+            .set_style(first, "background-color", Some("red"))
+            .unwrap();
+        document
+            .set_style(first, "outline-color", Some("black"))
+            .unwrap();
+        document
+            .set_style(first, "outline-width", Some("2px"))
+            .unwrap();
+        document
+            .set_style(second, "background-color", Some("blue"))
+            .unwrap();
+        document
+            .set_style(positive, "background-color", Some("green"))
+            .unwrap();
+        document
+            .set_style(positive, "position", Some("relative"))
+            .unwrap();
+        document.set_style(positive, "z-index", Some("1")).unwrap();
+        for element in [first, second, positive] {
+            document.set_style(element, "width", Some("40px")).unwrap();
+            document.set_style(element, "height", Some("20px")).unwrap();
+        }
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(first, text, None).unwrap();
+        document.insert(BODY_ID, second, None).unwrap();
+        document.insert(BODY_ID, positive, None).unwrap();
+
+        let canvas = build_canvas(&document, 100.0, 100.0, 1.0, &mut TextSystem::new());
+        let commands = ordered_commands(&canvas);
+        let red = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(255, 0, 0, 255)
+                )
+            })
+            .unwrap();
+        let blue = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 0, 255, 255)
+                )
+            })
+            .unwrap();
+        let text = commands
+            .iter()
+            .position(|command| matches!(command, DrawCommand::Text { .. }))
+            .unwrap();
+        let green = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 128, 0, 255)
+                )
+            })
+            .unwrap();
+        let outline = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Outline(_),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+
+        assert!(red < text);
+        assert!(blue < text);
+        assert!(text < green);
+        assert!(green < outline);
     }
 
     #[test]
@@ -1123,21 +1501,17 @@ mod tests {
 
             let expected_clip = Clip::new(expected_clip, CornerRadius::all(10.0));
             assert_eq!(overflowing_layout.clips, [expected_clip]);
-            let overflowing_command = frame
-                .canvas
-                .commands()
-                .iter()
-                .find(|command| {
-                    matches!(
-                        command,
-                        render::DrawCommand::Box { style, .. }
-                            if style.background == Color::from_rgba8(0xff, 0, 0, 0xff)
-                    )
+            let clips = ordered_commands(&frame.canvas)
+                .into_iter()
+                .find_map(|command| match command {
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        clips,
+                        ..
+                    } if *color == Color::from_rgba8(0xff, 0, 0, 0xff) => Some(clips),
+                    _ => None,
                 })
-                .expect("overflowing child box");
-            let render::DrawCommand::Box { clips, .. } = overflowing_command else {
-                unreachable!()
-            };
+                .expect("overflowing child background");
             assert_eq!(*clips, [scaled_clip(expected_clip, 2.0)]);
 
             let outside_container = (
@@ -1405,15 +1779,7 @@ mod tests {
             &mut TextSystem::new(),
             &HashMap::from([(container, ScrollOffset::new(0.0, 80.0))]),
         );
-        let backgrounds: Vec<_> = frame
-            .canvas
-            .commands()
-            .iter()
-            .filter_map(|command| match command {
-                render::DrawCommand::Box { style, .. } => Some(style.background),
-                _ => None,
-            })
-            .collect();
+        let backgrounds = background_colors(&frame.canvas);
 
         assert!(!backgrounds.contains(&Color::from_rgba8(0xff, 0, 0, 0xff)));
         assert!(!backgrounds.contains(&Color::from_rgba8(0, 0xff, 0, 0xff)));

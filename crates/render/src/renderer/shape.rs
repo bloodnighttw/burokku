@@ -1,8 +1,10 @@
 use bytemuck::{Pod, Zeroable};
+use std::ops::Range;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    BackgroundImage, BoxStyle, Canvas, Clip, Color, DrawCommand, RasterImage, Rect, Transform,
+    BackgroundImage, BoxDecoration, BoxStyle, Canvas, Clip, Color, DecorationStyle, DrawCommand,
+    PaintLayer, RasterImage, Rect, Transform,
 };
 
 use super::SurfaceSize;
@@ -33,7 +35,7 @@ pub(super) struct ShapeRenderer {
     clips: Vec<GpuClip>,
     gradient_stops: Vec<GpuGradientStop>,
     inset_shadows: Vec<GpuInsetShadow>,
-    overlay_start: usize,
+    layer_ranges: [Range<usize>; PaintLayer::COUNT],
 }
 
 impl ShapeRenderer {
@@ -174,7 +176,7 @@ impl ShapeRenderer {
             clips: Vec::new(),
             gradient_stops: Vec::new(),
             inset_shadows: Vec::new(),
-            overlay_start: 0,
+            layer_ranges: std::array::from_fn(|_| 0..0),
         }
     }
 
@@ -206,16 +208,29 @@ impl ShapeRenderer {
         let clip_limit = storage_limit / std::mem::size_of::<GpuClip>();
         let instance_limit =
             device.limits().max_buffer_size as usize / std::mem::size_of::<ShapeInstance>();
-        for overlay in [false, true] {
-            if overlay {
-                self.overlay_start = self.instances.len();
-            }
+        // Pack instances by paint layer so one GPU buffer can be rendered in
+        // CSS-like back-to-front stages without rebuilding it between draws.
+        for layer in PaintLayer::ALL {
+            let layer_start = self.instances.len();
             for command in canvas.commands() {
                 let shape = match command {
-                    DrawCommand::Box { rect, style, clips } if !overlay => {
+                    DrawCommand::Decoration {
+                        layer: command_layer,
+                        rect,
+                        decoration,
+                        style,
+                        clips,
+                    } if *command_layer == layer => Some((
+                        *rect,
+                        decoration_box_style(decoration, *style),
+                        clips.as_slice(),
+                    )),
+                    DrawCommand::Box { rect, style, clips } if layer == PaintLayer::Block => {
                         Some((*rect, style.clone(), clips.as_slice()))
                     }
-                    DrawCommand::OverlayBox { rect, style, clips } if overlay => {
+                    DrawCommand::OverlayBox { rect, style, clips }
+                        if layer == PaintLayer::Overlay =>
+                    {
                         Some((*rect, style.clone(), clips.as_slice()))
                     }
                     _ => None,
@@ -330,6 +345,7 @@ impl ShapeRenderer {
                     ));
                 }
             }
+            self.layer_ranges[layer.index()] = layer_start..self.instances.len();
         }
         if self.instances.is_empty() {
             return;
@@ -424,16 +440,29 @@ impl ShapeRenderer {
 
     fn prepare_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: &Canvas) {
         let mut requested = Vec::new();
-        for image in canvas.commands().iter().filter_map(|command| {
-            let style = match command {
-                DrawCommand::Box { style, .. } | DrawCommand::OverlayBox { style, .. } => style,
-                DrawCommand::Text { .. } | DrawCommand::Group { .. } => return None,
-            };
-            match &style.background_image {
-                Some(BackgroundImage::Raster(image)) => Some(image),
-                _ => None,
-            }
-        }) {
+        for image in canvas
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Decoration {
+                    decoration:
+                        BoxDecoration::Background {
+                            image: Some(BackgroundImage::Raster(image)),
+                            ..
+                        },
+                    ..
+                } => Some(image),
+                DrawCommand::Box { style, .. } | DrawCommand::OverlayBox { style, .. } => {
+                    match &style.background_image {
+                        Some(BackgroundImage::Raster(image)) => Some(image),
+                        _ => None,
+                    }
+                }
+                DrawCommand::Decoration { .. }
+                | DrawCommand::Text { .. }
+                | DrawCommand::Group { .. } => None,
+            })
+        {
             if !requested.iter().any(|candidate| candidate == image) {
                 requested.push(image.clone());
             }
@@ -499,12 +528,9 @@ impl ShapeRenderer {
         }
     }
 
-    pub fn draw_base<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.draw_range(pass, 0, self.overlay_start);
-    }
-
-    pub fn draw_overlay<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.draw_range(pass, self.overlay_start, self.instances.len());
+    pub fn draw_layer<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, layer: PaintLayer) {
+        let range = self.layer_ranges[layer.index()].clone();
+        self.draw_range(pass, range.start, range.end);
     }
 
     fn draw_range<'pass>(
@@ -521,6 +547,27 @@ impl ShapeRenderer {
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..6, start as u32..end as u32);
     }
+}
+
+fn decoration_box_style(decoration: &BoxDecoration, style: DecorationStyle) -> BoxStyle {
+    // The shader still consumes one compact shape instance. Expand the public
+    // single-operation command only at this private GPU boundary.
+    let mut box_style = BoxStyle {
+        corner_radius: style.corner_radius,
+        opacity: style.opacity,
+        transform: style.transform,
+        ..BoxStyle::default()
+    };
+    match decoration {
+        BoxDecoration::Background { color, image } => {
+            box_style.background = *color;
+            box_style.background_image = image.clone();
+        }
+        BoxDecoration::Border(border) => box_style.border = Some(*border),
+        BoxDecoration::Outline(outline) => box_style.outline = Some(*outline),
+        BoxDecoration::Shadow(shadow) => box_style.shadows.push(*shadow),
+    }
+    box_style
 }
 
 fn bounded_image_atlas(

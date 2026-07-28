@@ -102,6 +102,10 @@ impl Outline {
     }
 }
 
+/// Complete compatibility style for drawing a box in one command.
+///
+/// Layout engines that need CSS-like phase ordering should split this into
+/// [`BoxDecoration`] commands with a shared [`DecorationStyle`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoxStyle {
     pub background: Color,
@@ -127,4 +131,42 @@ impl Default for BoxStyle {
             shadows: Vec::new(),
         }
     }
+}
+
+/// Geometry and effects shared by one independently ordered box decoration.
+///
+/// A decoration intentionally contains only one visual operation. This lets
+/// callers place backgrounds, borders, shadows, and outlines into different
+/// paint layers without rebuilding a monolithic [`BoxStyle`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecorationStyle {
+    pub corner_radius: CornerRadius,
+    pub opacity: f32,
+    pub transform: Transform,
+}
+
+impl Default for DecorationStyle {
+    fn default() -> Self {
+        Self {
+            corner_radius: CornerRadius::ZERO,
+            opacity: 1.0,
+            transform: Transform::IDENTITY,
+        }
+    }
+}
+
+/// One independently drawable part of a CSS-like box.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoxDecoration {
+    /// Background color and optional image, clipped to the rounded box.
+    Background {
+        color: Color,
+        image: Option<BackgroundImage>,
+    },
+    /// Border drawn inside the box edge.
+    Border(Border),
+    /// Outline drawn outside the box edge.
+    Outline(Outline),
+    /// One outer or inset shadow.
+    Shadow(BoxShadow),
 }

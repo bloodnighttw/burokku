@@ -22,12 +22,18 @@ enum Task<'a> {
     /// Visit a positioned `z-index: auto` subtree without containing its
     /// descendant stacking contexts.
     PositionedAuto(&'a Layout),
-    /// Visit an ordinary layout after scheduling its children.
-    Middle(&'a Layout),
+    /// Visit an ordinary layout in one in-flow paint phase.
+    Middle(&'a Layout, MiddlePhase),
     /// Continue visiting ordinary children from last to first.
-    MiddleChildren(std::slice::Iter<'a, Layout>),
+    MiddleChildren(std::slice::Iter<'a, Layout>, MiddlePhase),
     /// Yield a layout after all content painted above it has been visited.
     Yield(&'a Layout),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MiddlePhase {
+    Box,
+    Text,
 }
 
 impl<'a> ReverseLayoutIter<'a> {
@@ -50,22 +56,30 @@ impl<'a> Iterator for ReverseLayoutIter<'a> {
                 Task::Context(layout) => self.schedule_context(layout),
                 Task::PositionedAuto(layout) => {
                     self.pending.push(Task::Yield(layout));
-                    self.pending
-                        .push(Task::MiddleChildren(layout.children().iter()));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Box,
+                    ));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Text,
+                    ));
                 }
-                Task::Middle(layout) => {
+                Task::Middle(layout, phase) => {
                     if layout.establishes_stacking_context() || layout.is_positioned_auto() {
                         continue;
                     }
 
-                    self.pending.push(Task::Yield(layout));
+                    if phase.matches(layout) {
+                        self.pending.push(Task::Yield(layout));
+                    }
                     self.pending
-                        .push(Task::MiddleChildren(layout.children().iter()));
+                        .push(Task::MiddleChildren(layout.children().iter(), phase));
                 }
-                Task::MiddleChildren(mut children) => {
+                Task::MiddleChildren(mut children, phase) => {
                     if let Some(child) = children.next_back() {
-                        self.pending.push(Task::MiddleChildren(children));
-                        self.pending.push(Task::Middle(child));
+                        self.pending.push(Task::MiddleChildren(children, phase));
+                        self.pending.push(Task::Middle(child, phase));
                     }
                 }
                 Task::Yield(layout) => return Some(layout),
@@ -93,8 +107,14 @@ impl<'a> ReverseLayoutIter<'a> {
                 .filter(|layout| layout.stacking_index() < 0)
                 .map(|layout| Task::Context(layout)),
         );
-        self.pending
-            .push(Task::MiddleChildren(context_root.children().iter()));
+        self.pending.push(Task::MiddleChildren(
+            context_root.children().iter(),
+            MiddlePhase::Box,
+        ));
+        self.pending.push(Task::MiddleChildren(
+            context_root.children().iter(),
+            MiddlePhase::Text,
+        ));
         self.pending
             .extend(zero_level.iter().map(|entry| match entry {
                 ZeroLevelEntry::Context(layout) => Task::Context(layout),
@@ -106,5 +126,15 @@ impl<'a> ReverseLayoutIter<'a> {
                 .filter(|layout| layout.stacking_index() > 0)
                 .map(|layout| Task::Context(layout)),
         );
+    }
+}
+
+impl MiddlePhase {
+    fn matches(self, layout: &Layout) -> bool {
+        matches!(
+            (self, &layout.kind),
+            (Self::Box, super::super::LayoutKind::Box { .. })
+                | (Self::Text, super::super::LayoutKind::Text { .. })
+        )
     }
 }

@@ -3,7 +3,7 @@ use crate::ui::elements::BODY_ID;
 
 use super::{Layout, LayoutKind};
 
-pub(super) trait Stacking {
+pub(crate) trait Stacking {
     fn is_root(&self) -> bool;
 
     fn z_index(&self) -> Option<i32>;
@@ -22,7 +22,11 @@ pub(super) trait Stacking {
     fn establishes_stacking_context(&self) -> bool;
 
     fn stacking_index(&self) -> i32 {
-        self.z_index().unwrap_or(0)
+        if self.is_positioned() || self.is_flex_or_grid_item() {
+            self.z_index().unwrap_or(0)
+        } else {
+            0
+        }
     }
 
     fn is_positioned_auto(&self) -> bool {
@@ -98,7 +102,7 @@ impl Stacking for Layout {
 /// Traversal stops at each context boundary because its descendants belong to
 /// that context, not the surrounding one. Stable sorting preserves document
 /// order when two contexts use the same z-index.
-pub(super) fn descendant_contexts(root: &Layout) -> Vec<&Layout> {
+pub(crate) fn descendant_contexts(root: &Layout) -> Vec<&Layout> {
     let mut contexts = Vec::new();
     let mut pending = vec![root.children().iter()];
 
@@ -124,7 +128,7 @@ pub(super) fn descendant_contexts(root: &Layout) -> Vec<&Layout> {
 /// establish a context: stacking-context descendants still participate in
 /// `root`.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum ZeroLevelEntry<'a> {
+pub(crate) enum ZeroLevelEntry<'a> {
     Context(&'a Layout),
     PositionedAuto(&'a Layout),
 }
@@ -134,7 +138,7 @@ pub(super) enum ZeroLevelEntry<'a> {
 ///
 /// Traversal stops at real context boundaries. It continues through
 /// positioned-auto boxes because their descendant contexts belong to `root`.
-pub(super) fn zero_level_entries(root: &Layout) -> Vec<ZeroLevelEntry<'_>> {
+pub(crate) fn zero_level_entries(root: &Layout) -> Vec<ZeroLevelEntry<'_>> {
     let mut entries = Vec::new();
     let mut pending = vec![root.children().iter()];
 
@@ -248,5 +252,17 @@ mod tests {
         assert!(opacity.establishes_stacking_context());
         assert!(transformed.establishes_stacking_context());
         assert!(identity_transform.establishes_stacking_context());
+    }
+
+    #[test]
+    fn static_effect_context_ignores_its_z_index() {
+        let opacity = styled_child(None, &[("opacity", "0.5"), ("z-index", "12")]);
+        let transform = styled_child(None, &[("transform", "translateX(0px)"), ("z-index", "-4")]);
+        let isolated = styled_child(None, &[("isolation", "isolate"), ("z-index", "8")]);
+
+        for layout in [&opacity, &transform, &isolated] {
+            assert!(layout.establishes_stacking_context());
+            assert_eq!(layout.stacking_index(), 0);
+        }
     }
 }
