@@ -1,7 +1,7 @@
 use std::iter::FusedIterator;
 
 use super::super::{
-    stacking::{descendant_contexts, Stacking},
+    stacking::{descendant_contexts, zero_level_entries, Stacking, ZeroLevelEntry},
     Layout,
 };
 
@@ -18,6 +18,7 @@ pub struct ReverseLayoutIter<'a> {
 #[derive(Debug)]
 enum Task<'a> {
     Context(&'a Layout),
+    PositionedAuto(&'a Layout),
     Middle(&'a Layout),
     MiddleChildren(std::slice::Iter<'a, Layout>),
     Yield(&'a Layout),
@@ -38,11 +39,13 @@ impl<'a> Iterator for ReverseLayoutIter<'a> {
         while let Some(task) = self.pending.pop() {
             match task {
                 Task::Context(layout) => self.schedule_context(layout),
+                Task::PositionedAuto(layout) => {
+                    self.pending.push(Task::Yield(layout));
+                    self.pending
+                        .push(Task::MiddleChildren(layout.children().iter()));
+                }
                 Task::Middle(layout) => {
-                    if layout.establishes_stacking_context() {
-                        if layout.stacking_index() == 0 {
-                            self.pending.push(Task::Context(layout));
-                        }
+                    if layout.establishes_stacking_context() || layout.is_positioned_auto() {
                         continue;
                     }
 
@@ -69,6 +72,7 @@ impl FusedIterator for ReverseLayoutIter<'_> {}
 impl<'a> ReverseLayoutIter<'a> {
     fn schedule_context(&mut self, context_root: &'a Layout) {
         let contexts = descendant_contexts(context_root);
+        let zero_level = zero_level_entries(context_root);
 
         self.pending.push(Task::Yield(context_root));
         self.pending.extend(
@@ -79,6 +83,11 @@ impl<'a> ReverseLayoutIter<'a> {
         );
         self.pending
             .push(Task::MiddleChildren(context_root.children().iter()));
+        self.pending
+            .extend(zero_level.iter().map(|entry| match entry {
+                ZeroLevelEntry::Context(layout) => Task::Context(layout),
+                ZeroLevelEntry::PositionedAuto(layout) => Task::PositionedAuto(layout),
+            }));
         self.pending.extend(
             contexts
                 .iter()

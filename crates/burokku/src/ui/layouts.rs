@@ -353,6 +353,16 @@ mod tests {
         isolated: bool,
         children: Vec<Layout>,
     ) -> Layout {
+        box_layout_with_positioning(element_id, z_index, isolated, true, children)
+    }
+
+    fn box_layout_with_positioning(
+        element_id: u64,
+        z_index: Option<i32>,
+        isolated: bool,
+        positioned: bool,
+        children: Vec<Layout>,
+    ) -> Layout {
         Layout {
             element_id,
             x: 0.0,
@@ -367,7 +377,7 @@ mod tests {
                 has_transform: false,
                 z_index,
                 isolated,
-                positioned: true,
+                positioned,
                 flex_or_grid_item: false,
                 children,
             },
@@ -454,5 +464,44 @@ mod tests {
 
         assert_eq!(forward, [1, 2, 3, 4, 5]);
         assert_eq!(reverse, [5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn zero_level_contexts_paint_after_ordinary_content() {
+        let zero = box_layout(2, Some(0), false, vec![]);
+        let ordinary = box_layout_with_positioning(3, None, false, false, vec![]);
+        let root = box_layout(1, None, false, vec![zero, ordinary]);
+
+        assert_eq!(element_ids(root.iter()), [1, 3, 2]);
+        assert_eq!(element_ids(root.iter_rev()), [2, 3, 1]);
+        assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 2);
+    }
+
+    #[test]
+    fn positioned_auto_paints_at_zero_level_without_containing_child_contexts() {
+        let high_descendant = box_layout(3, Some(10), false, vec![]);
+        let positioned_auto = box_layout(2, None, false, vec![high_descendant]);
+        let ordinary = box_layout_with_positioning(4, None, false, false, vec![]);
+        let middle_context = box_layout(5, Some(5), false, vec![]);
+        let root = box_layout(
+            1,
+            None,
+            false,
+            vec![positioned_auto, ordinary, middle_context],
+        );
+
+        assert_eq!(element_ids(root.iter()), [1, 4, 2, 5, 3]);
+        assert_eq!(element_ids(root.iter_rev()), [3, 5, 2, 4, 1]);
+    }
+
+    #[test]
+    fn zero_z_index_contains_child_contexts_atomically() {
+        let high_descendant = box_layout(3, Some(10), false, vec![]);
+        let zero = box_layout(2, Some(0), false, vec![high_descendant]);
+        let middle_context = box_layout(4, Some(5), false, vec![]);
+        let root = box_layout(1, None, false, vec![zero, middle_context]);
+
+        assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
+        assert_eq!(element_ids(root.iter_rev()), [4, 3, 2, 1]);
     }
 }
