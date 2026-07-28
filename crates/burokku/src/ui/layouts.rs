@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use crate::ui::elements::Document;
 
+pub use crate::ui::elements::styles::Position;
+
 pub use iter::{LayoutIter, ReverseLayoutIter};
 
 /// Computes a renderable layout tree from an element document.
@@ -117,7 +119,7 @@ pub enum LayoutKind {
         has_transform: bool,
         z_index: Option<i32>,
         isolated: bool,
-        positioned: bool,
+        position: Position,
         flex_or_grid_item: bool,
         children: Vec<Layout>,
     },
@@ -355,7 +357,7 @@ mod tests {
         isolated: bool,
         children: Vec<Layout>,
     ) -> Layout {
-        box_layout_with_positioning(element_id, z_index, isolated, true, children)
+        box_layout_with_position(element_id, z_index, isolated, Position::Relative, children)
     }
 
     fn box_layout_with_positioning(
@@ -363,6 +365,21 @@ mod tests {
         z_index: Option<i32>,
         isolated: bool,
         positioned: bool,
+        children: Vec<Layout>,
+    ) -> Layout {
+        let position = if positioned {
+            Position::Relative
+        } else {
+            Position::Static
+        };
+        box_layout_with_position(element_id, z_index, isolated, position, children)
+    }
+
+    fn box_layout_with_position(
+        element_id: u64,
+        z_index: Option<i32>,
+        isolated: bool,
+        position: Position,
         children: Vec<Layout>,
     ) -> Layout {
         Layout {
@@ -379,7 +396,7 @@ mod tests {
                 has_transform: false,
                 z_index,
                 isolated,
-                positioned,
+                position,
                 flex_or_grid_item: false,
                 children,
             },
@@ -416,7 +433,7 @@ mod tests {
                 has_transform: false,
                 z_index: None,
                 isolated: false,
-                positioned: false,
+                position: Position::Static,
                 flex_or_grid_item: false,
                 children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
             },
@@ -505,6 +522,19 @@ mod tests {
 
         assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
         assert_eq!(element_ids(root.iter_rev()), [4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn fixed_auto_contains_child_contexts_atomically() {
+        let high_descendant = box_layout(3, Some(10), false, vec![]);
+        let fixed =
+            box_layout_with_position(2, None, false, Position::Fixed, vec![high_descendant]);
+        let middle_context = box_layout(4, Some(5), false, vec![]);
+        let root = box_layout(1, None, false, vec![fixed, middle_context]);
+
+        assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
+        assert_eq!(element_ids(root.iter_rev()), [4, 3, 2, 1]);
+        assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 4);
     }
 
     #[test]

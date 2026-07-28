@@ -1,3 +1,4 @@
+use crate::ui::elements::styles::Position;
 use crate::ui::elements::BODY_ID;
 
 use super::{Layout, LayoutKind};
@@ -9,7 +10,11 @@ pub(super) trait Stacking {
 
     fn is_isolated(&self) -> bool;
 
-    fn is_positioned(&self) -> bool;
+    fn position(&self) -> Option<Position>;
+
+    fn is_positioned(&self) -> bool {
+        self.position().is_some_and(Position::is_positioned)
+    }
 
     fn is_flex_or_grid_item(&self) -> bool;
 
@@ -21,7 +26,9 @@ pub(super) trait Stacking {
     }
 
     fn is_positioned_auto(&self) -> bool {
-        self.is_positioned() && self.z_index().is_none()
+        self.position()
+            .is_some_and(|position| matches!(position, Position::Relative | Position::Absolute))
+            && self.z_index().is_none()
     }
 }
 
@@ -44,10 +51,10 @@ impl Stacking for Layout {
         }
     }
 
-    fn is_positioned(&self) -> bool {
+    fn position(&self) -> Option<Position> {
         match &self.kind {
-            LayoutKind::Box { positioned, .. } => *positioned,
-            LayoutKind::Text { .. } => false,
+            LayoutKind::Box { position, .. } => Some(*position),
+            LayoutKind::Text { .. } => None,
         }
     }
 
@@ -76,8 +83,13 @@ impl Stacking for Layout {
 
         let creates_indexed_context =
             self.z_index().is_some() && (self.is_positioned() || self.is_flex_or_grid_item());
+        let creates_fixed_context = self.position() == Some(Position::Fixed);
 
-        self.is_root() || creates_indexed_context || self.is_isolated() || creates_effect_context
+        self.is_root()
+            || creates_indexed_context
+            || creates_fixed_context
+            || self.is_isolated()
+            || creates_effect_context
     }
 }
 
@@ -216,6 +228,15 @@ mod tests {
         assert!(positioned_box.establishes_stacking_context());
         assert!(flex_item.establishes_stacking_context());
         assert!(grid_item.establishes_stacking_context());
+    }
+
+    #[test]
+    fn fixed_auto_establishes_a_context_but_absolute_auto_does_not() {
+        let absolute = styled_child(None, &[("position", "absolute")]);
+        let fixed = styled_child(None, &[("position", "fixed")]);
+
+        assert!(!absolute.establishes_stacking_context());
+        assert!(fixed.establishes_stacking_context());
     }
 
     #[test]

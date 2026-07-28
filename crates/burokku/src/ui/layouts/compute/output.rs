@@ -194,7 +194,7 @@ impl ElementLayoutTree<'_> {
                                 ZIndex::Value(index) => Some(index),
                             },
                             isolated: data.paint_style.isolation == Isolation::Isolate,
-                            positioned: data.paint_style.positioned,
+                            position: data.paint_style.position,
                             flex_or_grid_item,
                             children,
                         },
