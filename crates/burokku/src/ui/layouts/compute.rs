@@ -17,7 +17,7 @@ use taffy::{
 use crate::ui::elements::{styles::Position, Document, BODY_ID};
 
 use super::{Layout, ScrollOffset};
-use tree::{add_element, establish_positioning_containing_blocks, ElementLayoutTree};
+use tree::{add_element, add_viewport, establish_positioning_containing_blocks, ElementLayoutTree};
 
 #[cfg(test)]
 use super::LayoutKind;
@@ -56,20 +56,22 @@ pub(super) fn compute_layout_with_scroll(
         height: viewport_height.max(0.0),
     };
     let mut nodes = Vec::new();
-    let root = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
+    let body = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
     let has_out_of_flow = nodes.iter().any(|node| {
         matches!(
             node.paint_style.position,
             Position::Absolute | Position::Fixed
         )
     });
-    nodes[root].style.size = Size {
+    nodes[body].style.size = Size {
         width: Dimension::length(viewport.width),
         height: Dimension::length(viewport.height),
     };
+    let root = add_viewport(&mut nodes, body, viewport);
 
     let mut tree = ElementLayoutTree {
         nodes,
+        viewport_root: root,
         text_system,
         scroll_offsets,
     };
@@ -88,7 +90,7 @@ pub(super) fn compute_layout_with_scroll(
         viewport.map(AvailableSpace::Definite),
     );
     tree.to_layout(
-        root,
+        body,
         Point::ZERO,
         &[],
         RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
@@ -787,6 +789,88 @@ mod tests {
         assert_eq!((fixed.width, fixed.height), (75.0, 20.0));
         assert!(fixed.clips.is_empty());
         assert!(fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
+    fn viewport_fixed_boxes_ignore_body_box_model_and_clipping() {
+        let mut document = Document::new();
+        let wrapper = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("margin-left", "30px"),
+            ("padding", "20px"),
+            ("border-width", "5px"),
+            ("overflow", "hidden"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+        for (property, value) in [
+            ("width", "50px"),
+            ("height", "50px"),
+            ("overflow", "hidden"),
+        ] {
+            document.set_style(wrapper, property, Some(value)).unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "50%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, wrapper, None).unwrap();
+        document.insert(wrapper, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+
+        assert_eq!((fixed.x, fixed.y), (140.0, 165.0));
+        assert_eq!((fixed.width, fixed.height), (150.0, 20.0));
+        assert!(fixed.clips.is_empty());
+        assert!(fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
+    fn transformed_body_contains_fixed_boxes() {
+        let mut document = Document::new();
+        let wrapper = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("padding", "20px"),
+            ("overflow", "hidden"),
+            ("transform", "translateX(0px)"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "50%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, wrapper, None).unwrap();
+        document.insert(wrapper, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+        let LayoutKind::Box {
+            fixed_containing_block,
+            ..
+        } = fixed.kind
+        else {
+            panic!("fixed element should produce a box");
+        };
+
+        assert_eq!((fixed.x, fixed.y), (140.0, 205.0));
+        assert_eq!((fixed.width, fixed.height), (150.0, 20.0));
+        assert_eq!(fixed_containing_block, Some(BODY_ID));
+        assert_eq!(fixed.clips.len(), 1);
+        assert!(!fixed.is_fixed_to_viewport());
     }
 
     #[test]

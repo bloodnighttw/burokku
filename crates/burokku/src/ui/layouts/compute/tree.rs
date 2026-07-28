@@ -5,7 +5,7 @@ use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
     compute_hidden_layout, compute_leaf_layout,
     geometry::{Point, Size},
-    prelude::{AvailableSpace, Display, NodeId},
+    prelude::{AvailableSpace, Dimension, Display, NodeId},
     style::Style as TaffyStyle,
     tree::{
         Cache, Layout as TaffyLayout, LayoutBlockContainer, LayoutFlexboxContainer,
@@ -81,6 +81,36 @@ pub(super) fn add_element(
     }
     nodes[node_id].children = children.clone();
     nodes[node_id].layout_children = children;
+    node_id
+}
+
+pub(super) fn add_viewport(nodes: &mut Vec<LayoutNode>, body: usize, viewport: Size<f32>) -> usize {
+    let node_id = nodes.len();
+    let style = TaffyStyle {
+        size: Size {
+            width: Dimension::length(viewport.width),
+            height: Dimension::length(viewport.height),
+        },
+        ..TaffyStyle::default()
+    };
+    nodes.push(LayoutNode {
+        element_id: u64::MAX,
+        kind: ElementKind::Body,
+        style,
+        paint_style: ElementStyle::default(),
+        text_style: TextStyle::default(),
+        inline_spans: None,
+        rendered_spans: Vec::new(),
+        children: vec![body],
+        layout_children: vec![body],
+        positioning_containing_block: None,
+        static_offset: Point::ZERO,
+        cache: Cache::new(),
+        layout: TaffyLayout::new(),
+        first_baseline: None,
+        text_line_count: 0,
+        text_runs: Vec::new(),
+    });
     node_id
 }
 
@@ -252,6 +282,7 @@ pub(super) struct LayoutNode {
 
 pub(super) struct ElementLayoutTree<'a> {
     pub(super) nodes: Vec<LayoutNode>,
+    pub(super) viewport_root: usize,
     pub(super) text_system: &'a mut TextSystem,
     pub(super) scroll_offsets: &'a HashMap<u64, ScrollOffset>,
 }

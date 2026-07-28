@@ -4,7 +4,7 @@ use taffy::{geometry::Point, prelude::Display};
 use crate::ui::{
     elements::{
         styles::{Overflow as ElementOverflow, Position, SizeValue},
-        ElementKind, BODY_ID,
+        ElementKind,
     },
     layouts::{Layout, LayoutKind, ScrollOffset},
 };
@@ -158,13 +158,8 @@ impl ElementLayoutTree<'_> {
                         x: location.x - offset.x,
                         y: location.y - offset.y,
                     };
-                    let descendant_fixed_containing_block = if data.element_id == BODY_ID {
-                        ContainingBlock {
-                            child_parent: Point::ZERO,
-                            world_transform,
-                            viewport: true,
-                        }
-                    } else if !data.paint_style.transform.is_none() {
+                    let descendant_fixed_containing_block = if !data.paint_style.transform.is_none()
+                    {
                         ContainingBlock {
                             child_parent,
                             world_transform,
@@ -173,18 +168,18 @@ impl ElementLayoutTree<'_> {
                     } else {
                         fixed_containing_block
                     };
-                    let descendant_absolute_containing_block = if data.element_id == BODY_ID
-                        || data.paint_style.position.is_positioned()
-                        || !data.paint_style.transform.is_none()
-                    {
-                        ContainingBlock {
-                            child_parent,
-                            world_transform,
-                            viewport: data.element_id == BODY_ID,
-                        }
-                    } else {
-                        absolute_containing_block
-                    };
+                    let descendant_absolute_containing_block =
+                        if data.paint_style.position.is_positioned()
+                            || !data.paint_style.transform.is_none()
+                        {
+                            ContainingBlock {
+                                child_parent,
+                                world_transform,
+                                viewport: false,
+                            }
+                        } else {
+                            absolute_containing_block
+                        };
                     let children_are_flex_or_grid_items =
                         matches!(data.paint_style.display, Display::Flex | Display::Grid);
                     let mut children: Vec<_> = data
@@ -256,33 +251,28 @@ impl ElementLayoutTree<'_> {
                             x: location.x - offset.x,
                             y: location.y - offset.y,
                         };
-                        let descendant_fixed_containing_block = if data.element_id == BODY_ID {
-                            ContainingBlock {
-                                child_parent: Point::ZERO,
-                                world_transform,
-                                viewport: true,
-                            }
-                        } else if !data.paint_style.transform.is_none() {
-                            ContainingBlock {
-                                child_parent,
-                                world_transform,
-                                viewport: false,
-                            }
-                        } else {
-                            fixed_containing_block
-                        };
-                        let descendant_absolute_containing_block = if data.element_id == BODY_ID
-                            || data.paint_style.position.is_positioned()
-                            || !data.paint_style.transform.is_none()
-                        {
-                            ContainingBlock {
-                                child_parent,
-                                world_transform,
-                                viewport: data.element_id == BODY_ID,
-                            }
-                        } else {
-                            absolute_containing_block
-                        };
+                        let descendant_fixed_containing_block =
+                            if !data.paint_style.transform.is_none() {
+                                ContainingBlock {
+                                    child_parent,
+                                    world_transform,
+                                    viewport: false,
+                                }
+                            } else {
+                                fixed_containing_block
+                            };
+                        let descendant_absolute_containing_block =
+                            if data.paint_style.position.is_positioned()
+                                || !data.paint_style.transform.is_none()
+                            {
+                                ContainingBlock {
+                                    child_parent,
+                                    world_transform,
+                                    viewport: false,
+                                }
+                            } else {
+                                absolute_containing_block
+                            };
                         children = data
                             .children
                             .iter()
@@ -352,10 +342,13 @@ impl ElementLayoutTree<'_> {
                             fixed_containing_block: if data.paint_style.position == Position::Fixed
                             {
                                 data.positioning_containing_block
+                                    .filter(|owner| *owner != self.viewport_root)
                                     .map(|owner| self.nodes[owner].element_id)
                             } else {
                                 None
                             },
+                            fixed_to_viewport: data.paint_style.position == Position::Fixed
+                                && data.positioning_containing_block == Some(self.viewport_root),
                             flex_or_grid_item,
                             children,
                         },
