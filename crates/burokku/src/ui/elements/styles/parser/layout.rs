@@ -65,10 +65,7 @@ pub(super) fn parse_max_size(name: &str, value: &str) -> Result<MaxSizeValue, St
     if value == "none" {
         return Ok(MaxSizeValue::None);
     }
-    match parse_length_percentage(name, value, false)? {
-        LengthPercentageValue::Px(value) => Ok(MaxSizeValue::Px(value)),
-        LengthPercentageValue::Percent(value) => Ok(MaxSizeValue::Percent(value)),
-    }
+    Ok(parse_length_percentage(name, value, false)?.into())
 }
 
 pub(super) fn parse_length_percentage(

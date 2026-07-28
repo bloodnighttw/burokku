@@ -2,10 +2,7 @@ use render::{Clip, Rect as RenderRect, Transform};
 use taffy::{geometry::Point, prelude::Display};
 
 use crate::ui::{
-    elements::{
-        styles::{Isolation, Overflow as ElementOverflow, ZIndex},
-        ElementKind,
-    },
+    elements::{styles::Overflow as ElementOverflow, ElementKind},
     layouts::{Layout, LayoutKind, ScrollOffset},
 };
 
@@ -38,12 +35,7 @@ impl ElementLayoutTree<'_> {
         let center = [location.x + width * 0.5, location.y + height * 0.5];
         let world_transform = multiply_transform(
             parent_transform,
-            anchored_transform(
-                Transform {
-                    matrix: data.paint_style.transform.matrix(),
-                },
-                center,
-            ),
+            anchored_transform(data.paint_style.transform.into(), center),
         );
         let relative_transform = relative_transform(world_transform, center);
         let mut descendant_clips = ancestor_clips.to_vec();
@@ -62,9 +54,7 @@ impl ElementLayoutTree<'_> {
         let (kind, scroll) = if is_text_flow {
             let mut style = data.text_style.clone();
             style.opacity = data.paint_style.opacity;
-            style.transform = Transform {
-                matrix: data.paint_style.transform.matrix(),
-            };
+            style.transform = data.paint_style.transform.into();
             (
                 LayoutKind::Text {
                     text: data
@@ -184,16 +174,11 @@ impl ElementLayoutTree<'_> {
                                 width,
                                 height,
                                 data.paint_style.opacity,
-                                Transform {
-                                    matrix: data.paint_style.transform.matrix(),
-                                },
+                                data.paint_style.transform.into(),
                             ),
                             has_transform: !data.paint_style.transform.is_none(),
-                            z_index: match data.paint_style.z_index {
-                                ZIndex::Auto => None,
-                                ZIndex::Value(index) => Some(index),
-                            },
-                            isolated: data.paint_style.isolation == Isolation::Isolate,
+                            z_index: data.paint_style.z_index.into(),
+                            isolated: data.paint_style.isolation.into(),
                             position: data.paint_style.position,
                             flex_or_grid_item,
                             children,
