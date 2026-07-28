@@ -138,6 +138,184 @@ function GridExample() {
   );
 }
 
+function PositionExamples() {
+  const stageStyle = {
+    position: "relative",
+    height: 112,
+    padding: 10,
+    backgroundColor: "#eef2f7",
+    borderColor: "#c5cfdd",
+    borderWidth: 2,
+    borderRadius: 10,
+  } as const;
+
+  const badgeStyle = {
+    display: "flex",
+    height: 24,
+    padding: 6,
+    color: "#ffffff",
+    fontSize: 12,
+    lineHeight: "16px",
+    fontWeight: 700,
+    borderRadius: 6,
+  } as const;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <span
+        style={{
+          color: "#18202b",
+          fontSize: 20,
+          lineHeight: "26px",
+          fontWeight: 700,
+          letterSpacing: -0.3,
+        }}
+      >
+        Positioning
+      </span>
+      <div style={{ display: "flex", gap: 12 }}>
+        <ExampleCard title="Static ignores inset · relative keeps flow">
+          <div style={stageStyle}>
+            <div
+              style={{
+                ...badgeStyle,
+                position: "static",
+                left: 180,
+                top: 50,
+                width: 112,
+                backgroundColor: "#475569",
+              }}
+            >
+              STATIC · left ignored
+            </div>
+            <div
+              style={{
+                ...badgeStyle,
+                position: "relative",
+                left: 128,
+                top: 6,
+                width: 116,
+                backgroundColor: "#7c3aed",
+              }}
+            >
+              RELATIVE · shifted
+            </div>
+            <div
+              style={{
+                ...badgeStyle,
+                width: 120,
+                backgroundColor: "#0f766e",
+              }}
+            >
+              SIBLING · flow intact
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Absolute skips static wrappers">
+          <div style={stageStyle}>
+            <div
+              style={{
+                width: 118,
+                height: 74,
+                marginLeft: 24,
+                padding: 8,
+                backgroundColor: "#dbeafe",
+                borderColor: "#60a5fa",
+                borderWidth: 1,
+                borderRadius: 7,
+              }}
+            >
+              <span style={{ color: "#1e40af", fontSize: 12, lineHeight: "16px", fontWeight: 700 }}>
+                STATIC WRAPPER
+              </span>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "absolute",
+                  right: 10,
+                  top: 10,
+                  width: 104,
+                  backgroundColor: "#dc2626",
+                }}
+              >
+                ABS · outer right
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+      </div>
+      <div style={{ display: "flex", gap: 12 }}>
+        <ExampleCard title="Absolute retains DOM scroll + clip">
+          <div style={stageStyle}>
+            <div
+              style={{
+                width: "100%",
+                height: 88,
+                overflowY: "scroll",
+                backgroundColor: "#dbeafe",
+                borderRadius: 7,
+              }}
+            >
+              <div style={{ height: 180, padding: 8 }}>
+                <span style={{ color: "#1e40af", fontSize: 12, lineHeight: "16px", fontWeight: 700 }}>
+                  Scroll this panel
+                </span>
+              </div>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "absolute",
+                  left: 32,
+                  top: 76,
+                  width: 142,
+                  backgroundColor: "#ea580c",
+                }}
+              >
+                ABS · moves + clips
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Transform contains fixed">
+          <div
+            style={{
+              ...stageStyle,
+              overflow: "hidden",
+              transform: "translateX(0px)",
+            }}
+          >
+            <div
+              style={{
+                width: 120,
+                height: 58,
+                padding: 8,
+                backgroundColor: "#dcfce7",
+                borderRadius: 7,
+              }}
+            >
+              <span style={{ color: "#166534", fontSize: 12, lineHeight: "16px", fontWeight: 700 }}>
+                STATIC DESCENDANT
+              </span>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "fixed",
+                  right: 10,
+                  bottom: 10,
+                  width: 126,
+                  backgroundColor: "#059669",
+                }}
+              >
+                FIXED · transformed CB
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+      </div>
+    </div>
+  );
+}
+
 function ExampleCard({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div
@@ -553,12 +731,35 @@ function App() {
           <GridExample />
         </ExampleCard>
       </div>
+      <PositionExamples />
       <TypographyExamples remaining={remaining} />
       <PaintExamples />
+      <div
+        style={{
+          display: "flex",
+          position: "fixed",
+          right: 12,
+          bottom: 12,
+          width: 154,
+          padding: 10,
+          color: "#ffffff",
+          fontSize: 12,
+          lineHeight: "16px",
+          fontWeight: 700,
+          backgroundColor: "#0f172a",
+          borderRadius: 8,
+          boxShadow: "0px 8px 18px rgba(15, 23, 42, 0.35)",
+        }}
+      >
+        FIXED · viewport corner
+      </div>
     </div>
   );
 }
 
+document.body.style.padding = "12px";
+document.body.style.borderWidth = "4px";
+document.body.style.borderColor = "#94a3b8";
 document.body.style.overflowY = "auto";
 document.body.style.overflowX = "auto";
 
