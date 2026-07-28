@@ -41,6 +41,8 @@ fn box_layout(
             style: BoxStyle::default(),
             z_index,
             isolated,
+            positioned: true,
+            flex_or_grid_item: false,
             children,
         },
     }
@@ -75,6 +77,8 @@ fn hit_testing_returns_the_topmost_child() {
             style: BoxStyle::default(),
             z_index: None,
             isolated: false,
+            positioned: false,
+            flex_or_grid_item: false,
             children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
         },
     };

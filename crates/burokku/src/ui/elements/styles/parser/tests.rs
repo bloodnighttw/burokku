@@ -1,12 +1,33 @@
 use taffy::AlignItems;
 
-use crate::ui::elements::styles::{BackgroundImage, GradientStop, LengthPercentageValue, LineHeightValue, MaxSizeValue, Overflow, SizeValue, TextDecorationLineValue};
+use crate::ui::elements::styles::{
+    BackgroundImage, GradientStop, LengthPercentageValue, LineHeightValue, MaxSizeValue, Overflow,
+    SizeValue, TextDecorationLineValue,
+};
 
 use super::*;
 
 #[test]
 fn display_defaults_to_block() {
     assert_eq!(Style::default().display, Display::Block);
+}
+
+#[test]
+fn distinguishes_static_from_positioned_boxes() {
+    let mut style = Style::default();
+    assert!(!style.positioned);
+
+    set_style(&mut style, "position", Some("relative")).unwrap();
+    assert!(style.positioned);
+
+    set_style(&mut style, "position", Some("static")).unwrap();
+    assert!(!style.positioned);
+
+    set_style(&mut style, "position", Some("absolute")).unwrap();
+    assert!(style.positioned);
+
+    set_style(&mut style, "position", None).unwrap();
+    assert!(!style.positioned);
 }
 
 #[test]

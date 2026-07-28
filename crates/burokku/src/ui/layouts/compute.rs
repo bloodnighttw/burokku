@@ -94,6 +94,7 @@ pub(super) fn compute_layout_with_scroll(
         &[],
         RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
         Transform::IDENTITY,
+        false,
     )
 }
 
@@ -333,6 +334,7 @@ impl ElementLayoutTree<'_> {
         ancestor_clips: &[Clip],
         viewport: RenderRect,
         parent_transform: Transform,
+        flex_or_grid_item: bool,
     ) -> Layout {
         let data = &self.nodes[node];
         let location = Point {
@@ -417,6 +419,8 @@ impl ElementLayoutTree<'_> {
                         x: location.x - offset.x,
                         y: location.y - offset.y,
                     };
+                    let children_are_flex_or_grid_items =
+                        matches!(data.paint_style.display, Display::Flex | Display::Grid);
                     let mut children: Vec<_> = data
                         .children
                         .iter()
@@ -427,6 +431,7 @@ impl ElementLayoutTree<'_> {
                                 &descendant_clips,
                                 viewport,
                                 world_transform,
+                                children_are_flex_or_grid_items,
                             )
                         })
                         .collect();
@@ -463,6 +468,7 @@ impl ElementLayoutTree<'_> {
                                     &descendant_clips,
                                     viewport,
                                     world_transform,
+                                    children_are_flex_or_grid_items,
                                 )
                             })
                             .collect();
@@ -495,6 +501,8 @@ impl ElementLayoutTree<'_> {
                                 ZIndex::Value(index) => Some(index),
                             },
                             isolated: data.paint_style.isolation == Isolation::Isolate,
+                            positioned: data.paint_style.positioned,
+                            flex_or_grid_item,
                             children,
                         },
                         scroll,

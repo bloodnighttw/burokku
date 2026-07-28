@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 
 use super::{
-    BoxSizing, Display, FlexDirection, FlexWrap, FontStyleValue, Isolation, LengthValue, OverflowWrapValue, Position, Style, TextAlignValue,
-    WhiteSpaceValue, WordBreakValue, ZIndex,
+    BoxSizing, Display, FlexDirection, FlexWrap, FontStyleValue, Isolation, LengthValue,
+    OverflowWrapValue, Position, Style, TextAlignValue, WhiteSpaceValue, WordBreakValue, ZIndex,
 };
 use taffy::style::GridAutoTracks;
 use thiserror::Error;
@@ -67,11 +67,12 @@ pub(crate) fn set_style(
             };
         }
         "position" => {
-            style.position = match value {
-                "relative" | "static" => Position::Relative,
-                "absolute" | "fixed" => Position::Absolute,
+            (style.position, style.positioned) = match value {
+                "static" => (Position::Relative, false),
+                "relative" => (Position::Relative, true),
+                "absolute" | "fixed" => (Position::Absolute, true),
                 _ => return invalid(name, value),
-            };
+            }
         }
         "overflow" => {
             let values = one_or_two(name, value, parse_overflow)?;
@@ -403,7 +404,10 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
     match name {
         "display" => reset!(display),
         "box-sizing" => reset!(box_sizing),
-        "position" => reset!(position),
+        "position" => {
+            reset!(position);
+            reset!(positioned);
+        }
         "overflow" => {
             reset!(overflow_x);
             reset!(overflow_y);

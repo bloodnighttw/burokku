@@ -118,6 +118,8 @@ pub enum LayoutKind {
         style: BoxStyle,
         z_index: Option<i32>,
         isolated: bool,
+        positioned: bool,
+        flex_or_grid_item: bool,
         children: Vec<Layout>,
     },
     Text {
