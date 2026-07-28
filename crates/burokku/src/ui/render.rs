@@ -1041,6 +1041,11 @@ mod tests {
             .unwrap();
         document.set_style(middle, "z-index", Some("5")).unwrap();
         document.set_style(negative, "z-index", Some("-1")).unwrap();
+        for element in [high_descendant, middle, negative] {
+            document
+                .set_style(element, "position", Some("relative"))
+                .unwrap();
+        }
 
         document.insert(BODY_ID, ordinary, None).unwrap();
         document.insert(ordinary, high_descendant, None).unwrap();
