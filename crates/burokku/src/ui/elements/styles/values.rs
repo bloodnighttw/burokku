@@ -1,245 +1,43 @@
-use taffy::style::Position as TaffyPosition;
+mod background_image;
+mod font_style;
+mod gradient_stop;
+mod isolation;
+mod length;
+mod length_percentage;
+mod line_height;
+mod max_size;
+mod overflow;
+mod overflow_wrap;
+mod position;
+mod shadow;
+mod size;
+mod text_align;
+mod text_decoration_line;
+mod transform;
+mod white_space;
+mod word_break;
+mod z_index;
 
-/// The supported values of CSS `position`.
-///
-/// This remains distinct from Taffy's two-value position type so paint and
-/// stacking code can distinguish fixed boxes from absolute boxes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Position {
-    #[default]
-    Static,
-    Relative,
-    Absolute,
-    Fixed,
-}
+pub(crate) use background_image::BackgroundImage;
+pub(crate) use font_style::FontStyleValue;
+pub(crate) use gradient_stop::GradientStop;
+pub(crate) use isolation::Isolation;
+pub(crate) use length::LengthValue;
+pub(crate) use length_percentage::LengthPercentageValue;
+pub(crate) use line_height::LineHeightValue;
+pub(crate) use max_size::MaxSizeValue;
+pub(crate) use overflow::Overflow;
+pub(crate) use overflow_wrap::OverflowWrapValue;
+pub use position::Position;
+pub(crate) use shadow::Shadow;
+pub(crate) use size::SizeValue;
+pub(crate) use text_align::TextAlignValue;
+pub(crate) use text_decoration_line::TextDecorationLineValue;
+pub(crate) use transform::Transform;
+pub(crate) use white_space::WhiteSpaceValue;
+pub(crate) use word_break::WordBreakValue;
+pub(crate) use z_index::ZIndex;
 
-impl Position {
-    pub(crate) const fn is_positioned(self) -> bool {
-        !matches!(self, Self::Static)
-    }
-}
-
-impl From<Position> for TaffyPosition {
-    fn from(value: Position) -> Self {
-        match value {
-            Position::Static => TaffyPosition::Relative,
-            Position::Relative => TaffyPosition::Relative,
-            Position::Absolute => TaffyPosition::Absolute,
-            Position::Fixed => TaffyPosition::Absolute,
-        }
-    }
-}
-
-/// The supported forms of CSS overflow, preserving `auto` versus `scroll`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Overflow {
-    #[default]
-    Visible,
-    Hidden,
-    Clip,
-    Auto,
-    Scroll,
-}
-
-/// The supported forms of CSS `z-index`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum ZIndex {
-    #[default]
-    Auto,
-    Value(i32),
-}
-
-/// The supported values of CSS `isolation`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Isolation {
-    #[default]
-    Auto,
-    Isolate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub(crate) enum Transform {
-    #[default]
-    None,
-    Matrix([f32; 6]),
-}
-
-impl Transform {
-    pub(crate) const IDENTITY_MATRIX: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-
-    pub(crate) const fn is_none(self) -> bool {
-        matches!(self, Self::None)
-    }
-
-    pub(crate) const fn matrix(self) -> [f32; 6] {
-        match self {
-            Self::None => Self::IDENTITY_MATRIX,
-            Self::Matrix(matrix) => matrix,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Shadow {
-    pub(crate) offset_x: f32,
-    pub(crate) offset_y: f32,
-    pub(crate) blur: f32,
-    pub(crate) spread: f32,
-    pub(crate) color: [u8; 4],
-    pub(crate) inset: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GradientStop {
-    pub(crate) color: [u8; 4],
-    pub(crate) position: f32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum BackgroundImage {
-    LinearGradient {
-        direction: [f32; 2],
-        stops: Vec<GradientStop>,
-    },
-    RadialGradient {
-        stops: Vec<GradientStop>,
-    },
-    Raster(render::RasterImage),
-}
-
-/// A CSS size that accepts `<length-percentage> | auto`.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
-pub(crate) enum SizeValue {
-    #[default]
-    Auto,
-    Px(f32),
-    Percent(f32),
-}
-
-impl SizeValue {
-    pub(crate) const ZERO: Self = Self::Px(0.0);
-
-    pub(crate) const fn px(value: f32) -> Self {
-        Self::Px(value)
-    }
-
-    pub(crate) const fn percent(value: f32) -> Self {
-        Self::Percent(value)
-    }
-}
-
-/// A CSS maximum size that accepts `<length-percentage> | none`.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
-pub(crate) enum MaxSizeValue {
-    #[default]
-    None,
-    Px(f32),
-    Percent(f32),
-}
-
-/// A CSS value that accepts a length or percentage, but never `auto`.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub(crate) enum LengthPercentageValue {
-    Px(f32),
-    Percent(f32),
-}
-
-impl LengthPercentageValue {
-    pub(crate) const ZERO: Self = Self::Px(0.0);
-}
-
-impl Default for LengthPercentageValue {
-    fn default() -> Self {
-        Self::ZERO
-    }
-}
-
-/// A CSS value that accepts an absolute length only.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub(crate) enum LengthValue {
-    Px(f32),
-}
-
-impl LengthValue {
-    pub(crate) const ZERO: Self = Self::Px(0.0);
-
-    pub(crate) const fn px(self) -> f32 {
-        match self {
-            Self::Px(value) => value,
-        }
-    }
-}
-
-impl Default for LengthValue {
-    fn default() -> Self {
-        Self::ZERO
-    }
-}
-
-/// The supported forms of CSS `line-height`.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub(crate) enum LineHeightValue {
-    Normal,
-    Number(f32),
-    Px(f32),
-    Percent(f32),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TextAlignValue {
-    Start,
-    End,
-    Left,
-    Right,
-    Center,
-    Justify,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FontStyleValue {
-    Normal,
-    Italic,
-    Oblique,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TextDecorationLineValue(u8);
-
-impl TextDecorationLineValue {
-    pub(crate) const NONE: Self = Self(0);
-    pub(crate) const UNDERLINE: Self = Self(1);
-    pub(crate) const OVERLINE: Self = Self(2);
-    pub(crate) const LINE_THROUGH: Self = Self(4);
-
-    pub(crate) const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    pub(crate) const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 != 0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WhiteSpaceValue {
-    Normal,
-    NoWrap,
-    Pre,
-    PreWrap,
-    PreLine,
-    BreakSpaces,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OverflowWrapValue {
-    Normal,
-    BreakWord,
-    Anywhere,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WordBreakValue {
-    Normal,
-    BreakAll,
-    KeepAll,
+fn rgba(color: [u8; 4]) -> render::Color {
+    render::Color::from_rgba8(color[0], color[1], color[2], color[3])
 }
