@@ -860,6 +860,32 @@ mod tests {
     }
 
     #[test]
+    fn body_border_and_scrollbars_remain_inside_the_viewport() {
+        let mut document = Document::new();
+        for (property, value) in [
+            ("padding", "12px"),
+            ("border-width", "4px"),
+            ("overflow-x", "scroll"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        assert_eq!(
+            (layout.x, layout.y, layout.width, layout.height),
+            (0.0, 0.0, 300.0, 200.0)
+        );
+
+        let scroll = layout.scroll.expect("body scroll container");
+        assert_eq!(scroll.viewport, RenderRect::new(4.0, 4.0, 292.0, 192.0));
+        let horizontal = scroll.horizontal.expect("horizontal scrollbar");
+        let vertical = scroll.vertical.expect("vertical scrollbar");
+        assert!(horizontal.track.y + horizontal.track.height <= layout.height - 4.0);
+        assert!(vertical.track.x + vertical.track.width <= layout.width - 4.0);
+    }
+
+    #[test]
     fn transformed_body_contains_fixed_boxes() {
         let mut document = Document::new();
         let wrapper = document.create_node(ElementKind::Div);

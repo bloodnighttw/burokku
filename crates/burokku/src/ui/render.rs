@@ -66,7 +66,6 @@ fn canvas_from_layout(layout: &Layout, scale_factor: f32) -> Canvas {
     let mut canvas = Canvas::new().with_clear_color(Color::WHITE);
     let viewport = Rect::new(0.0, 0.0, layout.width, layout.height);
     paint_layout(layout, viewport, scale_factor, &mut canvas);
-    paint_scrollbars(layout, viewport, scale_factor, &mut canvas);
     canvas
 }
 
@@ -161,6 +160,14 @@ fn paint_stacking_context(
         context_world,
         canvas,
     );
+    paint_context_scrollbars(
+        root,
+        viewport,
+        scale_factor,
+        clip_skip,
+        context_world,
+        canvas,
+    );
 
     for entry in zero_level_entries(root) {
         match entry {
@@ -169,7 +176,7 @@ fn paint_stacking_context(
                 viewport,
                 scale_factor,
                 clip_skip,
-                PaintLayer::Positioned,
+                positioned_layer(context),
                 context_world,
                 canvas,
             ),
@@ -194,10 +201,18 @@ fn paint_stacking_context(
             viewport,
             scale_factor,
             clip_skip,
-            PaintLayer::Positioned,
+            positioned_layer(context),
             context_world,
             canvas,
         );
+    }
+}
+
+fn positioned_layer(layout: &Layout) -> PaintLayer {
+    if layout.is_fixed_to_viewport() {
+        PaintLayer::Fixed
+    } else {
+        PaintLayer::Positioned
     }
 }
 
@@ -269,6 +284,14 @@ fn paint_positioned_auto(
         &mut group,
     );
     paint_ordinary_descendants(
+        layout,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        parent_context_world,
+        &mut group,
+    );
+    paint_context_scrollbars(
         layout,
         viewport,
         scale_factor,
@@ -637,49 +660,92 @@ fn inverse_transform(transform: Transform) -> Option<Transform> {
     })
 }
 
-fn paint_scrollbars(layout: &Layout, viewport: Rect, scale_factor: f32, canvas: &mut Canvas) {
-    let track_style = BoxStyle {
-        background: Color::from_rgba8(15, 23, 42, 36),
+fn paint_context_scrollbars(
+    root: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let mut pending = vec![root];
+    while let Some(layout) = pending.pop() {
+        paint_scrollbar(
+            layout,
+            viewport,
+            scale_factor,
+            clip_skip,
+            context_world,
+            canvas,
+        );
+        pending.extend(
+            layout.children().iter().rev().filter(|child| {
+                !child.establishes_stacking_context() && !child.is_positioned_auto()
+            }),
+        );
+    }
+}
+
+fn paint_scrollbar(
+    layout: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let track_color = Color::from_rgba8(15, 23, 42, 36);
+    let track_style = DecorationStyle {
         corner_radius: CornerRadius::all(4.0 * scale_factor),
-        ..BoxStyle::default()
+        ..DecorationStyle::default()
     };
-    let thumb_style = BoxStyle {
-        background: Color::from_rgba8(71, 85, 105, 210),
+    let thumb_color = Color::from_rgba8(71, 85, 105, 210);
+    let thumb_style = DecorationStyle {
         corner_radius: CornerRadius::all(4.0 * scale_factor),
-        ..BoxStyle::default()
+        ..DecorationStyle::default()
     };
 
-    for layout in layout {
-        let Some(scroll) = layout.scroll else {
+    let Some(scroll) = layout.scroll else {
+        return;
+    };
+    let clips = layout
+        .clips
+        .iter()
+        .skip(clip_skip)
+        .copied()
+        .chain([scroll.clip])
+        .map(|clip| localize_clip(clip, context_world))
+        .collect::<Vec<_>>();
+    for scrollbar in [scroll.horizontal, scroll.vertical].into_iter().flatten() {
+        if !intersects_visible_area(scrollbar.track, &clips, viewport) {
             continue;
-        };
-        let clips = layout
-            .clips
-            .iter()
-            .copied()
-            .chain([scroll.clip])
-            .collect::<Vec<_>>();
-        for scrollbar in [scroll.horizontal, scroll.vertical].into_iter().flatten() {
-            if !intersects_visible_area(scrollbar.track, &clips, viewport) {
-                continue;
-            }
-            canvas.draw_overlay_box_with_clips(
-                scaled_rect(scrollbar.track, scale_factor),
-                track_style.clone(),
-                clips
-                    .iter()
-                    .copied()
-                    .map(|clip| scaled_clip(clip, scale_factor)),
-            );
-            canvas.draw_overlay_box_with_clips(
-                scaled_rect(scrollbar.thumb, scale_factor),
-                thumb_style.clone(),
-                clips
-                    .iter()
-                    .copied()
-                    .map(|clip| scaled_clip(clip, scale_factor)),
-            );
         }
+        canvas.draw_decoration_with_clips(
+            PaintLayer::Scrollbar,
+            scaled_rect(scrollbar.track, scale_factor),
+            BoxDecoration::Background {
+                color: track_color,
+                image: None,
+            },
+            track_style,
+            clips
+                .iter()
+                .copied()
+                .map(|clip| scaled_clip(clip, scale_factor)),
+        );
+        canvas.draw_decoration_with_clips(
+            PaintLayer::Scrollbar,
+            scaled_rect(scrollbar.thumb, scale_factor),
+            BoxDecoration::Background {
+                color: thumb_color,
+                image: None,
+            },
+            thumb_style,
+            clips
+                .iter()
+                .copied()
+                .map(|clip| scaled_clip(clip, scale_factor)),
+        );
     }
 }
 
@@ -1625,13 +1691,191 @@ mod tests {
             .filter(|command| {
                 matches!(
                     command,
-                    render::DrawCommand::OverlayBox { style, .. }
-                        if style.background == Color::from_rgba8(15, 23, 42, 36)
-                            || style.background == Color::from_rgba8(71, 85, 105, 210)
+                    render::DrawCommand::Decoration {
+                        layer: PaintLayer::Scrollbar,
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(15, 23, 42, 36)
+                        || *color == Color::from_rgba8(71, 85, 105, 210)
                 )
             })
             .count();
         assert_eq!(scrollbar_boxes, 4);
+    }
+
+    #[test]
+    fn root_scrollbar_paints_above_absolute_and_below_fixed_content() {
+        let mut document = Document::new();
+        let content = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        document
+            .set_style(BODY_ID, "overflow", Some("auto"))
+            .unwrap();
+        document.set_style(content, "width", Some("200px")).unwrap();
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document.set_style(absolute, "right", Some("0px")).unwrap();
+        document.set_style(absolute, "bottom", Some("0px")).unwrap();
+        document.set_style(absolute, "width", Some("40px")).unwrap();
+        document
+            .set_style(absolute, "height", Some("40px"))
+            .unwrap();
+        document
+            .set_style(absolute, "background-color", Some("#0000ff"))
+            .unwrap();
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document.set_style(fixed, "right", Some("0px")).unwrap();
+        document.set_style(fixed, "bottom", Some("0px")).unwrap();
+        document.set_style(fixed, "width", Some("40px")).unwrap();
+        document.set_style(fixed, "height", Some("40px")).unwrap();
+        document
+            .set_style(fixed, "background-color", Some("#ff0000"))
+            .unwrap();
+        document.insert(BODY_ID, content, None).unwrap();
+        document.insert(BODY_ID, absolute, None).unwrap();
+        document.insert(BODY_ID, fixed, None).unwrap();
+
+        let frame = build_frame(&document, 100.0, 100.0, 1.0, &mut TextSystem::new());
+        assert!(
+            frame
+                .layout
+                .scroll
+                .is_some_and(|scroll| scroll.vertical.is_some()),
+            "the root must have a vertical scrollbar for this ordering test"
+        );
+
+        let commands = ordered_commands(&frame.canvas);
+        let absolute_index = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 0, 255, 255)
+                )
+            })
+            .expect("absolute background paint command");
+        let scrollbar_index = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        layer: PaintLayer::Scrollbar,
+                        ..
+                    }
+                )
+            })
+            .expect("scrollbar paint command");
+        let fixed_index = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(255, 0, 0, 255)
+                )
+            })
+            .expect("fixed background paint command");
+
+        assert!(
+            absolute_index < scrollbar_index && scrollbar_index < fixed_index,
+            "root paint order must be absolute content, scrollbar, then viewport-fixed content"
+        );
+    }
+
+    #[test]
+    fn positioned_scroller_paints_its_scrollbar_inside_its_atomic_context() {
+        let mut document = Document::new();
+        let fixed = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document.set_style(fixed, "width", Some("100px")).unwrap();
+        document.set_style(fixed, "height", Some("60px")).unwrap();
+        document.set_style(fixed, "overflow", Some("auto")).unwrap();
+        document
+            .set_style(fixed, "background-color", Some("#ff0000"))
+            .unwrap();
+        document.set_style(content, "width", Some("100px")).unwrap();
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document.insert(BODY_ID, fixed, None).unwrap();
+        document.insert(fixed, content, None).unwrap();
+
+        let frame = build_frame(&document, 300.0, 200.0, 1.0, &mut TextSystem::new());
+        assert!(
+            !frame.canvas.commands().iter().any(|command| matches!(
+                command,
+                DrawCommand::Decoration {
+                    layer: PaintLayer::Scrollbar,
+                    ..
+                }
+            )),
+            "an atomic scroller must not leak its scrollbar into the parent canvas"
+        );
+
+        let group = frame
+            .canvas
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Group { canvas, .. }
+                    if canvas.commands().iter().any(|command| {
+                        matches!(
+                            command,
+                            DrawCommand::Decoration {
+                                layer: PaintLayer::Scrollbar,
+                                ..
+                            }
+                        )
+                    }) =>
+                {
+                    Some(canvas)
+                }
+                _ => None,
+            })
+            .expect("positioned scroller group containing its scrollbar");
+        let commands = ordered_commands(group);
+        let background_index = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(255, 0, 0, 255)
+                )
+            })
+            .expect("positioned scroller background");
+        let scrollbar_index = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        layer: PaintLayer::Scrollbar,
+                        ..
+                    }
+                )
+            })
+            .expect("positioned scroller scrollbar");
+
+        assert!(background_index < scrollbar_index);
     }
 
     #[test]
