@@ -159,9 +159,9 @@ mod tests {
         let gallery = document.create_node(ElementKind::Div);
         let card = document.create_node(ElementKind::Div);
         let row = document.create_node(ElementKind::Div);
-        let large_box = document.create_node(ElementKind::Span);
-        let small_box = document.create_node(ElementKind::Span);
-        let fixed_width_sibling = document.create_node(ElementKind::Span);
+        let large_box = document.create_node(ElementKind::Div);
+        let small_box = document.create_node(ElementKind::Div);
+        let fixed_width_sibling = document.create_node(ElementKind::Div);
         let large = document.create_node(ElementKind::Text("Baseline".into()));
         let small =
             document.create_node(ElementKind::Text("aligned through Glyphon metrics".into()));
@@ -258,11 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn nested_spans_share_inline_layout_and_keep_individual_styles() {
+    fn nested_text_elements_share_layout_and_keep_individual_styles() {
         let mut document = Document::new();
-        let line = document.create_node(ElementKind::Span);
+        let line = document.create_node(ElementKind::TextElement);
         let leading = document.create_node(ElementKind::Text("Hello  ".into()));
-        let emphasized = document.create_node(ElementKind::Span);
+        let emphasized = document.create_node(ElementKind::TextElement);
         let emphasized_text = document.create_node(ElementKind::Text("world".into()));
         let reactive = document.create_node(ElementKind::Text(" 1".into()));
         document.set_style(line, "width", Some("70px")).unwrap();
@@ -290,7 +290,7 @@ mod tests {
             ..
         } = &inline.kind
         else {
-            panic!("a text-only span tree should become one inline text layout");
+            panic!("a nested text tree should become one rich text layout");
         };
 
         assert_eq!(text, "Hello world 1");
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn jsx_text_fragments_and_variables_share_a_nowrap_line() {
         let mut document = Document::new();
-        let line = document.create_node(ElementKind::Span);
+        let line = document.create_node(ElementKind::TextElement);
         let prefix = document.create_node(ElementKind::Text("Scroll item ".into()));
         let variable = document.create_node(ElementKind::Text("1".into()));
         let suffix = document.create_node(ElementKind::Text(

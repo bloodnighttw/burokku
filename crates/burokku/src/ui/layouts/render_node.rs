@@ -16,7 +16,7 @@ pub(super) struct RenderNode {
     pub(super) kind: ElementKind,
     pub(super) style: ElementStyle,
     pub(super) text_style: TextStyle,
-    pub(super) inline_spans: Option<Vec<TextSpan>>,
+    pub(super) rich_text: Option<Vec<TextSpan>>,
     /// Children in CSS order-modified tree order, used as paint source order.
     pub(super) paint_children: Vec<RenderNode>,
 }
@@ -32,13 +32,13 @@ impl RenderNode {
             kind: ElementKind::Body,
             style: ElementStyle::default(),
             text_style: TextStyle::default(),
-            inline_spans: None,
+            rich_text: None,
             paint_children: vec![body],
         }
     }
 
     pub(super) fn is_text_flow(&self) -> bool {
-        matches!(self.kind, ElementKind::Text(_)) || self.inline_spans.is_some()
+        matches!(self.kind, ElementKind::Text(_)) || self.rich_text.is_some()
     }
 
     pub(super) fn has_out_of_flow_descendant(&self) -> bool {
@@ -57,15 +57,12 @@ impl RenderNode {
             .node(element_id)
             .expect("element child IDs are validated when inserted");
         let text_style = merge_text_style(inherited_text_style, &element.style);
-        let inline_spans = if matches!(element.kind, ElementKind::Span)
-            && matches!(element.style.display, Display::Block)
-            && should_collect_inline_spans(document, &element.children)
-        {
-            collect_inline_spans(document, element_id, &text_style)
+        let rich_text = if matches!(element.kind, ElementKind::TextElement) {
+            Some(collect_rich_text(document, element_id, &text_style))
         } else {
             None
         };
-        let mut paint_children = if inline_spans.is_some() {
+        let mut paint_children = if rich_text.is_some() {
             Vec::new()
         } else {
             element
@@ -83,44 +80,25 @@ impl RenderNode {
             kind: element.kind.clone(),
             style: element.style.clone(),
             text_style,
-            inline_spans,
+            rich_text,
             paint_children,
         }
     }
 }
 
-fn should_collect_inline_spans(document: &Document, children: &[u64]) -> bool {
-    let mut fragment_count = 0;
-    let mut has_nested_span = false;
-    for child_id in children {
-        let Ok(child) = document.node(*child_id) else {
-            continue;
-        };
-        match &child.kind {
-            ElementKind::Text(text) if !text.is_empty() => fragment_count += 1,
-            ElementKind::Span if child.style.display == Display::Block => {
-                fragment_count += 1;
-                has_nested_span = true;
-            }
-            _ => {}
-        }
-    }
-    has_nested_span || fragment_count > 1
-}
-
-fn collect_inline_spans(
+fn collect_rich_text(
     document: &Document,
     element_id: u64,
     text_style: &TextStyle,
-) -> Option<Vec<TextSpan>> {
+) -> Vec<TextSpan> {
     let element = document
         .node(element_id)
-        .expect("inline span descendants are validated when inserted");
+        .expect("rich text descendants are validated when inserted");
     let mut spans = Vec::new();
     for child_id in &element.children {
         let child = document
             .node(*child_id)
-            .expect("inline span descendants are validated when inserted");
+            .expect("rich text descendants are validated when inserted");
         match &child.kind {
             ElementKind::Text(text) => {
                 if !text.is_empty() {
@@ -128,15 +106,15 @@ fn collect_inline_spans(
                 }
             }
             ElementKind::Comment(_) => {}
-            ElementKind::Span if child.style.display == Display::None => {}
-            ElementKind::Span if child.style.display == Display::Block => {
+            ElementKind::TextElement if child.style.display == Display::None => {}
+            ElementKind::TextElement => {
                 let child_style = merge_text_style(text_style, &child.style);
-                spans.extend(collect_inline_spans(document, *child_id, &child_style)?);
+                spans.extend(collect_rich_text(document, *child_id, &child_style));
             }
-            _ => return None,
+            _ => {}
         }
     }
-    (!spans.is_empty()).then_some(spans)
+    spans
 }
 
 #[cfg(test)]

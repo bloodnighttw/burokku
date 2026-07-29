@@ -165,7 +165,7 @@ impl LayoutNode<'_, '_> {
                 | ElementKind::Heading(_)
                 | ElementKind::Image
                 | ElementKind::Select
-                | ElementKind::Span
+                | ElementKind::TextElement
                 | ElementKind::Body
                 | ElementKind::Other(_) => {
                     let scrolls_x = matches!(
