@@ -529,7 +529,6 @@ function PaintExamples() {
                 fontSize: 21,
                 lineHeight: "27px",
                 fontWeight: 700,
-                textShadow: "0px 2px 5px rgba(15, 23, 42, 0.45)",
               }}
             >
               Aurora
@@ -560,7 +559,6 @@ function PaintExamples() {
                 fontSize: 21,
                 lineHeight: "27px",
                 fontWeight: 700,
-                textShadow: "1px 2px 4px navy, -1px 0px 3px rgba(255, 255, 255, 0.4)",
               }}
             >
               Solar bloom
@@ -605,7 +603,7 @@ function PaintExamples() {
             </div>
           </div>
         </ExampleCard>
-        <ExampleCard title="PNG data URL · text shadow">
+        <ExampleCard title="PNG data URL · raster fill">
           <div
             style={{
               display: "flex",
@@ -624,7 +622,6 @@ function PaintExamples() {
                 fontSize: 19,
                 lineHeight: "25px",
                 fontWeight: 700,
-                textShadow: "0px 2px 4px black",
               }}
             >
               Raster fill
@@ -634,7 +631,6 @@ function PaintExamples() {
                 color: "white",
                 fontSize: 12,
                 lineHeight: "17px",
-                textShadow: "0px 1px 3px black",
               }}
             >
               Decoded from an embedded PNG
