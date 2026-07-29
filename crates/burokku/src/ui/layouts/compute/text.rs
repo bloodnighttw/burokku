@@ -7,7 +7,10 @@ use crate::ui::elements::styles::{LengthPercentageValue, LineHeightValue, Style 
 
 use super::paint::rgba;
 
-pub(super) fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
+pub(in crate::ui::layouts) fn merge_text_style(
+    parent: &TextStyle,
+    style: &ElementStyle,
+) -> TextStyle {
     let mut merged = parent.clone();
     if let Some(color) = style.color {
         merged.color = rgba(color);
@@ -110,7 +113,7 @@ fn font_family(family: &str) -> FontFamily {
     }
 }
 
-pub(super) fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String {
+pub(in crate::ui::layouts) fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String {
     match mode {
         TextWhiteSpace::Pre | TextWhiteSpace::PreWrap | TextWhiteSpace::BreakSpaces => {
             text.to_owned()
@@ -120,7 +123,10 @@ pub(super) fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String 
     }
 }
 
-pub(super) fn normalize_text_spans(spans: &[TextSpan], mode: TextWhiteSpace) -> Vec<TextSpan> {
+pub(in crate::ui::layouts) fn normalize_text_spans(
+    spans: &[TextSpan],
+    mode: TextWhiteSpace,
+) -> Vec<TextSpan> {
     if matches!(
         mode,
         TextWhiteSpace::Pre | TextWhiteSpace::PreWrap | TextWhiteSpace::BreakSpaces

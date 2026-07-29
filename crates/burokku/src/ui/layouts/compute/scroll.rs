@@ -1,12 +1,12 @@
 use render::{Clip, CornerRadius, Rect as RenderRect, Transform};
 use taffy::geometry::Point;
 
-use crate::ui::elements::styles::Overflow as ElementOverflow;
+use crate::ui::elements::styles::{Overflow as ElementOverflow, Style as ElementStyle};
 use crate::ui::layouts::{ScrollContainer, Scrollbar, ScrollbarAxis};
 
 use super::paint::box_style;
-use super::tree::LayoutNode;
 use super::{Layout, ScrollOffset};
+use crate::ui::layouts::layout_node::TaffyNode;
 
 #[derive(Clone, Copy)]
 pub(super) struct OffsetContext {
@@ -21,7 +21,7 @@ impl OffsetContext {
 }
 
 pub(super) fn padding_box(
-    data: &LayoutNode,
+    data: &TaffyNode,
     location: Point<f32>,
     width: f32,
     height: f32,
@@ -164,14 +164,15 @@ fn scrollbar_thumb(
 }
 
 pub(super) fn overflow_clip(
-    data: &LayoutNode,
+    data: &TaffyNode,
+    style: &ElementStyle,
     location: Point<f32>,
     width: f32,
     height: f32,
     viewport: RenderRect,
 ) -> Option<Clip> {
-    let clips_x = data.paint_style.overflow_x != ElementOverflow::Visible;
-    let clips_y = data.paint_style.overflow_y != ElementOverflow::Visible;
+    let clips_x = style.overflow_x != ElementOverflow::Visible;
+    let clips_y = style.overflow_y != ElementOverflow::Visible;
     if !clips_x && !clips_y {
         return None;
     }
@@ -193,8 +194,7 @@ pub(super) fn overflow_clip(
         },
     );
     let corner_radius = if clips_x && clips_y {
-        let outer =
-            box_style(&data.paint_style, width, height, 1.0, Transform::IDENTITY).corner_radius;
+        let outer = box_style(style, width, height, 1.0, Transform::IDENTITY).corner_radius;
         CornerRadius::new(
             (outer.top_left - border.left.max(border.top)).max(0.0),
             (outer.top_right - border.right.max(border.top)).max(0.0),

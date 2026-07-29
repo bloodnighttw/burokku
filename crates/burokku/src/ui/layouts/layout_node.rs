@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use render::{TextConstraints, TextRunMetrics, TextSpan, TextStyle, TextSystem};
+use render::{TextConstraints, TextRunMetrics, TextSpan, TextSystem};
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
-    compute_hidden_layout, compute_leaf_layout,
+    compute_hidden_layout, compute_leaf_layout, compute_root_layout,
     geometry::{Point, Size},
-    prelude::{AvailableSpace, Dimension, Display, NodeId},
+    prelude::{AvailableSpace, Display, NodeId},
     style::Style as TaffyStyle,
     tree::{
         Cache, Layout as TaffyLayout, LayoutBlockContainer, LayoutFlexboxContainer,
@@ -16,47 +16,25 @@ use taffy::{
 };
 
 use crate::ui::{
-    elements::{
-        styles::{Position, Style as ElementStyle},
-        Document, ElementKind,
-    },
-    layouts::ScrollOffset,
+    elements::{styles::Position, ElementKind},
+    layouts::{compute::text, render_node::RenderNode, ScrollOffset},
 };
 
-use super::{
-    style::to_taffy_style,
-    text::{merge_text_style, normalize_text_spans, normalize_white_space},
-};
+use super::compute::style::to_taffy_style;
+use text::{normalize_text_spans, normalize_white_space};
 
-pub(super) fn add_element(
-    nodes: &mut Vec<LayoutNode>,
-    document: &Document,
-    element_id: u64,
-    inherited_text_style: &TextStyle,
+fn add_render_node<'render>(
+    nodes: &mut Vec<TaffyNode>,
+    render_nodes: &mut Vec<&'render RenderNode>,
+    render_node: &'render RenderNode,
 ) -> usize {
-    let element = document
-        .node(element_id)
-        .expect("element child IDs are validated when inserted");
-    let text_style = merge_text_style(inherited_text_style, &element.style);
-    let inline_spans = if matches!(element.kind, ElementKind::Span)
-        && matches!(element.style.display, Display::Block)
-        && should_collect_inline_spans(document, &element.children)
-    {
-        collect_inline_spans(document, element_id, &text_style)
-    } else {
-        None
-    };
     let node_id = nodes.len();
-    nodes.push(LayoutNode {
-        element_id,
-        kind: element.kind.clone(),
-        style: to_taffy_style(&element.kind, &element.style),
-        paint_style: element.style.clone(),
-        text_style: text_style.clone(),
-        inline_spans: inline_spans.clone(),
+    render_nodes.push(render_node);
+    nodes.push(TaffyNode {
+        style: to_taffy_style(&render_node.kind, &render_node.style),
         rendered_spans: Vec::new(),
-        children: Vec::with_capacity(element.children.len()),
-        layout_children: Vec::with_capacity(element.children.len()),
+        render_children: Vec::with_capacity(render_node.paint_children.len()),
+        layout_children: Vec::with_capacity(render_node.paint_children.len()),
         positioning_containing_block: None,
         static_offset: Point::ZERO,
         cache: Cache::new(),
@@ -66,116 +44,48 @@ pub(super) fn add_element(
         text_runs: Vec::new(),
     });
 
-    let children = if inline_spans.is_some() {
-        Vec::new()
-    } else {
-        element
-            .children
-            .iter()
-            .map(|child| add_element(nodes, document, *child, &text_style))
-            .collect::<Vec<_>>()
-    };
-    let mut children = children;
-    if matches!(element.style.display, Display::Flex | Display::Grid) {
-        children.sort_by_key(|child| nodes[*child].paint_style.order);
-    }
-    nodes[node_id].children = children.clone();
+    let children = render_node
+        .paint_children
+        .iter()
+        .map(|child| add_render_node(nodes, render_nodes, child))
+        .collect::<Vec<_>>();
+    nodes[node_id].render_children = children.clone();
     nodes[node_id].layout_children = children;
     node_id
 }
 
-pub(super) fn add_viewport(nodes: &mut Vec<LayoutNode>, body: usize, viewport: Size<f32>) -> usize {
-    let node_id = nodes.len();
-    let style = TaffyStyle {
-        size: Size {
-            width: Dimension::length(viewport.width),
-            height: Dimension::length(viewport.height),
-        },
-        ..TaffyStyle::default()
-    };
-    nodes.push(LayoutNode {
-        element_id: u64::MAX,
-        kind: ElementKind::Body,
-        style,
-        paint_style: ElementStyle::default(),
-        text_style: TextStyle::default(),
-        inline_spans: None,
-        rendered_spans: Vec::new(),
-        children: vec![body],
-        layout_children: vec![body],
-        positioning_containing_block: None,
-        static_offset: Point::ZERO,
-        cache: Cache::new(),
-        layout: TaffyLayout::new(),
-        first_baseline: None,
-        text_line_count: 0,
-        text_runs: Vec::new(),
-    });
-    node_id
-}
-
-/// Reparents out-of-flow boxes in the layout tree without changing the
-/// retained DOM/paint tree.
+/// Reparents out-of-flow boxes while lowering the stable render tree.
 ///
-/// Taffy lays absolute boxes out against their direct layout parent. CSS
-/// instead uses the nearest positioned ancestor for absolute boxes and the
-/// viewport or nearest transformed ancestor for fixed boxes.
-pub(super) fn establish_positioning_containing_blocks(nodes: &mut [LayoutNode], root: usize) {
-    let mut absolute_locations = vec![Point::ZERO; nodes.len()];
-    collect_absolute_locations(nodes, root, Point::ZERO, &mut absolute_locations);
-
+/// Taffy resolves absolute positioning against a node's direct layout parent.
+/// CSS instead selects a containing block that may be higher in the render
+/// tree, so absolute and fixed nodes must be attached to that block here.
+fn reparent_out_of_flow_nodes(nodes: &mut [TaffyNode], render_nodes: &[&RenderNode], root: usize) {
     for node in nodes.iter_mut() {
         node.layout_children.clear();
         node.positioning_containing_block = None;
-        node.static_offset = Point::ZERO;
     }
-    rebuild_layout_children(nodes, root, root, root, false);
-
-    for node in 0..nodes.len() {
-        let Some(owner) = nodes[node].positioning_containing_block else {
-            continue;
-        };
-        nodes[node].static_offset = Point {
-            x: absolute_locations[node].x - absolute_locations[owner].x,
-            y: absolute_locations[node].y - absolute_locations[owner].y,
-        };
-    }
-}
-
-fn collect_absolute_locations(
-    nodes: &[LayoutNode],
-    node: usize,
-    parent_location: Point<f32>,
-    locations: &mut [Point<f32>],
-) {
-    let location = Point {
-        x: parent_location.x + nodes[node].layout.location.x,
-        y: parent_location.y + nodes[node].layout.location.y,
-    };
-    locations[node] = location;
-    for child in &nodes[node].children {
-        collect_absolute_locations(nodes, *child, location, locations);
-    }
+    rebuild_layout_children(nodes, render_nodes, root, root, root, false);
 }
 
 fn rebuild_layout_children(
-    nodes: &mut [LayoutNode],
+    nodes: &mut [TaffyNode],
+    render_nodes: &[&RenderNode],
     node: usize,
     absolute_containing_block: usize,
     fixed_containing_block: usize,
     ancestor_hidden: bool,
 ) {
-    let children = nodes[node].children.clone();
+    let children = nodes[node].render_children.clone();
     let descendants_hidden = ancestor_hidden || nodes[node].style.display == Display::None;
     let establishes_absolute_containing_block = node == absolute_containing_block
-        || nodes[node].paint_style.position.is_positioned()
-        || !nodes[node].paint_style.transform.is_none();
+        || render_nodes[node].style.position.is_positioned()
+        || !render_nodes[node].style.transform.is_none();
     let descendant_absolute_containing_block = if establishes_absolute_containing_block {
         node
     } else {
         absolute_containing_block
     };
-    let descendant_fixed_containing_block = if !nodes[node].paint_style.transform.is_none() {
+    let descendant_fixed_containing_block = if !render_nodes[node].style.transform.is_none() {
         node
     } else {
         fixed_containing_block
@@ -185,7 +95,7 @@ fn rebuild_layout_children(
         let out_of_flow_owner = if descendants_hidden {
             None
         } else {
-            match nodes[child].paint_style.position {
+            match render_nodes[child].style.position {
                 Position::Absolute => Some(descendant_absolute_containing_block),
                 Position::Fixed => Some(descendant_fixed_containing_block),
                 Position::Static | Position::Relative => None,
@@ -199,6 +109,7 @@ fn rebuild_layout_children(
 
         rebuild_layout_children(
             nodes,
+            render_nodes,
             child,
             descendant_absolute_containing_block,
             descendant_fixed_containing_block,
@@ -207,71 +118,16 @@ fn rebuild_layout_children(
     }
 }
 
-fn should_collect_inline_spans(document: &Document, children: &[u64]) -> bool {
-    let mut fragment_count = 0;
-    let mut has_nested_span = false;
-    for child_id in children {
-        let Ok(child) = document.node(*child_id) else {
-            continue;
-        };
-        match &child.kind {
-            ElementKind::Text(text) if !text.is_empty() => fragment_count += 1,
-            ElementKind::Span if child.style.display == Display::Block => {
-                fragment_count += 1;
-                has_nested_span = true;
-            }
-            _ => {}
-        }
-    }
-    has_nested_span || fragment_count > 1
-}
-
-fn collect_inline_spans(
-    document: &Document,
-    element_id: u64,
-    text_style: &TextStyle,
-) -> Option<Vec<TextSpan>> {
-    let element = document
-        .node(element_id)
-        .expect("inline span descendants are validated when inserted");
-    let mut spans = Vec::new();
-    for child_id in &element.children {
-        let child = document
-            .node(*child_id)
-            .expect("inline span descendants are validated when inserted");
-        match &child.kind {
-            ElementKind::Text(text) => {
-                if !text.is_empty() {
-                    spans.push(TextSpan::new(text, text_style.clone()));
-                }
-            }
-            ElementKind::Comment(_) => {}
-            ElementKind::Span if child.style.display == Display::None => {}
-            ElementKind::Span if child.style.display == Display::Block => {
-                let child_style = merge_text_style(text_style, &child.style);
-                spans.extend(collect_inline_spans(document, *child_id, &child_style)?);
-            }
-            _ => return None,
-        }
-    }
-    (!spans.is_empty()).then_some(spans)
-}
-
-pub(super) struct LayoutNode {
-    pub(super) element_id: u64,
-    pub(super) kind: ElementKind,
+pub(super) struct TaffyNode {
     pub(super) style: TaffyStyle,
-    pub(super) paint_style: ElementStyle,
-    pub(super) text_style: TextStyle,
-    pub(super) inline_spans: Option<Vec<TextSpan>>,
     pub(super) rendered_spans: Vec<TextSpan>,
-    /// Children in DOM/order-modified tree order, used for painting.
-    pub(super) children: Vec<usize>,
+    /// IDs matching children in the stable render tree.
+    pub(super) render_children: Vec<usize>,
     /// Children participating directly in this node's Taffy layout.
     pub(super) layout_children: Vec<usize>,
     /// The CSS containing block used to lay out an absolute or fixed box.
     pub(super) positioning_containing_block: Option<usize>,
-    /// Hypothetical in-flow position, relative to the positioning containing block.
+    /// Hypothetical render-tree location relative to the containing block.
     pub(super) static_offset: Point<f32>,
     cache: Cache,
     pub(super) layout: TaffyLayout,
@@ -280,19 +136,94 @@ pub(super) struct LayoutNode {
     pub(super) text_runs: Vec<TextRunMetrics>,
 }
 
-pub(super) struct ElementLayoutTree<'a> {
-    pub(super) nodes: Vec<LayoutNode>,
+pub(super) struct LayoutNode<'render, 'state> {
+    pub(super) nodes: Vec<TaffyNode>,
+    pub(super) render_nodes: Vec<&'render RenderNode>,
     pub(super) viewport_root: usize,
-    pub(super) text_system: &'a mut TextSystem,
-    pub(super) scroll_offsets: &'a HashMap<u64, ScrollOffset>,
+    pub(super) text_system: &'state mut TextSystem,
+    pub(super) scroll_offsets: &'state HashMap<u64, ScrollOffset>,
 }
 
-impl ElementLayoutTree<'_> {
-    pub(super) fn clear_layout_caches(&mut self) {
-        for node in &mut self.nodes {
-            node.cache.clear();
-            node.first_baseline = None;
+impl<'render, 'state> LayoutNode<'render, 'state> {
+    /// Lowers the paint tree into the Taffy tree.
+    ///
+    /// This is the only render-to-layout transition. It assigns stable node
+    /// IDs and reparents absolute/fixed nodes before Taffy sees the tree.
+    pub(super) fn from_render_node(
+        render_root: &'render RenderNode,
+        text_system: &'state mut TextSystem,
+        scroll_offsets: &'state HashMap<u64, ScrollOffset>,
+    ) -> Self {
+        let mut nodes = Vec::new();
+        let mut render_nodes = Vec::new();
+        let viewport_root = add_render_node(&mut nodes, &mut render_nodes, render_root);
+        debug_assert_eq!(viewport_root, 0);
+        reparent_out_of_flow_nodes(&mut nodes, &render_nodes, viewport_root);
+        Self {
+            nodes,
+            render_nodes,
+            viewport_root,
+            text_system,
+            scroll_offsets,
         }
+    }
+
+    /// Builds the structural probe used only to recover CSS static positions
+    /// for hoisted boxes whose insets are `auto`.
+    pub(super) fn static_position_probe(
+        render_root: &'render RenderNode,
+        text_system: &'state mut TextSystem,
+        scroll_offsets: &'state HashMap<u64, ScrollOffset>,
+    ) -> Self {
+        let mut nodes = Vec::new();
+        let mut render_nodes = Vec::new();
+        let viewport_root = add_render_node(&mut nodes, &mut render_nodes, render_root);
+        debug_assert_eq!(viewport_root, 0);
+        Self {
+            nodes,
+            render_nodes,
+            viewport_root,
+            text_system,
+            scroll_offsets,
+        }
+    }
+
+    pub(super) fn absolute_render_locations(&self) -> Vec<Point<f32>> {
+        let mut locations = vec![Point::ZERO; self.nodes.len()];
+        self.collect_absolute_render_locations(self.viewport_root, Point::ZERO, &mut locations);
+        locations
+    }
+
+    fn collect_absolute_render_locations(
+        &self,
+        node: usize,
+        parent_location: Point<f32>,
+        locations: &mut [Point<f32>],
+    ) {
+        let location = Point {
+            x: parent_location.x + self.nodes[node].layout.location.x,
+            y: parent_location.y + self.nodes[node].layout.location.y,
+        };
+        locations[node] = location;
+        for child in &self.nodes[node].render_children {
+            self.collect_absolute_render_locations(*child, location, locations);
+        }
+    }
+
+    pub(super) fn set_static_offsets(&mut self, absolute_locations: &[Point<f32>]) {
+        for (node, data) in self.nodes.iter_mut().enumerate() {
+            let Some(owner) = data.positioning_containing_block else {
+                continue;
+            };
+            data.static_offset = Point {
+                x: absolute_locations[node].x - absolute_locations[owner].x,
+                y: absolute_locations[node].y - absolute_locations[owner].y,
+            };
+        }
+    }
+
+    pub(super) fn compute_layout(&mut self, available_space: Size<AvailableSpace>) {
+        compute_root_layout(self, NodeId::from(self.viewport_root), available_space);
     }
 
     fn compute_node(
@@ -308,8 +239,7 @@ impl ElementLayoutTree<'_> {
         let output = compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             let index = usize::from(node_id);
             let display = tree.nodes[index].style.display;
-            let is_text = matches!(tree.nodes[index].kind, ElementKind::Text(_))
-                || tree.nodes[index].inline_spans.is_some();
+            let is_text = tree.render_nodes[index].is_text_flow();
             let has_children = !tree.nodes[index].layout_children.is_empty();
 
             match (display, is_text, has_children) {
@@ -355,10 +285,11 @@ impl ElementLayoutTree<'_> {
     fn compute_text_layout(&mut self, node_id: NodeId, inputs: LayoutInput) -> LayoutOutput {
         let index = usize::from(node_id);
         let style = self.nodes[index].style.clone();
-        let text_style = self.nodes[index].text_style.clone();
-        let spans = match &self.nodes[index].inline_spans {
+        let render_node = self.render_nodes[index];
+        let text_style = render_node.text_style.clone();
+        let spans = match &render_node.inline_spans {
             Some(spans) => normalize_text_spans(spans, text_style.white_space),
-            None => match &self.nodes[index].kind {
+            None => match &render_node.kind {
                 ElementKind::Text(text) => vec![TextSpan::new(
                     normalize_white_space(text, text_style.white_space),
                     text_style.clone(),
@@ -410,7 +341,7 @@ impl Iterator for ChildIter<'_> {
     }
 }
 
-impl TraversePartialTree for ElementLayoutTree<'_> {
+impl TraversePartialTree for LayoutNode<'_, '_> {
     type ChildIter<'a>
         = ChildIter<'a>
     where
@@ -429,7 +360,7 @@ impl TraversePartialTree for ElementLayoutTree<'_> {
     }
 }
 
-impl LayoutPartialTree for ElementLayoutTree<'_> {
+impl LayoutPartialTree for LayoutNode<'_, '_> {
     type CustomIdent = String;
     type CoreContainerStyle<'a>
         = &'a TaffyStyle
@@ -449,7 +380,7 @@ impl LayoutPartialTree for ElementLayoutTree<'_> {
     }
 }
 
-impl CacheTree for ElementLayoutTree<'_> {
+impl CacheTree for LayoutNode<'_, '_> {
     fn cache_get(&self, node_id: NodeId, inputs: &LayoutInput) -> Option<LayoutOutput> {
         // A cached final container layout does not restore the final layouts
         // of its descendants. Intrinsic sizing can overwrite a text child's
@@ -472,7 +403,7 @@ impl CacheTree for ElementLayoutTree<'_> {
     }
 }
 
-impl LayoutBlockContainer for ElementLayoutTree<'_> {
+impl LayoutBlockContainer for LayoutNode<'_, '_> {
     type BlockContainerStyle<'a>
         = &'a TaffyStyle
     where
@@ -500,7 +431,7 @@ impl LayoutBlockContainer for ElementLayoutTree<'_> {
     }
 }
 
-impl LayoutFlexboxContainer for ElementLayoutTree<'_> {
+impl LayoutFlexboxContainer for LayoutNode<'_, '_> {
     type FlexboxContainerStyle<'a>
         = &'a TaffyStyle
     where
@@ -519,7 +450,7 @@ impl LayoutFlexboxContainer for ElementLayoutTree<'_> {
     }
 }
 
-impl LayoutGridContainer for ElementLayoutTree<'_> {
+impl LayoutGridContainer for LayoutNode<'_, '_> {
     type GridContainerStyle<'a>
         = &'a TaffyStyle
     where
@@ -535,5 +466,96 @@ impl LayoutGridContainer for ElementLayoutTree<'_> {
 
     fn get_grid_child_style(&self, node_id: NodeId) -> Self::GridItemStyle<'_> {
         self.get_core_container_style(node_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use render::TextSystem;
+
+    use crate::ui::{
+        elements::{Document, ElementKind, BODY_ID},
+        layouts::ScrollOffset,
+    };
+
+    use super::LayoutNode;
+    use crate::ui::layouts::render_node::RenderNode;
+
+    #[test]
+    fn absolute_layout_node_is_reparented_without_changing_render_parent() {
+        let mut document = Document::new();
+        let containing_block = document.create_node(ElementKind::Div);
+        let wrapper = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        document
+            .set_style(containing_block, "position", Some("relative"))
+            .unwrap();
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document.insert(BODY_ID, containing_block, None).unwrap();
+        document.insert(containing_block, wrapper, None).unwrap();
+        document.insert(wrapper, absolute, None).unwrap();
+
+        let render_root = RenderNode::viewport(RenderNode::from_document(&document));
+        let mut text_system = TextSystem::new();
+        let scroll_offsets = HashMap::<u64, ScrollOffset>::new();
+        let tree = LayoutNode::from_render_node(&render_root, &mut text_system, &scroll_offsets);
+        let root = tree.viewport_root;
+        let body = tree.nodes[root].render_children[0];
+        let containing_block_node = tree.nodes[body].render_children[0];
+        let wrapper_node = tree.nodes[containing_block_node].render_children[0];
+        let absolute_node = tree.nodes[wrapper_node].render_children[0];
+
+        assert_eq!(tree.nodes[wrapper_node].render_children, [absolute_node]);
+        assert!(tree.nodes[wrapper_node].layout_children.is_empty());
+        assert_eq!(
+            tree.nodes[containing_block_node].layout_children,
+            [wrapper_node, absolute_node]
+        );
+        assert_eq!(
+            tree.nodes[absolute_node].positioning_containing_block,
+            Some(containing_block_node)
+        );
+    }
+
+    #[test]
+    fn fixed_layout_node_is_reparented_to_transformed_ancestor() {
+        let mut document = Document::new();
+        let containing_block = document.create_node(ElementKind::Div);
+        let wrapper = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        document
+            .set_style(containing_block, "transform", Some("translateX(0px)"))
+            .unwrap();
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document.insert(BODY_ID, containing_block, None).unwrap();
+        document.insert(containing_block, wrapper, None).unwrap();
+        document.insert(wrapper, fixed, None).unwrap();
+
+        let render_root = RenderNode::viewport(RenderNode::from_document(&document));
+        let mut text_system = TextSystem::new();
+        let scroll_offsets = HashMap::<u64, ScrollOffset>::new();
+        let tree = LayoutNode::from_render_node(&render_root, &mut text_system, &scroll_offsets);
+        let root = tree.viewport_root;
+        let body = tree.nodes[root].render_children[0];
+        let containing_block_node = tree.nodes[body].render_children[0];
+        let wrapper_node = tree.nodes[containing_block_node].render_children[0];
+        let fixed_node = tree.nodes[wrapper_node].render_children[0];
+
+        assert_eq!(tree.nodes[wrapper_node].render_children, [fixed_node]);
+        assert!(tree.nodes[wrapper_node].layout_children.is_empty());
+        assert_eq!(
+            tree.nodes[containing_block_node].layout_children,
+            [wrapper_node, fixed_node]
+        );
+        assert_eq!(
+            tree.nodes[fixed_node].positioning_containing_block,
+            Some(containing_block_node)
+        );
     }
 }
