@@ -15,8 +15,8 @@ use super::{
         relative_transform_matrix,
     },
     scroll::{overflow_clip, padding_box, scroll_container, scroll_content_size, OffsetContext},
-    tree::ElementLayoutTree,
 };
+use crate::ui::layouts::layout_node::LayoutNode;
 
 #[derive(Clone, Copy)]
 struct ContainingBlock {
@@ -36,7 +36,7 @@ fn scrolled_containing_block_parent(
     }
 }
 
-impl ElementLayoutTree<'_> {
+impl LayoutNode<'_, '_> {
     pub(super) fn to_layout(
         &self,
         node: usize,
@@ -86,13 +86,16 @@ impl ElementLayoutTree<'_> {
         fixed_containing_block: ContainingBlock,
     ) -> Layout {
         let data = &self.nodes[node];
+        let render_node = self.render_nodes[node];
         let mut relative_location = data.layout.location;
         if data.positioning_containing_block.is_some() {
-            if data.paint_style.left == SizeValue::Auto && data.paint_style.right == SizeValue::Auto
+            if render_node.style.left == SizeValue::Auto
+                && render_node.style.right == SizeValue::Auto
             {
                 relative_location.x = data.static_offset.x;
             }
-            if data.paint_style.top == SizeValue::Auto && data.paint_style.bottom == SizeValue::Auto
+            if render_node.style.top == SizeValue::Auto
+                && render_node.style.bottom == SizeValue::Auto
             {
                 relative_location.y = data.static_offset.y;
             }
@@ -106,11 +109,12 @@ impl ElementLayoutTree<'_> {
         let center = [location.x + width * 0.5, location.y + height * 0.5];
         let world_transform = multiply_transform(
             parent_transform,
-            anchored_transform(data.paint_style.transform.into(), center),
+            anchored_transform(render_node.style.transform.into(), center),
         );
         let relative_transform = relative_transform(world_transform, center);
         let mut descendant_clips = ancestor_clips.to_vec();
-        let mut own_clip = overflow_clip(data, location, width, height, viewport);
+        let mut own_clip =
+            overflow_clip(data, &render_node.style, location, width, height, viewport);
         if let Some(clip) = &mut own_clip {
             let clip_center = [
                 clip.rect.x + clip.rect.width * 0.5,
@@ -121,11 +125,11 @@ impl ElementLayoutTree<'_> {
         if let Some(clip) = own_clip {
             descendant_clips.push(clip);
         }
-        let is_text_flow = matches!(data.kind, ElementKind::Text(_)) || data.inline_spans.is_some();
+        let is_text_flow = render_node.is_text_flow();
         let (kind, scroll) = if is_text_flow {
-            let mut style = data.text_style.clone();
-            style.opacity = data.paint_style.opacity;
-            style.transform = data.paint_style.transform.into();
+            let mut style = render_node.text_style.clone();
+            style.opacity = render_node.style.opacity;
+            style.transform = render_node.style.transform.into();
             (
                 LayoutKind::Text {
                     text: data
@@ -135,14 +139,14 @@ impl ElementLayoutTree<'_> {
                         .collect(),
                     spans: data.rendered_spans.clone(),
                     style,
-                    has_transform: !data.paint_style.transform.is_none(),
+                    has_transform: !render_node.style.transform.is_none(),
                     line_count: data.text_line_count,
                     runs: data.text_runs.clone(),
                 },
                 None,
             )
         } else {
-            match &data.kind {
+            match &render_node.kind {
                 ElementKind::Comment(_)
                 | ElementKind::Button
                 | ElementKind::Div
@@ -153,16 +157,16 @@ impl ElementLayoutTree<'_> {
                 | ElementKind::Body
                 | ElementKind::Other(_) => {
                     let scrolls_x = matches!(
-                        data.paint_style.overflow_x,
+                        render_node.style.overflow_x,
                         ElementOverflow::Auto | ElementOverflow::Scroll
                     );
                     let scrolls_y = matches!(
-                        data.paint_style.overflow_y,
+                        render_node.style.overflow_y,
                         ElementOverflow::Auto | ElementOverflow::Scroll
                     );
                     let requested = self
                         .scroll_offsets
-                        .get(&data.element_id)
+                        .get(&render_node.element_id)
                         .copied()
                         .unwrap_or(ScrollOffset::ZERO);
                     let mut offset = ScrollOffset::new(
@@ -177,20 +181,20 @@ impl ElementLayoutTree<'_> {
                         ancestor_scroll_offset.x + offset.x,
                         ancestor_scroll_offset.y + offset.y,
                     );
-                    let descendant_fixed_containing_block = if !data.paint_style.transform.is_none()
-                    {
-                        ContainingBlock {
-                            child_parent,
-                            world_transform,
-                            viewport: false,
-                            scroll_offset: descendant_scroll_offset,
-                        }
-                    } else {
-                        fixed_containing_block
-                    };
+                    let descendant_fixed_containing_block =
+                        if !render_node.style.transform.is_none() {
+                            ContainingBlock {
+                                child_parent,
+                                world_transform,
+                                viewport: false,
+                                scroll_offset: descendant_scroll_offset,
+                            }
+                        } else {
+                            fixed_containing_block
+                        };
                     let descendant_absolute_containing_block =
-                        if data.paint_style.position.is_positioned()
-                            || !data.paint_style.transform.is_none()
+                        if render_node.style.position.is_positioned()
+                            || !render_node.style.transform.is_none()
                         {
                             ContainingBlock {
                                 child_parent,
@@ -202,15 +206,15 @@ impl ElementLayoutTree<'_> {
                             absolute_containing_block
                         };
                     let children_are_flex_or_grid_items =
-                        matches!(data.paint_style.display, Display::Flex | Display::Grid);
+                        matches!(render_node.style.display, Display::Flex | Display::Grid);
                     let mut children: Vec<_> = data
-                        .children
+                        .render_children
                         .iter()
                         .map(|child| {
-                            let child_data = &self.nodes[*child];
+                            let child_data = self.render_nodes[*child];
                             let (parent_location, clips, parent_transform) =
-                                if child_data.paint_style.position == Position::Fixed
-                                    && child_data.positioning_containing_block.is_some()
+                                if child_data.style.position == Position::Fixed
+                                    && self.nodes[*child].positioning_containing_block.is_some()
                                 {
                                     (
                                         if descendant_fixed_containing_block.viewport {
@@ -228,8 +232,8 @@ impl ElementLayoutTree<'_> {
                                         },
                                         descendant_fixed_containing_block.world_transform,
                                     )
-                                } else if child_data.paint_style.position == Position::Absolute
-                                    && child_data.positioning_containing_block.is_some()
+                                } else if child_data.style.position == Position::Absolute
+                                    && self.nodes[*child].positioning_containing_block.is_some()
                                 {
                                     (
                                         scrolled_containing_block_parent(
@@ -288,7 +292,7 @@ impl ElementLayoutTree<'_> {
                             ancestor_scroll_offset.y + offset.y,
                         );
                         let descendant_fixed_containing_block =
-                            if !data.paint_style.transform.is_none() {
+                            if !render_node.style.transform.is_none() {
                                 ContainingBlock {
                                     child_parent,
                                     world_transform,
@@ -299,8 +303,8 @@ impl ElementLayoutTree<'_> {
                                 fixed_containing_block
                             };
                         let descendant_absolute_containing_block =
-                            if data.paint_style.position.is_positioned()
-                                || !data.paint_style.transform.is_none()
+                            if render_node.style.position.is_positioned()
+                                || !render_node.style.transform.is_none()
                             {
                                 ContainingBlock {
                                     child_parent,
@@ -312,13 +316,13 @@ impl ElementLayoutTree<'_> {
                                 absolute_containing_block
                             };
                         children = data
-                            .children
+                            .render_children
                             .iter()
                             .map(|child| {
-                                let child_data = &self.nodes[*child];
+                                let child_data = self.render_nodes[*child];
                                 let (parent_location, clips, parent_transform) =
-                                    if child_data.paint_style.position == Position::Fixed
-                                        && child_data.positioning_containing_block.is_some()
+                                    if child_data.style.position == Position::Fixed
+                                        && self.nodes[*child].positioning_containing_block.is_some()
                                     {
                                         (
                                             if descendant_fixed_containing_block.viewport {
@@ -336,8 +340,8 @@ impl ElementLayoutTree<'_> {
                                             },
                                             descendant_fixed_containing_block.world_transform,
                                         )
-                                    } else if child_data.paint_style.position == Position::Absolute
-                                        && child_data.positioning_containing_block.is_some()
+                                    } else if child_data.style.position == Position::Absolute
+                                        && self.nodes[*child].positioning_containing_block.is_some()
                                     {
                                         (
                                             scrolled_containing_block_parent(
@@ -371,32 +375,32 @@ impl ElementLayoutTree<'_> {
                             content_width,
                             content_height,
                             OffsetContext::new(offset, max_offset),
-                            data.paint_style.overflow_x == ElementOverflow::Scroll,
-                            data.paint_style.overflow_y == ElementOverflow::Scroll,
+                            render_node.style.overflow_x == ElementOverflow::Scroll,
+                            render_node.style.overflow_y == ElementOverflow::Scroll,
                         )
                     });
                     (
                         LayoutKind::Box {
                             style: box_style(
-                                &data.paint_style,
+                                &render_node.style,
                                 width,
                                 height,
-                                data.paint_style.opacity,
-                                data.paint_style.transform.into(),
+                                render_node.style.opacity,
+                                render_node.style.transform.into(),
                             ),
-                            has_transform: !data.paint_style.transform.is_none(),
-                            z_index: data.paint_style.z_index.into(),
-                            isolated: data.paint_style.isolation.into(),
-                            position: data.paint_style.position,
-                            fixed_containing_block: if data.paint_style.position == Position::Fixed
+                            has_transform: !render_node.style.transform.is_none(),
+                            z_index: render_node.style.z_index.into(),
+                            isolated: render_node.style.isolation.into(),
+                            position: render_node.style.position,
+                            fixed_containing_block: if render_node.style.position == Position::Fixed
                             {
                                 data.positioning_containing_block
                                     .filter(|owner| *owner != self.viewport_root)
-                                    .map(|owner| self.nodes[owner].element_id)
+                                    .map(|owner| self.render_nodes[owner].element_id)
                             } else {
                                 None
                             },
-                            fixed_to_viewport: data.paint_style.position == Position::Fixed
+                            fixed_to_viewport: render_node.style.position == Position::Fixed
                                 && data.positioning_containing_block == Some(self.viewport_root),
                             flex_or_grid_item,
                             children,
@@ -411,7 +415,7 @@ impl ElementLayoutTree<'_> {
         };
 
         Layout {
-            element_id: data.element_id,
+            element_id: render_node.element_id,
             x: location.x,
             y: location.y,
             width,

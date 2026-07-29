@@ -12,7 +12,10 @@ use crate::ui::elements::{
     ElementKind,
 };
 
-pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
+pub(in crate::ui::layouts) fn to_taffy_style(
+    kind: &ElementKind,
+    style: &ElementStyle,
+) -> TaffyStyle {
     let (grid_template_rows, grid_template_row_names) =
         grid_template(style.grid_template_rows.as_deref());
     let (grid_template_columns, grid_template_column_names) =

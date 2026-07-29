@@ -1,28 +1,25 @@
 mod output;
 mod paint;
 mod scroll;
-mod style;
-mod text;
-mod tree;
+pub(super) mod style;
+pub(super) mod text;
 
 use std::collections::HashMap;
 
-use render::{Rect as RenderRect, TextStyle, TextSystem, Transform};
+use render::{Rect as RenderRect, TextSystem, Transform};
 use taffy::{
-    compute_root_layout,
     geometry::{Point, Size},
-    prelude::{AvailableSpace, Dimension, NodeId},
+    prelude::{AvailableSpace, Dimension},
 };
 
-use crate::ui::elements::{styles::Position, Document, BODY_ID};
+use crate::ui::elements::Document;
 
-use super::{Layout, ScrollOffset};
-use tree::{add_element, add_viewport, establish_positioning_containing_blocks, ElementLayoutTree};
+use super::{layout_node::LayoutNode, render_node::RenderNode, Layout, ScrollOffset};
 
 #[cfg(test)]
 use super::LayoutKind;
 #[cfg(test)]
-use crate::ui::elements::ElementKind;
+use crate::ui::elements::{ElementKind, BODY_ID};
 
 /// Computes a renderable layout tree from an element document.
 ///
@@ -55,40 +52,27 @@ pub(super) fn compute_layout_with_scroll(
         width: viewport_width.max(0.0),
         height: viewport_height.max(0.0),
     };
-    let mut nodes = Vec::new();
-    let body = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
-    let has_out_of_flow = nodes.iter().any(|node| {
-        matches!(
-            node.paint_style.position,
-            Position::Absolute | Position::Fixed
-        )
-    });
-    nodes[body].style.size = Size {
-        width: Dimension::length(viewport.width),
-        height: Dimension::length(viewport.height),
+    // The pipeline is deliberately staged:
+    // Document -> stable paint-ordered RenderNode -> reparented Taffy LayoutNode.
+    let render_root = RenderNode::viewport(RenderNode::from_document(document));
+    let static_locations = if render_root.has_out_of_flow_descendant() {
+        let mut static_tree =
+            LayoutNode::static_position_probe(&render_root, text_system, scroll_offsets);
+        configure_viewport(&mut static_tree, viewport);
+        static_tree.compute_layout(viewport.map(AvailableSpace::Definite));
+        Some(static_tree.absolute_render_locations())
+    } else {
+        None
     };
-    let root = add_viewport(&mut nodes, body, viewport);
 
-    let mut tree = ElementLayoutTree {
-        nodes,
-        viewport_root: root,
-        text_system,
-        scroll_offsets,
-    };
-    if has_out_of_flow {
-        compute_root_layout(
-            &mut tree,
-            NodeId::from(root),
-            viewport.map(AvailableSpace::Definite),
-        );
-        establish_positioning_containing_blocks(&mut tree.nodes, root);
-        tree.clear_layout_caches();
+    let mut tree = LayoutNode::from_render_node(&render_root, text_system, scroll_offsets);
+    configure_viewport(&mut tree, viewport);
+    if let Some(static_locations) = &static_locations {
+        tree.set_static_offsets(static_locations);
     }
-    compute_root_layout(
-        &mut tree,
-        NodeId::from(root),
-        viewport.map(AvailableSpace::Definite),
-    );
+    let root = tree.viewport_root;
+    tree.compute_layout(viewport.map(AvailableSpace::Definite));
+    let body = tree.nodes[root].render_children[0];
     tree.to_layout(
         body,
         Point::ZERO,
@@ -97,6 +81,22 @@ pub(super) fn compute_layout_with_scroll(
         Transform::IDENTITY,
         false,
     )
+}
+
+fn configure_viewport(tree: &mut LayoutNode<'_, '_>, viewport: Size<f32>) {
+    let root = tree.viewport_root;
+    let body = tree.nodes[root].render_children[0];
+    tree.nodes[body].style.size = Size {
+        width: Dimension::length(viewport.width),
+        height: Dimension::length(viewport.height),
+    };
+    tree.nodes[root].style = taffy::style::Style {
+        size: Size {
+            width: Dimension::length(viewport.width),
+            height: Dimension::length(viewport.height),
+        },
+        ..taffy::style::Style::default()
+    };
 }
 
 #[cfg(test)]

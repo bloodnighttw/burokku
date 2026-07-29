@@ -3,6 +3,8 @@
 
 mod compute;
 mod iter;
+mod layout_node;
+mod render_node;
 mod stacking;
 
 use render::{BoxStyle, Clip, Rect, TextRunMetrics, TextSpan, TextStyle, TextSystem};
