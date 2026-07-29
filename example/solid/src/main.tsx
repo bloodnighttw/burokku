@@ -253,22 +253,29 @@ function PositionExamples() {
                 "border-radius": "7px",
               }}
             >
-              <div style={{ height: "180px", padding: "8px" }}>
+              <div style={{ height: "180px", padding: "8px", "background-color": "#eeeeee", }}>
                 <text style={{ color: "#1e40af", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
                   Scroll this panel
                 </text>
               </div>
-              <div
-                style={{
-                  ...badgeStyle,
-                  position: "absolute",
-                  left: "32px",
-                  top: "76px",
-                  width: "142px",
+              <div style={{
+                  height: "400px",
+                  width: "240px",
                   "background-color": "#ea580c",
-                }}
-              >
-                <text>ABS · moves + clips</text>
+              }}>
+
+                <div
+                  style={{
+                    ...badgeStyle,
+                    position: "absolute",
+                    left: "32px",
+                    top: "76px",
+                    width: "142px",
+                    "background-color": "#ea580c",
+                  }}
+                >
+                  <text>ABsssS · moves + clips</text>
+                </div>
               </div>
             </div>
           </div>
