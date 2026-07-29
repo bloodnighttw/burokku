@@ -22,6 +22,8 @@ enum Task<'a> {
     /// Visit a positioned `z-index: auto` subtree without containing its
     /// descendant stacking contexts.
     PositionedAuto(&'a Layout),
+    /// Visit the ordinary contents of a flex/grid item atomically.
+    FlexOrGridItem(&'a Layout),
     /// Visit an ordinary layout in one in-flow paint phase.
     Middle(&'a Layout, MiddlePhase),
     /// Continue visiting ordinary children from last to first.
@@ -33,7 +35,7 @@ enum Task<'a> {
 #[derive(Clone, Copy, Debug)]
 enum MiddlePhase {
     Box,
-    Text,
+    Content,
 }
 
 impl<'a> ReverseLayoutIter<'a> {
@@ -62,11 +64,28 @@ impl<'a> Iterator for ReverseLayoutIter<'a> {
                     ));
                     self.pending.push(Task::MiddleChildren(
                         layout.children().iter(),
-                        MiddlePhase::Text,
+                        MiddlePhase::Content,
+                    ));
+                }
+                Task::FlexOrGridItem(layout) => {
+                    self.pending.push(Task::Yield(layout));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Box,
+                    ));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Content,
                     ));
                 }
                 Task::Middle(layout, phase) => {
                     if layout.establishes_stacking_context() || layout.is_positioned_auto() {
+                        continue;
+                    }
+                    if layout.is_flex_or_grid_item_auto() {
+                        if matches!(phase, MiddlePhase::Content) {
+                            self.pending.push(Task::FlexOrGridItem(layout));
+                        }
                         continue;
                     }
 
@@ -113,7 +132,7 @@ impl<'a> ReverseLayoutIter<'a> {
         ));
         self.pending.push(Task::MiddleChildren(
             context_root.children().iter(),
-            MiddlePhase::Text,
+            MiddlePhase::Content,
         ));
         self.pending
             .extend(zero_level.iter().map(|entry| match entry {
@@ -134,7 +153,7 @@ impl MiddlePhase {
         matches!(
             (self, &layout.kind),
             (Self::Box, super::super::LayoutKind::Box { .. })
-                | (Self::Text, super::super::LayoutKind::Text { .. })
+                | (Self::Content, super::super::LayoutKind::Text { .. })
         )
     }
 }

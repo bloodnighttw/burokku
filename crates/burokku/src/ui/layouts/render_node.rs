@@ -72,7 +72,13 @@ impl RenderNode {
                 .collect::<Vec<_>>()
         };
         if matches!(element.style.display, Display::Flex | Display::Grid) {
-            paint_children.sort_by_key(|child| child.style.order);
+            paint_children.sort_by_key(|child| {
+                if matches!(child.style.position, Position::Absolute | Position::Fixed) {
+                    0
+                } else {
+                    child.style.order
+                }
+            });
         }
 
         Self {
@@ -172,6 +178,41 @@ mod tests {
                 .map(|node| node.element_id)
                 .collect::<Vec<_>>(),
             vec![first, second]
+        );
+    }
+
+    #[test]
+    fn out_of_flow_flex_children_use_zero_for_order_modified_paint_order() {
+        let mut document = Document::new();
+        let row = document.create_node(ElementKind::Div);
+        let early_item = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        let late_item = document.create_node(ElementKind::Div);
+        document.set_style(row, "display", Some("flex")).unwrap();
+        document.set_style(early_item, "order", Some("-1")).unwrap();
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document.set_style(absolute, "order", Some("-10")).unwrap();
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document.set_style(fixed, "order", Some("10")).unwrap();
+        document.set_style(late_item, "order", Some("1")).unwrap();
+        document.insert(BODY_ID, row, None).unwrap();
+        for child in [early_item, absolute, fixed, late_item] {
+            document.insert(row, child, None).unwrap();
+        }
+
+        let render_root = RenderNode::from_document(&document);
+        let ordered = &render_root.paint_children[0].paint_children;
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|node| node.element_id)
+                .collect::<Vec<_>>(),
+            vec![early_item, absolute, fixed, late_item]
         );
     }
 }

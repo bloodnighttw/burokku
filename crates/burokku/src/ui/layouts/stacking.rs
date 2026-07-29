@@ -18,6 +18,10 @@ pub(crate) trait Stacking {
 
     fn is_flex_or_grid_item(&self) -> bool;
 
+    /// Whether this is an ordinary flex/grid item that paints atomically like
+    /// an inline-block without establishing a real stacking context.
+    fn is_flex_or_grid_item_auto(&self) -> bool;
+
     // determine that this stacking need to create new stacking context or not.
     fn establishes_stacking_context(&self) -> bool;
 
@@ -44,21 +48,21 @@ impl Stacking for Layout {
     fn z_index(&self) -> Option<i32> {
         match &self.kind {
             LayoutKind::Box { z_index, .. } => *z_index,
-            LayoutKind::Text { .. } => None,
+            LayoutKind::Text { z_index, .. } => *z_index,
         }
     }
 
     fn is_isolated(&self) -> bool {
         match &self.kind {
             LayoutKind::Box { isolated, .. } => *isolated,
-            LayoutKind::Text { .. } => false,
+            LayoutKind::Text { isolated, .. } => *isolated,
         }
     }
 
     fn position(&self) -> Option<Position> {
         match &self.kind {
             LayoutKind::Box { position, .. } => Some(*position),
-            LayoutKind::Text { .. } => None,
+            LayoutKind::Text { position, .. } => Some(*position),
         }
     }
 
@@ -67,8 +71,14 @@ impl Stacking for Layout {
             LayoutKind::Box {
                 flex_or_grid_item, ..
             } => *flex_or_grid_item,
-            LayoutKind::Text { .. } => false,
+            LayoutKind::Text {
+                flex_or_grid_item, ..
+            } => *flex_or_grid_item,
         }
+    }
+
+    fn is_flex_or_grid_item_auto(&self) -> bool {
+        self.is_flex_or_grid_item() && self.z_index().is_none()
     }
 
     fn establishes_stacking_context(&self) -> bool {
@@ -264,5 +274,47 @@ mod tests {
             assert!(layout.establishes_stacking_context());
             assert_eq!(layout.stacking_index(), 0);
         }
+    }
+
+    #[test]
+    fn text_flow_retains_stacking_metadata() {
+        let mut document = Document::new();
+        let row = document.create_node(ElementKind::Div);
+        let text_element = document.create_node(ElementKind::TextElement);
+        let text = document.create_node(ElementKind::Text("stacked".into()));
+        let fixed_element = document.create_node(ElementKind::TextElement);
+        let fixed_text = document.create_node(ElementKind::Text("fixed".into()));
+        document.set_style(row, "display", Some("flex")).unwrap();
+        document
+            .set_style(text_element, "z-index", Some("7"))
+            .unwrap();
+        document
+            .set_style(text_element, "isolation", Some("isolate"))
+            .unwrap();
+        document
+            .set_style(fixed_element, "position", Some("fixed"))
+            .unwrap();
+        document.insert(BODY_ID, row, None).unwrap();
+        document.insert(row, text_element, None).unwrap();
+        document.insert(text_element, text, None).unwrap();
+        document.insert(row, fixed_element, None).unwrap();
+        document.insert(fixed_element, fixed_text, None).unwrap();
+
+        let layout = compute_layout(&document, 100.0, 100.0, &mut TextSystem::new());
+        let text_layout = &layout.children()[0].children()[0];
+        assert!(matches!(text_layout.kind, LayoutKind::Text { .. }));
+        assert_eq!(text_layout.z_index(), Some(7));
+        assert!(text_layout.is_isolated());
+        assert_eq!(text_layout.position(), Some(Position::Static));
+        assert!(text_layout.is_flex_or_grid_item());
+        assert!(!text_layout.is_fixed_to_viewport());
+        assert!(text_layout.establishes_stacking_context());
+        assert_eq!(text_layout.stacking_index(), 7);
+
+        let fixed_layout = &layout.children()[0].children()[1];
+        assert_eq!(fixed_layout.position(), Some(Position::Fixed));
+        assert!(!fixed_layout.is_flex_or_grid_item());
+        assert!(fixed_layout.is_fixed_to_viewport());
+        assert!(fixed_layout.establishes_stacking_context());
     }
 }

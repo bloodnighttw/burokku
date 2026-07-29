@@ -176,7 +176,7 @@ fn paint_stacking_context(
                 viewport,
                 scale_factor,
                 clip_skip,
-                positioned_layer(context),
+                PaintLayer::Positioned,
                 context_world,
                 canvas,
             ),
@@ -201,18 +201,10 @@ fn paint_stacking_context(
             viewport,
             scale_factor,
             clip_skip,
-            positioned_layer(context),
+            PaintLayer::Positioned,
             context_world,
             canvas,
         );
-    }
-}
-
-fn positioned_layer(layout: &Layout) -> PaintLayer {
-    if layout.is_fixed_to_viewport() {
-        PaintLayer::Fixed
-    } else {
-        PaintLayer::Positioned
     }
 }
 
@@ -338,6 +330,17 @@ fn paint_ordinary_descendants(
         if layout.establishes_stacking_context() || layout.is_positioned_auto() {
             continue;
         }
+        if layout.is_flex_or_grid_item_auto() {
+            paint_atomic_flex_or_grid_item(
+                layout,
+                viewport,
+                scale_factor,
+                clip_skip,
+                context_world,
+                canvas,
+            );
+            continue;
+        }
         paint_phased_layout(
             layout,
             PaintLayer::Block,
@@ -350,6 +353,63 @@ fn paint_ordinary_descendants(
         );
         pending.push(layout.children().iter());
     }
+}
+
+fn paint_atomic_flex_or_grid_item(
+    layout: &Layout,
+    viewport: Rect,
+    scale_factor: f32,
+    clip_skip: usize,
+    context_world: Transform,
+    canvas: &mut Canvas,
+) {
+    let mut group = Canvas::new();
+    paint_phased_layout(
+        layout,
+        PaintLayer::ContextBackground,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        false,
+        context_world,
+        &mut group,
+    );
+    paint_ordinary_descendants(
+        layout,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        context_world,
+        &mut group,
+    );
+    paint_context_scrollbars(
+        layout,
+        viewport,
+        scale_factor,
+        layout.clips.len(),
+        context_world,
+        &mut group,
+    );
+    if group.commands().is_empty() {
+        return;
+    }
+    canvas.draw_group_in_layer(
+        PaintLayer::Content,
+        group,
+        [
+            (layout.x + layout.width * 0.5) * scale_factor,
+            (layout.y + layout.height * 0.5) * scale_factor,
+        ],
+        Transform::IDENTITY,
+        1.0,
+        layout
+            .clips
+            .iter()
+            .skip(clip_skip)
+            .copied()
+            .map(|clip| localize_clip(clip, context_world))
+            .map(|clip| scaled_clip(clip, scale_factor)),
+    );
 }
 
 #[expect(
@@ -413,7 +473,17 @@ fn paint_phased_layout(
             }
             let scaled_style = scaled_text_style(&style, scale_factor);
             let scaled_spans = scaled_text_spans(spans, scale_factor);
-            canvas.draw_rich_text_with_clips(
+            let mut text_group = Canvas::new();
+            paint_text_decorations(
+                bounds,
+                &scaled_spans,
+                runs,
+                scale_factor,
+                false,
+                clips.iter().copied(),
+                &mut text_group,
+            );
+            text_group.draw_rich_text_with_clips(
                 bounds,
                 scaled_spans.clone(),
                 scaled_style,
@@ -424,8 +494,20 @@ fn paint_phased_layout(
                 &scaled_spans,
                 runs,
                 scale_factor,
+                true,
                 clips.iter().copied(),
-                canvas,
+                &mut text_group,
+            );
+            canvas.draw_group_in_layer(
+                PaintLayer::Content,
+                text_group,
+                [
+                    (layout.x + layout.width * 0.5) * scale_factor,
+                    (layout.y + layout.height * 0.5) * scale_factor,
+                ],
+                Transform::IDENTITY,
+                1.0,
+                [],
             );
         }
     }
@@ -498,6 +580,7 @@ fn paint_text_decorations(
     spans: &[TextSpan],
     runs: &[TextRunMetrics],
     scale_factor: f32,
+    line_through: bool,
     clips: impl IntoIterator<Item = Clip> + Clone,
     canvas: &mut Canvas,
 ) {
@@ -508,36 +591,46 @@ fn paint_text_decorations(
         if style.text_decoration_line == TextDecorationLine::NONE {
             continue;
         }
-        let decoration_style = BoxStyle {
-            background: style.text_decoration_color,
-            ..BoxStyle::default()
+        let decoration_color = style.text_decoration_color;
+        let decorations = if line_through {
+            [
+                style
+                    .text_decoration_line
+                    .contains(TextDecorationLine::LINE_THROUGH)
+                    .then_some((run.line_through_y, run.line_through_thickness)),
+                None,
+            ]
+        } else {
+            [
+                style
+                    .text_decoration_line
+                    .contains(TextDecorationLine::OVERLINE)
+                    .then_some((run.overline_y, run.overline_thickness)),
+                style
+                    .text_decoration_line
+                    .contains(TextDecorationLine::UNDERLINE)
+                    .then_some((run.underline_y, run.underline_thickness)),
+            ]
         };
-        for decoration in [
-            style
-                .text_decoration_line
-                .contains(TextDecorationLine::OVERLINE)
-                .then_some((run.overline_y, run.overline_thickness)),
-            style
-                .text_decoration_line
-                .contains(TextDecorationLine::LINE_THROUGH)
-                .then_some((run.line_through_y, run.line_through_thickness)),
-            style
-                .text_decoration_line
-                .contains(TextDecorationLine::UNDERLINE)
-                .then_some((run.underline_y, run.underline_thickness)),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for decoration in decorations.into_iter().flatten() {
             let (y, thickness) = decoration;
-            canvas.draw_overlay_box_with_clips(
+            canvas.draw_decoration_with_clips(
+                if line_through {
+                    PaintLayer::ContentAfterText
+                } else {
+                    PaintLayer::ContentBeforeText
+                },
                 Rect::new(
                     bounds.x + run.left * scale_factor,
                     bounds.y + y * scale_factor,
                     run.width * scale_factor,
                     thickness * scale_factor,
                 ),
-                decoration_style.clone(),
+                BoxDecoration::Background {
+                    color: decoration_color,
+                    image: None,
+                },
+                DecorationStyle::default(),
                 clips.clone(),
             );
         }
@@ -678,11 +771,11 @@ fn paint_context_scrollbars(
             context_world,
             canvas,
         );
-        pending.extend(
-            layout.children().iter().rev().filter(|child| {
-                !child.establishes_stacking_context() && !child.is_positioned_auto()
-            }),
-        );
+        pending.extend(layout.children().iter().rev().filter(|child| {
+            !child.establishes_stacking_context()
+                && !child.is_positioned_auto()
+                && !child.is_flex_or_grid_item_auto()
+        }));
     }
 }
 
@@ -958,20 +1051,40 @@ mod tests {
     fn ordered_commands(canvas: &Canvas) -> Vec<&DrawCommand> {
         fn append<'a>(canvas: &'a Canvas, commands: &mut Vec<&'a DrawCommand>) {
             for layer in PaintLayer::ALL {
+                // This mirrors the renderer's actual per-layer pipeline:
+                // shapes are batched first, groups are composited in command
+                // order next, and direct text is submitted last.
                 for command in canvas.commands() {
-                    let command_layer = match command {
-                        DrawCommand::Decoration { layer, .. }
-                        | DrawCommand::Group { layer, .. } => *layer,
-                        DrawCommand::Box { .. } => PaintLayer::Block,
-                        DrawCommand::Text { .. } => PaintLayer::Content,
-                        DrawCommand::OverlayBox { .. } => PaintLayer::Overlay,
+                    let is_shape = match command {
+                        DrawCommand::Decoration {
+                            layer: command_layer,
+                            ..
+                        } => *command_layer == layer,
+                        DrawCommand::Box { .. } => layer == PaintLayer::Block,
+                        DrawCommand::OverlayBox { .. } => layer == PaintLayer::Overlay,
+                        DrawCommand::Text { .. } | DrawCommand::Group { .. } => false,
                     };
-                    if command_layer != layer {
-                        continue;
+                    if is_shape {
+                        commands.push(command);
                     }
-                    match command {
-                        DrawCommand::Group { canvas, .. } => append(canvas, commands),
-                        _ => commands.push(command),
+                }
+                for command in canvas.commands() {
+                    if let DrawCommand::Group {
+                        layer: command_layer,
+                        canvas,
+                        ..
+                    } = command
+                    {
+                        if *command_layer == layer {
+                            append(canvas, commands);
+                        }
+                    }
+                }
+                if layer == PaintLayer::Content {
+                    for command in canvas.commands() {
+                        if matches!(command, DrawCommand::Text { .. }) {
+                            commands.push(command);
+                        }
                     }
                 }
             }
@@ -1162,8 +1275,7 @@ mod tests {
         assert_eq!(*opacity, 0.5);
         assert_ne!(*transform, Transform::IDENTITY);
         assert_eq!(*origin, [50.0, 40.0]);
-        assert!(canvas
-            .commands()
+        assert!(ordered_commands(canvas)
             .iter()
             .any(|command| matches!(command, DrawCommand::Text { .. })));
         assert!(canvas
@@ -1215,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_overlay_shapes_for_text_decorations() {
+    fn emits_text_decorations_around_the_glyph_layer() {
         let mut document = Document::new();
         let container = document.create_node(ElementKind::Div);
         let text = document.create_node(ElementKind::Text("decorated".into()));
@@ -1234,26 +1346,73 @@ mod tests {
 
         let frame = build_frame(&document, 200.0, 100.0, 1.0, &mut TextSystem::new());
         let canvas = &frame.canvas;
-        assert!(matches!(
-            canvas.commands()[0],
-            render::DrawCommand::Text { .. }
-        ));
-        let decorations = canvas
-            .commands()
+        let commands = ordered_commands(canvas);
+        let decoration_layers = commands
             .iter()
-            .filter(|command| matches!(command, render::DrawCommand::OverlayBox { .. }))
-            .count();
-        assert_eq!(decorations, 2);
+            .filter_map(|command| match command {
+                render::DrawCommand::Decoration { layer, .. }
+                    if matches!(
+                        layer,
+                        PaintLayer::ContentBeforeText | PaintLayer::ContentAfterText
+                    ) =>
+                {
+                    Some(*layer)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decoration_layers,
+            [PaintLayer::ContentBeforeText, PaintLayer::ContentAfterText]
+        );
         let LayoutKind::Text { runs, .. } = &frame.layout.children()[0].children()[0].kind else {
             panic!("child should be text");
         };
-        let render::DrawCommand::OverlayBox { rect, .. } = &canvas.commands()[1] else {
-            panic!("decoration should be an overlay");
-        };
+        let rect = commands
+            .iter()
+            .find_map(|command| match command {
+                render::DrawCommand::Decoration {
+                    layer: PaintLayer::ContentBeforeText,
+                    rect,
+                    ..
+                } => Some(rect),
+                _ => None,
+            })
+            .expect("underline decoration before text");
         assert!((rect.x - runs[0].left).abs() < 0.01);
         assert!((rect.width - runs[0].width).abs() < 0.01);
         assert!(rect.x > 0.0);
         assert!(rect.width < 200.0);
+
+        let before = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        layer: PaintLayer::ContentBeforeText,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let text = commands
+            .iter()
+            .position(|command| matches!(command, DrawCommand::Text { .. }))
+            .unwrap();
+        let after = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        layer: PaintLayer::ContentAfterText,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(before < text && text < after);
     }
 
     #[test]
@@ -1279,12 +1438,15 @@ mod tests {
             panic!("nested text should produce one rich text layout");
         };
         let decorated_runs = runs.iter().filter(|run| run.span_index == 1).count();
-        let decorations: Vec<_> = frame
-            .canvas
-            .commands()
+        let painted = ordered_commands(&frame.canvas);
+        let decorations: Vec<_> = painted
             .iter()
             .filter_map(|command| match command {
-                render::DrawCommand::OverlayBox { style, .. } => Some(style),
+                render::DrawCommand::Decoration {
+                    layer: PaintLayer::ContentBeforeText,
+                    decoration: BoxDecoration::Background { color, .. },
+                    ..
+                } => Some(color),
                 _ => None,
             })
             .collect();
@@ -1294,7 +1456,7 @@ mod tests {
         assert_eq!(decorations.len(), decorated_runs);
         assert!(decorations
             .iter()
-            .all(|style| style.background == Color::from_rgba8(0x7c, 0x3a, 0xed, 0xff)));
+            .all(|color| **color == Color::from_rgba8(0x7c, 0x3a, 0xed, 0xff)));
     }
 
     #[test]
@@ -1320,12 +1482,15 @@ mod tests {
         let LayoutKind::Text { runs, .. } = &text_layout.kind else {
             panic!("child should be text");
         };
-        let decorations: Vec<_> = frame
-            .canvas
-            .commands()
+        let painted = ordered_commands(&frame.canvas);
+        let decorations: Vec<_> = painted
             .iter()
             .filter_map(|command| match command {
-                render::DrawCommand::OverlayBox { rect, .. } => Some(rect),
+                render::DrawCommand::Decoration {
+                    layer: PaintLayer::ContentBeforeText,
+                    rect,
+                    ..
+                } => Some(rect),
                 _ => None,
             })
             .collect();
@@ -1419,6 +1584,365 @@ mod tests {
                 Color::from_rgba8(0, 0, 0xff, 0xff),
                 Color::from_rgba8(0, 0xff, 0, 0xff),
             ]
+        );
+    }
+
+    #[test]
+    fn viewport_fixed_contexts_obey_numeric_z_index_and_hit_testing() {
+        let mut document = Document::new();
+        let absolute = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for element in [absolute, fixed] {
+            document.set_style(element, "left", Some("0px")).unwrap();
+            document.set_style(element, "top", Some("0px")).unwrap();
+            document.set_style(element, "width", Some("40px")).unwrap();
+            document.set_style(element, "height", Some("40px")).unwrap();
+        }
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document
+            .set_style(absolute, "z-index", Some("100"))
+            .unwrap();
+        document
+            .set_style(absolute, "background-color", Some("blue"))
+            .unwrap();
+        document
+            .set_style(fixed, "position", Some("fixed"))
+            .unwrap();
+        document
+            .set_style(fixed, "background-color", Some("red"))
+            .unwrap();
+        document.insert(BODY_ID, absolute, None).unwrap();
+        document.insert(BODY_ID, fixed, None).unwrap();
+
+        let frame = build_frame(&document, 100.0, 100.0, 1.0, &mut TextSystem::new());
+        assert_eq!(
+            background_colors(&frame.canvas),
+            [
+                Color::from_rgba8(255, 0, 0, 255),
+                Color::from_rgba8(0, 0, 255, 255)
+            ]
+        );
+        assert_eq!(
+            frame.layout.hit_test(10.0, 10.0).map(Layout::element_id),
+            Some(absolute)
+        );
+    }
+
+    #[test]
+    fn auto_z_flex_items_paint_ordinary_contents_atomically() {
+        let mut document = Document::new();
+        let row = document.create_node(ElementKind::Div);
+        let first = document.create_node(ElementKind::Div);
+        let first_text = document.create_node(ElementKind::Text("first".into()));
+        let escaped_high = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        let second_text = document.create_node(ElementKind::Text("second".into()));
+        let escaped_middle = document.create_node(ElementKind::Div);
+
+        document.set_style(row, "display", Some("flex")).unwrap();
+        for (item, color) in [(first, "red"), (second, "blue")] {
+            document.set_style(item, "width", Some("50px")).unwrap();
+            document.set_style(item, "height", Some("30px")).unwrap();
+            document
+                .set_style(item, "background-color", Some(color))
+                .unwrap();
+        }
+        for (context, index, color) in [
+            (escaped_high, "10", "green"),
+            (escaped_middle, "5", "black"),
+        ] {
+            document
+                .set_style(context, "position", Some("relative"))
+                .unwrap();
+            document.set_style(context, "z-index", Some(index)).unwrap();
+            document
+                .set_style(context, "background-color", Some(color))
+                .unwrap();
+            document.set_style(context, "width", Some("10px")).unwrap();
+            document.set_style(context, "height", Some("10px")).unwrap();
+        }
+        document.insert(BODY_ID, row, None).unwrap();
+        document.insert(row, first, None).unwrap();
+        document.insert(first, first_text, None).unwrap();
+        document.insert(first, escaped_high, None).unwrap();
+        document.insert(row, second, None).unwrap();
+        document.insert(second, second_text, None).unwrap();
+        document.insert(second, escaped_middle, None).unwrap();
+
+        let frame = build_frame(&document, 120.0, 60.0, 1.0, &mut TextSystem::new());
+        let commands = ordered_commands(&frame.canvas);
+        let red = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(255, 0, 0, 255)
+                )
+            })
+            .unwrap();
+        let first_text_index = commands
+            .iter()
+            .position(
+                |command| matches!(command, DrawCommand::Text { text, .. } if text == "first"),
+            )
+            .unwrap();
+        let blue = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 0, 255, 255)
+                )
+            })
+            .unwrap();
+        let black = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::BLACK
+                )
+            })
+            .unwrap();
+        let green = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 128, 0, 255)
+                )
+            })
+            .unwrap();
+
+        assert!(red < first_text_index && first_text_index < blue);
+        assert!(blue < black && black < green);
+        assert_eq!(
+            frame
+                .layout
+                .iter()
+                .map(Layout::element_id)
+                .collect::<Vec<_>>(),
+            [
+                BODY_ID,
+                row,
+                first,
+                first_text,
+                second,
+                second_text,
+                escaped_middle,
+                escaped_high
+            ]
+        );
+        assert_eq!(
+            frame
+                .layout
+                .iter_rev()
+                .map(Layout::element_id)
+                .collect::<Vec<_>>(),
+            [
+                escaped_high,
+                escaped_middle,
+                second_text,
+                second,
+                first_text,
+                first,
+                row,
+                BODY_ID
+            ]
+        );
+    }
+
+    #[test]
+    fn earlier_ordinary_text_paints_before_a_later_overlapping_flex_item() {
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let first_text = document.create_node(ElementKind::Text("earlier".into()));
+        let row = document.create_node(ElementKind::Div);
+        let item = document.create_node(ElementKind::Div);
+
+        document.set_style(first, "height", Some("30px")).unwrap();
+        document.set_style(row, "display", Some("flex")).unwrap();
+        document
+            .set_style(row, "margin-top", Some("-30px"))
+            .unwrap();
+        document.set_style(item, "width", Some("80px")).unwrap();
+        document.set_style(item, "height", Some("30px")).unwrap();
+        document
+            .set_style(item, "background-color", Some("blue"))
+            .unwrap();
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(first, first_text, None).unwrap();
+        document.insert(BODY_ID, row, None).unwrap();
+        document.insert(row, item, None).unwrap();
+
+        let frame = build_frame(&document, 100.0, 60.0, 1.0, &mut TextSystem::new());
+        let first_layout = frame
+            .layout
+            .iter()
+            .find(|layout| layout.element_id == first_text)
+            .unwrap();
+        let item_layout = frame
+            .layout
+            .iter()
+            .find(|layout| layout.element_id == item)
+            .unwrap();
+        assert!(first_layout.y < item_layout.y + item_layout.height);
+        assert!(item_layout.y < first_layout.y + first_layout.height);
+
+        let commands = ordered_commands(&frame.canvas);
+        let text = commands
+            .iter()
+            .position(
+                |command| matches!(command, DrawCommand::Text { text, .. } if text == "earlier"),
+            )
+            .unwrap();
+        let item_background = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 0, 255, 255)
+                )
+            })
+            .unwrap();
+        assert!(text < item_background);
+
+        let all_forward = frame
+            .layout
+            .iter()
+            .map(Layout::element_id)
+            .collect::<Vec<_>>();
+        let all_reverse = frame
+            .layout
+            .iter_rev()
+            .map(Layout::element_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            all_reverse,
+            all_forward.iter().rev().copied().collect::<Vec<_>>()
+        );
+
+        let forward = all_forward
+            .iter()
+            .copied()
+            .filter_map(|layout| [first_text, item].contains(&layout).then_some(layout))
+            .collect::<Vec<_>>();
+        let reverse = all_reverse
+            .iter()
+            .copied()
+            .filter_map(|layout| [first_text, item].contains(&layout).then_some(layout))
+            .collect::<Vec<_>>();
+        assert_eq!(forward, [first_text, item]);
+        assert_eq!(reverse, forward.iter().rev().copied().collect::<Vec<_>>());
+
+        let overlap_x = first_layout.x.max(item_layout.x) + 1.0;
+        let overlap_y = first_layout.y.max(item_layout.y) + 1.0;
+        assert_eq!(
+            frame
+                .layout
+                .hit_test(overlap_x, overlap_y)
+                .map(Layout::element_id),
+            Some(item)
+        );
+    }
+
+    #[test]
+    fn overlapping_decorated_text_layouts_keep_tree_order_atomically() {
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let first_text = document.create_node(ElementKind::Text("first".into()));
+        let second = document.create_node(ElementKind::Div);
+        let second_text = document.create_node(ElementKind::Text("second".into()));
+
+        for element in [first, second] {
+            document.set_style(element, "height", Some("30px")).unwrap();
+        }
+        document
+            .set_style(first, "text-decoration", Some("line-through red"))
+            .unwrap();
+        document
+            .set_style(second, "text-decoration", Some("underline blue"))
+            .unwrap();
+        document
+            .set_style(second, "margin-top", Some("-30px"))
+            .unwrap();
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(first, first_text, None).unwrap();
+        document.insert(BODY_ID, second, None).unwrap();
+        document.insert(second, second_text, None).unwrap();
+
+        let frame = build_frame(&document, 100.0, 60.0, 1.0, &mut TextSystem::new());
+        let layouts = [first_text, second_text].map(|element_id| {
+            frame
+                .layout
+                .iter()
+                .find(|layout| layout.element_id == element_id)
+                .unwrap()
+        });
+        assert!(layouts[0].y < layouts[1].y + layouts[1].height);
+        assert!(layouts[1].y < layouts[0].y + layouts[0].height);
+
+        let commands = ordered_commands(&frame.canvas);
+        let first_glyphs = commands
+            .iter()
+            .position(
+                |command| matches!(command, DrawCommand::Text { text, .. } if text == "first"),
+            )
+            .unwrap();
+        let first_strike = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        layer: PaintLayer::ContentAfterText,
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(255, 0, 0, 255)
+                )
+            })
+            .unwrap();
+        let second_underline = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Decoration {
+                        layer: PaintLayer::ContentBeforeText,
+                        decoration: BoxDecoration::Background { color, .. },
+                        ..
+                    } if *color == Color::from_rgba8(0, 0, 255, 255)
+                )
+            })
+            .unwrap();
+        let second_glyphs = commands
+            .iter()
+            .position(
+                |command| matches!(command, DrawCommand::Text { text, .. } if text == "second"),
+            )
+            .unwrap();
+
+        assert!(
+            first_glyphs < first_strike
+                && first_strike < second_underline
+                && second_underline < second_glyphs
         );
     }
 
@@ -1704,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn root_scrollbar_paints_above_absolute_and_below_fixed_content() {
+    fn root_scrollbar_paints_above_document_positioned_content() {
         let mut document = Document::new();
         let content = document.create_node(ElementKind::Div);
         let absolute = document.create_node(ElementKind::Div);
@@ -1790,8 +2314,8 @@ mod tests {
             .expect("fixed background paint command");
 
         assert!(
-            absolute_index < scrollbar_index && scrollbar_index < fixed_index,
-            "root paint order must be absolute content, scrollbar, then viewport-fixed content"
+            absolute_index < fixed_index && fixed_index < scrollbar_index,
+            "tree-ordered positioned content must paint below the root scrollbar"
         );
     }
 

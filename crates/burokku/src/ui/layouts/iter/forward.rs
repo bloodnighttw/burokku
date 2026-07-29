@@ -22,6 +22,8 @@ enum Task<'a> {
     /// Paint a positioned `z-index: auto` subtree in the zero-level phase
     /// without containing descendant stacking contexts.
     PositionedAuto(&'a Layout),
+    /// Paint the ordinary contents of a flex/grid item atomically.
+    FlexOrGridItem(&'a Layout),
     /// Visit an ordinary layout in one in-flow paint phase.
     Middle(&'a Layout, MiddlePhase),
     /// Continue visiting ordinary children from first to last.
@@ -31,7 +33,7 @@ enum Task<'a> {
 #[derive(Clone, Copy, Debug)]
 enum MiddlePhase {
     Box,
-    Text,
+    Content,
 }
 
 impl<'a> LayoutIter<'a> {
@@ -58,7 +60,18 @@ impl<'a> Iterator for LayoutIter<'a> {
                 Task::PositionedAuto(layout) => {
                     self.pending.push(Task::MiddleChildren(
                         layout.children().iter(),
-                        MiddlePhase::Text,
+                        MiddlePhase::Content,
+                    ));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Box,
+                    ));
+                    return Some(layout);
+                }
+                Task::FlexOrGridItem(layout) => {
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Content,
                     ));
                     self.pending.push(Task::MiddleChildren(
                         layout.children().iter(),
@@ -68,6 +81,12 @@ impl<'a> Iterator for LayoutIter<'a> {
                 }
                 Task::Middle(layout, phase) => {
                     if layout.establishes_stacking_context() || layout.is_positioned_auto() {
+                        continue;
+                    }
+                    if layout.is_flex_or_grid_item_auto() {
+                        if matches!(phase, MiddlePhase::Content) {
+                            self.pending.push(Task::FlexOrGridItem(layout));
+                        }
                         continue;
                     }
 
@@ -114,7 +133,7 @@ impl<'a> LayoutIter<'a> {
             }));
         self.pending.push(Task::MiddleChildren(
             context_root.children().iter(),
-            MiddlePhase::Text,
+            MiddlePhase::Content,
         ));
         self.pending.push(Task::MiddleChildren(
             context_root.children().iter(),
@@ -135,7 +154,7 @@ impl MiddlePhase {
         matches!(
             (self, &layout.kind),
             (Self::Box, super::super::LayoutKind::Box { .. })
-                | (Self::Text, super::super::LayoutKind::Text { .. })
+                | (Self::Content, super::super::LayoutKind::Text { .. })
         )
     }
 }
