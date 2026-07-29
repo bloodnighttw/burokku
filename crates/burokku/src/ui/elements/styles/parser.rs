@@ -274,8 +274,7 @@ pub(crate) fn set_style(
             }
         }
         "transform" => style.transform = parse_transform(name, value)?,
-        "box-shadow" => style.box_shadow = parse_shadow(name, value, true)?,
-        "text-shadow" => style.text_shadow = parse_shadow(name, value, false)?,
+        "box-shadow" => style.box_shadow = parse_shadow(name, value)?,
         "border-color" => color!(border_color),
         "border-radius" => {
             let [top_left, top_right, bottom_right, bottom_left] =
@@ -506,7 +505,6 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
         "opacity" => reset!(opacity),
         "transform" => reset!(transform),
         "box-shadow" => reset!(box_shadow),
-        "text-shadow" => reset!(text_shadow),
         "border-color" => reset!(border_color),
         "border-radius" => reset_box!(
             border_top_left_radius,
@@ -792,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_opacity_transform_and_shadows() {
+    fn parses_opacity_transform_and_box_shadows() {
         let mut style = Style::default();
         set_style(&mut style, "opacity", Some("0.35")).unwrap();
         set_style(
@@ -807,8 +805,6 @@ mod tests {
             Some("4px 6px 8px 2px rgba(0, 0, 0, 0.5)"),
         )
         .unwrap();
-        set_style(&mut style, "text-shadow", Some("1px 2px 3px navy")).unwrap();
-
         assert_eq!(style.opacity, 0.35);
         assert_eq!(
             style.transform,
@@ -816,9 +812,7 @@ mod tests {
         );
         assert_eq!(style.box_shadow[0].spread, 2.0);
         assert_eq!(style.box_shadow[0].color, [0, 0, 0, 128]);
-        assert_eq!(style.text_shadow[0].color, [0, 0, 128, 255]);
         assert!(set_style(&mut style, "opacity", Some("1.1")).is_err());
-        assert!(set_style(&mut style, "text-shadow", Some("1px 2px 3px 4px red")).is_err());
 
         set_style(&mut style, "opacity", Some("35%")).unwrap();
         set_style(
@@ -827,17 +821,10 @@ mod tests {
             Some("inset 1px 2px 3px red, 4px 5px blue"),
         )
         .unwrap();
-        set_style(
-            &mut style,
-            "text-shadow",
-            Some("1px 2px red, 3px 4px 5px blue"),
-        )
-        .unwrap();
         assert_eq!(style.opacity, 0.35);
         assert_eq!(style.box_shadow.len(), 2);
         assert!(style.box_shadow[0].inset);
         assert!(!style.box_shadow[1].inset);
-        assert_eq!(style.text_shadow.len(), 2);
 
         set_style(&mut style, "transform", Some("skewX(45deg)")).unwrap();
         assert!((style.transform.matrix()[2] - 1.0).abs() < 0.0001);
@@ -849,6 +836,16 @@ mod tests {
         assert_eq!(
             style.transform,
             Transform::Matrix(Transform::IDENTITY_MATRIX)
+        );
+    }
+
+    #[test]
+    fn does_not_parse_text_shadow() {
+        let mut style = Style::default();
+
+        assert_eq!(
+            set_style(&mut style, "text-shadow", Some("1px 2px 3px black")),
+            Err(StyleError::UnsupportedProperty("text-shadow".to_owned()))
         );
     }
 
