@@ -1257,11 +1257,11 @@ mod tests {
     }
 
     #[test]
-    fn decorates_only_the_styled_inline_span() {
+    fn decorates_only_the_styled_nested_text() {
         let mut document = Document::new();
-        let line = document.create_node(ElementKind::Span);
+        let line = document.create_node(ElementKind::TextElement);
         let before = document.create_node(ElementKind::Text("before ".into()));
-        let decorated = document.create_node(ElementKind::Span);
+        let decorated = document.create_node(ElementKind::TextElement);
         let decorated_text = document.create_node(ElementKind::Text("middle".into()));
         let after = document.create_node(ElementKind::Text(" after".into()));
         document
@@ -1276,7 +1276,7 @@ mod tests {
         let frame = build_frame(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
         let inline = &frame.layout.children()[0];
         let LayoutKind::Text { spans, runs, .. } = &inline.kind else {
-            panic!("nested spans should produce one inline text layout");
+            panic!("nested text should produce one rich text layout");
         };
         let decorated_runs = runs.iter().filter(|run| run.span_index == 1).count();
         let decorations: Vec<_> = frame

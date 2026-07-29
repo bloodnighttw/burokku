@@ -287,7 +287,7 @@ impl<'render, 'state> LayoutNode<'render, 'state> {
         let style = self.nodes[index].style.clone();
         let render_node = self.render_nodes[index];
         let text_style = render_node.text_style.clone();
-        let spans = match &render_node.inline_spans {
+        let spans = match &render_node.rich_text {
             Some(spans) => normalize_text_spans(spans, text_style.white_space),
             None => match &render_node.kind {
                 ElementKind::Text(text) => vec![TextSpan::new(

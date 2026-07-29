@@ -20,7 +20,7 @@ pub enum ElementKind {
     Heading(u8),
     Image,
     Select,
-    Span,
+    TextElement,
     Body,
     Other(String),
 }
@@ -51,7 +51,7 @@ impl From<String> for ElementKind {
             "h6" => Self::Heading(6),
             "img" => Self::Image,
             "select" => Self::Select,
-            "span" => Self::Span,
+            "text" => Self::TextElement,
             _ => Self::Other(name),
         }
     }
@@ -219,7 +219,7 @@ mod tests {
     fn nodes_can_be_moved_detached_and_reattached() {
         let mut document = Document::new();
         let first = document.create_node(ElementKind::Div);
-        let second = document.create_node(ElementKind::Span);
+        let second = document.create_node(ElementKind::Div);
         let text = document.create_node(ElementKind::Text("hello".into()));
         document.insert(BODY_ID, first, None).unwrap();
         document.insert(BODY_ID, second, None).unwrap();
@@ -253,6 +253,14 @@ mod tests {
     fn element_names_map_to_semantic_kinds() {
         assert_eq!(ElementKind::from("BUTTON".to_owned()), ElementKind::Button);
         assert_eq!(ElementKind::from("h3".to_owned()), ElementKind::Heading(3));
+        assert_eq!(
+            ElementKind::from("text".to_owned()),
+            ElementKind::TextElement
+        );
+        assert_eq!(
+            ElementKind::from("span".to_owned()),
+            ElementKind::Other("span".to_owned())
+        );
         assert_eq!(
             ElementKind::from("CUSTOM-CARD".to_owned()),
             ElementKind::Other("custom-card".to_owned())
