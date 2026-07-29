@@ -152,6 +152,12 @@ impl LayoutNode<'_, '_> {
                     spans: data.rendered_spans.clone(),
                     style,
                     has_transform: !render_node.style.transform.is_none(),
+                    z_index: render_node.style.z_index.into(),
+                    isolated: render_node.style.isolation.into(),
+                    position: render_node.style.position,
+                    fixed_to_viewport: render_node.style.position == Position::Fixed
+                        && data.positioning_containing_block == Some(self.viewport_root),
+                    flex_or_grid_item,
                     line_count: data.text_line_count,
                     runs: data.text_runs.clone(),
                 },
@@ -264,7 +270,11 @@ impl LayoutNode<'_, '_> {
                                 clips,
                                 viewport,
                                 parent_transform,
-                                children_are_flex_or_grid_items,
+                                children_are_flex_or_grid_items
+                                    && !matches!(
+                                        child_data.style.position,
+                                        Position::Absolute | Position::Fixed
+                                    ),
                                 descendant_scroll_offset,
                                 descendant_absolute_containing_block,
                                 descendant_fixed_containing_block,
@@ -372,7 +382,11 @@ impl LayoutNode<'_, '_> {
                                     clips,
                                     viewport,
                                     parent_transform,
-                                    children_are_flex_or_grid_items,
+                                    children_are_flex_or_grid_items
+                                        && !matches!(
+                                            child_data.style.position,
+                                            Position::Absolute | Position::Fixed
+                                        ),
                                     descendant_scroll_offset,
                                     descendant_absolute_containing_block,
                                     descendant_fixed_containing_block,

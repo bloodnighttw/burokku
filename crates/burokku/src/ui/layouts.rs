@@ -133,6 +133,11 @@ pub enum LayoutKind {
         spans: Vec<TextSpan>,
         style: TextStyle,
         has_transform: bool,
+        z_index: Option<i32>,
+        isolated: bool,
+        position: Position,
+        fixed_to_viewport: bool,
+        flex_or_grid_item: bool,
         line_count: usize,
         runs: Vec<TextRunMetrics>,
     },
@@ -257,6 +262,9 @@ impl Layout {
             LayoutKind::Box {
                 fixed_to_viewport: true,
                 ..
+            } | LayoutKind::Text {
+                fixed_to_viewport: true,
+                ..
             }
         )
     }
@@ -366,6 +374,11 @@ mod tests {
                 spans: vec![TextSpan::new("Burokku", TextStyle::default())],
                 style: TextStyle::default(),
                 has_transform: false,
+                z_index: None,
+                isolated: false,
+                position: Position::Static,
+                fixed_to_viewport: false,
+                flex_or_grid_item: false,
                 line_count: 1,
                 runs: Vec::new(),
             },
