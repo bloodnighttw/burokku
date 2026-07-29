@@ -761,6 +761,6 @@ document.body.style.padding = "12px";
 document.body.style.borderWidth = "4px";
 document.body.style.borderColor = "#94a3b8";
 document.body.style.overflowY = "auto";
-document.body.style.overflowX = "auto";
+document.body.style.overflowX = "scroll";
 
 createRoot(document.body).render(<App />);

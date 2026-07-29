@@ -4,7 +4,7 @@ use taffy::{geometry::Point, prelude::Display};
 use crate::ui::{
     elements::{
         styles::{Overflow as ElementOverflow, Position, SizeValue},
-        ElementKind,
+        ElementKind, BODY_ID,
     },
     layouts::{Layout, LayoutKind, ScrollOffset},
 };
@@ -104,14 +104,26 @@ impl LayoutNode<'_, '_> {
             x: parent_location.x + relative_location.x,
             y: parent_location.y + relative_location.y,
         };
-        let width = data.layout.size.width;
-        let height = data.layout.size.height;
-        let center = [location.x + width * 0.5, location.y + height * 0.5];
+        let layout_width = data.layout.size.width;
+        let layout_height = data.layout.size.height;
+        let center = [
+            location.x + layout_width * 0.5,
+            location.y + layout_height * 0.5,
+        ];
         let world_transform = multiply_transform(
             parent_transform,
             anchored_transform(render_node.style.transform.into(), center),
         );
         let relative_transform = relative_transform(world_transform, center);
+        // Taffy correctly applies the body's CSS content-box sizing when
+        // resolving containing blocks. The retained root paint box, however,
+        // represents the window surface and must stop at the viewport edge so
+        // its border and scrollbar geometry remain visible.
+        let (width, height) = if render_node.element_id == BODY_ID {
+            (viewport.width, viewport.height)
+        } else {
+            (layout_width, layout_height)
+        };
         let mut descendant_clips = ancestor_clips.to_vec();
         let mut own_clip =
             overflow_clip(data, &render_node.style, location, width, height, viewport);

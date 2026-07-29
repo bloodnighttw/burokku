@@ -28,20 +28,26 @@ pub enum PaintLayer {
     Content,
     /// Positioned-auto, zero-level, and positive stacking contexts.
     Positioned,
+    /// Scrollbars painted above ordinary positioned content.
+    Scrollbar,
+    /// Viewport-fixed stacking contexts painted above root scrollbars.
+    Fixed,
     /// Outlines painted after the stacking context's contents.
     Outline,
-    /// UI drawn above document content, such as scrollbars.
+    /// UI explicitly drawn above all document content.
     Overlay,
 }
 
 impl PaintLayer {
-    pub(crate) const COUNT: usize = 7;
-    pub const ALL: [Self; 7] = [
+    pub(crate) const COUNT: usize = 9;
+    pub const ALL: [Self; 9] = [
         Self::ContextBackground,
         Self::Negative,
         Self::Block,
         Self::Content,
         Self::Positioned,
+        Self::Scrollbar,
+        Self::Fixed,
         Self::Outline,
         Self::Overlay,
     ];
