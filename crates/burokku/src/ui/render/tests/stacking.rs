@@ -390,12 +390,12 @@ fn earlier_ordinary_text_paints_before_a_later_overlapping_flex_item() {
     let forward = all_forward
         .iter()
         .copied()
-        .filter_map(|layout| [first_text, item].contains(&layout).then_some(layout))
+        .filter(|layout| [first_text, item].contains(layout))
         .collect::<Vec<_>>();
     let reverse = all_reverse
         .iter()
         .copied()
-        .filter_map(|layout| [first_text, item].contains(&layout).then_some(layout))
+        .filter(|layout| [first_text, item].contains(layout))
         .collect::<Vec<_>>();
     assert_eq!(forward, [first_text, item]);
     assert_eq!(reverse, forward.iter().rev().copied().collect::<Vec<_>>());
