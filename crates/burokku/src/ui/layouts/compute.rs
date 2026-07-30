@@ -886,6 +886,30 @@ mod tests {
     }
 
     #[test]
+    fn body_transform_uses_the_retained_viewport_center_for_descendants_and_clips() {
+        let mut document = Document::new();
+        let child = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("padding", "20px"),
+            ("overflow", "hidden"),
+            ("transform", "rotate(180deg)"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+        document.set_style(child, "width", Some("10px")).unwrap();
+        document.set_style(child, "height", Some("10px")).unwrap();
+        document.insert(BODY_ID, child, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let child = &layout.children()[0];
+
+        assert_eq!((layout.width, layout.height), (300.0, 200.0));
+        assert!(child.contains(275.0, 175.0));
+        assert!(child.clips[0].contains(275.0, 175.0));
+        assert!(!child.contains(315.0, 215.0));
+    }
+
+    #[test]
     fn transformed_body_contains_fixed_boxes() {
         let mut document = Document::new();
         let wrapper = document.create_node(ElementKind::Div);

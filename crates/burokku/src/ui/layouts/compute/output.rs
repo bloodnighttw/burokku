@@ -106,15 +106,6 @@ impl LayoutNode<'_, '_> {
         };
         let layout_width = data.layout.size.width;
         let layout_height = data.layout.size.height;
-        let center = [
-            location.x + layout_width * 0.5,
-            location.y + layout_height * 0.5,
-        ];
-        let world_transform = multiply_transform(
-            parent_transform,
-            anchored_transform(render_node.style.transform.into(), center),
-        );
-        let relative_transform = relative_transform(world_transform, center);
         // Taffy correctly applies the body's CSS content-box sizing when
         // resolving containing blocks. The retained root paint box, however,
         // represents the window surface and must stop at the viewport edge so
@@ -124,6 +115,12 @@ impl LayoutNode<'_, '_> {
         } else {
             (layout_width, layout_height)
         };
+        let center = [location.x + width * 0.5, location.y + height * 0.5];
+        let world_transform = multiply_transform(
+            parent_transform,
+            anchored_transform(render_node.style.transform.into(), center),
+        );
+        let relative_transform = relative_transform(world_transform, center);
         let mut descendant_clips = ancestor_clips.to_vec();
         let mut own_clip =
             overflow_clip(data, &render_node.style, location, width, height, viewport);
