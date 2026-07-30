@@ -163,6 +163,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[ignore = "known bug: moves under the id-null documentElement update only the JavaScript tree"]
+    async fn moving_connected_node_under_document_element_keeps_trees_consistent() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        let state: Vec<u64> = runtime
+            .eval(
+                r##"
+                (() => {
+                  const card = document.createElement("div");
+                  document.body.appendChild(card);
+
+                  let rejected = false;
+                  try {
+                    document.documentElement.appendChild(card);
+                  } catch {
+                    rejected = true;
+                  }
+
+                  const javascriptConsistent = rejected
+                    ? card.parentNode === document.body && document.body.firstChild === card
+                    : card.parentNode === document.documentElement &&
+                      !document.body.childNodes.includes(card);
+                  return [
+                    card.__burokkuId,
+                    rejected ? 1 : 0,
+                    javascriptConsistent ? 1 : 0,
+                  ];
+                })()
+                "##,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state[2], 1,
+            "the JavaScript move should be internally consistent"
+        );
+        let snapshot = store.snapshot();
+        let card = snapshot.node(state[0]).unwrap();
+        let native_consistent = if state[1] == 1 {
+            snapshot.body().children == [state[0]] && card.parent == Some(elements::BODY_ID)
+        } else {
+            snapshot.body().children.is_empty() && card.parent.is_none()
+        };
+        assert!(
+            native_consistent,
+            "the native tree must match either a rejected move or a detached accepted move"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn replacing_a_node_with_itself_is_a_noop() {
         let store = UiStore::new();
         let host_store = store.clone();
