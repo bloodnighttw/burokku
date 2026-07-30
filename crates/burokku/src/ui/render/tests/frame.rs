@@ -494,6 +494,60 @@ fn scales_geometry_and_paint_styles_for_physical_pixels() {
 }
 
 #[test]
+#[ignore = "known bug: per-side border widths are collapsed to one uniform paint width"]
+fn preserves_one_sided_border_widths_in_paint_commands() {
+    let mut document = Document::new();
+    let card = document.create_node(ElementKind::Div);
+    document.set_style(card, "width", Some("100px")).unwrap();
+    document.set_style(card, "height", Some("50px")).unwrap();
+    document
+        .set_style(card, "border-left-width", Some("10px"))
+        .unwrap();
+    document.insert(BODY_ID, card, None).unwrap();
+
+    let frame = build_frame(&document, 800.0, 600.0, 1.0, &mut TextSystem::new());
+    let card_layout = &frame.layout.kind.children()[0];
+    assert_eq!((card_layout.width, card_layout.height), (110.0, 50.0));
+
+    let border_paints_at = |x: f32, y: f32| {
+        ordered_commands(&frame.canvas)
+            .into_iter()
+            .any(|command| match command {
+                DrawCommand::Decoration {
+                    rect,
+                    decoration: BoxDecoration::Border(border),
+                    ..
+                } if border.color == Color::BLACK && rect.contains(x, y) => {
+                    x < rect.x + border.width
+                        || x >= rect.x + rect.width - border.width
+                        || y < rect.y + border.width
+                        || y >= rect.y + rect.height - border.width
+                }
+                DrawCommand::Decoration {
+                    rect,
+                    decoration: BoxDecoration::Background { color, .. },
+                    ..
+                } => *color == Color::BLACK && rect.contains(x, y),
+                _ => false,
+            })
+    };
+
+    assert!(border_paints_at(5.0, 25.0), "left edge should be painted");
+    assert!(
+        !border_paints_at(55.0, 5.0),
+        "top edge should remain unpainted"
+    );
+    assert!(
+        !border_paints_at(105.0, 25.0),
+        "right edge should remain unpainted"
+    );
+    assert!(
+        !border_paints_at(55.0, 45.0),
+        "bottom edge should remain unpainted"
+    );
+}
+
+#[test]
 #[ignore = "known bug: offset-shadow culling uses the expanded bounds center as the transform origin"]
 fn transformed_offset_shadow_uses_the_element_origin_when_culling() {
     let mut document = Document::new();

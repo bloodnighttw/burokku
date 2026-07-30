@@ -254,6 +254,26 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: text and comment nodes can adopt children"]
+    fn leaf_nodes_reject_child_insertion_without_moving_the_child() {
+        for kind in [
+            ElementKind::Text("leaf".into()),
+            ElementKind::Comment("leaf".into()),
+        ] {
+            let mut document = Document::new();
+            let leaf = document.create_node(kind);
+            let child = document.create_node(ElementKind::Div);
+            document.insert(BODY_ID, leaf, None).unwrap();
+            document.insert(BODY_ID, child, None).unwrap();
+
+            assert!(document.insert(leaf, child, None).is_err());
+            assert_eq!(document.body().children, [leaf, child]);
+            assert!(document.node(leaf).unwrap().children.is_empty());
+            assert_eq!(document.node(child).unwrap().parent, Some(BODY_ID));
+        }
+    }
+
+    #[test]
     fn element_names_map_to_semantic_kinds() {
         assert_eq!(ElementKind::from("BUTTON".to_owned()), ElementKind::Button);
         assert_eq!(ElementKind::from("h3".to_owned()), ElementKind::Heading(3));
