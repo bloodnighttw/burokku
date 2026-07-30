@@ -294,6 +294,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[ignore = "known bug: cloneNode reapplies styles removed through CSSOM"]
+    async fn cloning_does_not_resurrect_removed_style_attributes() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        let javascript_widths: Vec<String> = runtime
+            .eval(
+                r##"
+                (() => {
+                  const source = document.createElement("div");
+                  source.setAttribute("style", "width: 10px");
+                  source.style.removeProperty("width");
+                  const clone = source.cloneNode();
+                  document.body.append(source, clone);
+                  return [source.style.width, clone.style.width];
+                })()
+                "##,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(javascript_widths, ["", ""]);
+        let snapshot = store.snapshot();
+        let source = snapshot.node(snapshot.body().children[0]).unwrap();
+        let clone = snapshot.node(snapshot.body().children[1]).unwrap();
+        assert_eq!(source.style.width, elements::styles::SizeValue::Auto);
+        assert_eq!(clone.style.width, elements::styles::SizeValue::Auto);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[ignore = "known bug: DocumentFragment insertion validates and moves children incrementally"]
     async fn rejected_document_fragment_insertion_is_atomic() {
         let store = UiStore::new();

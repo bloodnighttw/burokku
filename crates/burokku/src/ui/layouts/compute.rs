@@ -344,6 +344,30 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: rich-text normalization ignores nested white-space overrides"]
+    fn nested_text_preserves_its_own_white_space_mode() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::TextElement);
+        let preserved = document.create_node(ElementKind::TextElement);
+        let text = document.create_node(ElementKind::Text("a  b".into()));
+        document
+            .set_style(preserved, "white-space", Some("pre"))
+            .unwrap();
+        document.insert(BODY_ID, line, None).unwrap();
+        document.insert(line, preserved, None).unwrap();
+        document.insert(preserved, text, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let LayoutKind::Text { text, spans, .. } = &layout.children()[0].kind else {
+            panic!("nested text should become one rich text layout");
+        };
+
+        assert_eq!(text, "a  b");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "a  b");
+    }
+
+    #[test]
     fn jsx_text_fragments_and_variables_share_a_nowrap_line() {
         let mut document = Document::new();
         let line = document.create_node(ElementKind::TextElement);

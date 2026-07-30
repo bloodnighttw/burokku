@@ -679,6 +679,18 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: text-decoration shorthand retains an omitted previous color"]
+    fn text_decoration_shorthand_resets_an_omitted_color() {
+        let mut style = Style::default();
+        set_style(&mut style, "text-decoration", Some("underline red")).unwrap();
+        assert_eq!(style.text_decoration_color, Some([255, 0, 0, 255]));
+
+        set_style(&mut style, "text-decoration", Some("line-through")).unwrap();
+
+        assert_eq!(style.text_decoration_color, None);
+    }
+
+    #[test]
     fn expands_box_and_gap_shorthands() {
         let mut style = Style::default();
         set_style(&mut style, "padding", Some("1px 2px 3px 4px")).unwrap();
