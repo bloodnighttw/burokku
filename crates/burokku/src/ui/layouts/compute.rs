@@ -102,6 +102,7 @@ fn configure_viewport(tree: &mut LayoutNode<'_, '_>, viewport: Size<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::layouts::ScrollbarAxis;
     use render::{Color, FontFamily, FontStyle, TextAlign, TextConstraints, TextWrap};
 
     #[test]
@@ -255,6 +256,36 @@ mod tests {
         assert_eq!(style.text_align, TextAlign::Right);
         assert_eq!(style.letter_spacing, 2.0);
         assert_eq!(style.word_spacing, 4.0);
+    }
+
+    #[test]
+    #[ignore = "known bug: inherited unitless line-height is frozen instead of scaling with descendant font-size"]
+    fn inherited_unitless_line_height_scales_with_descendant_font_size() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Div);
+        let text = document.create_node(ElementKind::Text("scaled line height".into()));
+        document
+            .set_style(parent, "font-size", Some("10px"))
+            .unwrap();
+        document
+            .set_style(parent, "line-height", Some("2"))
+            .unwrap();
+        document
+            .set_style(child, "font-size", Some("20px"))
+            .unwrap();
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, child, None).unwrap();
+        document.insert(child, text, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let text = &layout.children()[0].children()[0].children()[0];
+        let LayoutKind::Text { style, .. } = &text.kind else {
+            panic!("descendant should be text");
+        };
+
+        assert_eq!(style.font_size, 20.0);
+        assert_eq!(style.line_height, 40.0);
     }
 
     #[test]
@@ -886,6 +917,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: body margins shift the viewport-sized retained root"]
+    fn body_margins_do_not_shift_the_retained_viewport_root() {
+        let mut document = Document::new();
+        document
+            .set_style(BODY_ID, "margin-left", Some("30px"))
+            .unwrap();
+        document
+            .set_style(BODY_ID, "margin-top", Some("20px"))
+            .unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+
+        assert_eq!(
+            (layout.x, layout.y, layout.width, layout.height),
+            (0.0, 0.0, 300.0, 200.0)
+        );
+    }
+
+    #[test]
     fn body_transform_uses_the_retained_viewport_center_for_descendants_and_clips() {
         let mut document = Document::new();
         let child = document.create_node(ElementKind::Div);
@@ -1048,6 +1098,85 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: retained scrolling does not rebase cumulative transforms"]
+    fn retained_scrolling_under_a_transformed_ancestor_matches_a_full_rebuild() {
+        let mut document = Document::new();
+        let transformed = document.create_node(ElementKind::Div);
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "100px"),
+            ("transform", "rotate(90deg)"),
+        ] {
+            document
+                .set_style(transformed, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document.set_style(content, "width", Some("20px")).unwrap();
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document.insert(BODY_ID, transformed, None).unwrap();
+        document.insert(transformed, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+
+        let requested = ScrollOffset::new(0.0, 30.0);
+        let mut retained = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        assert!(retained.apply_scroll_offset(scroller, requested));
+        let rebuilt = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(scroller, requested)]),
+        );
+        let retained_content = &retained.children()[0].children()[0].children()[0];
+        let rebuilt_content = &rebuilt.children()[0].children()[0].children()[0];
+
+        assert_eq!(retained_content.transform, rebuilt_content.transform);
+        assert_eq!(retained_content.clips, rebuilt_content.clips);
+    }
+
+    #[test]
+    #[ignore = "known bug: scroll extent ignores overflow from nested descendants"]
+    fn descendant_overflow_through_a_smaller_wrapper_contributes_to_scroll_extent() {
+        let mut document = Document::new();
+        let scroller = document.create_node(ElementKind::Div);
+        let wrapper = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-x", "auto"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document.set_style(wrapper, "width", Some("50px")).unwrap();
+        document.set_style(content, "width", Some("200px")).unwrap();
+        document.set_style(content, "height", Some("10px")).unwrap();
+        document.insert(BODY_ID, scroller, None).unwrap();
+        document.insert(scroller, wrapper, None).unwrap();
+        document.insert(wrapper, content, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let scroll = layout.children()[0]
+            .scroll
+            .expect("overflow-x: auto should retain a scroll container");
+
+        assert_eq!(scroll.content_width, 200.0);
+        assert_eq!(scroll.max_offset.x, 100.0);
+        assert!(scroll.horizontal.is_some());
+    }
+
+    #[test]
     fn absolute_descendants_keep_dom_scroll_and_clip_state() {
         let mut document = Document::new();
         let positioned = document.create_node(ElementKind::Div);
@@ -1188,6 +1317,48 @@ mod tests {
         assert_eq!(child.clips.len(), 1);
         assert!(child.clips[0].contains(95.0, 10.0));
         assert!(!child.clips[0].contains(10.0, 120.0));
+    }
+
+    #[test]
+    #[ignore = "known bug: scroll hit testing ignores the container transform"]
+    fn transformed_scroll_container_and_scrollbar_hit_test_at_visual_coordinates() {
+        let mut document = Document::new();
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+            ("transform", "translateX(100px)"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document.insert(BODY_ID, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let scroll = layout.children()[0]
+            .scroll
+            .expect("overflow-y: scroll should retain a scroll container");
+        let vertical = scroll.vertical.expect("vertical scrollbar");
+        let raw_x = vertical.track.x + vertical.track.width * 0.5;
+        let y = vertical.track.y + vertical.track.height * 0.5;
+        let visual_x = raw_x + 100.0;
+
+        assert_eq!(
+            (
+                layout
+                    .scroll_container_at(visual_x, y)
+                    .map(Layout::element_id),
+                scroll.scrollbar_at(visual_x, y).map(|bar| bar.axis),
+                layout.scroll_container_at(raw_x, y).map(Layout::element_id),
+                scroll.scrollbar_at(raw_x, y).map(|bar| bar.axis),
+            ),
+            (Some(scroller), Some(ScrollbarAxis::Vertical), None, None,)
+        );
     }
 
     #[test]

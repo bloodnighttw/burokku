@@ -200,4 +200,99 @@ mod tests {
         assert_eq!(parent.children, [child_id]);
         assert_eq!(snapshot.node(child_id).unwrap().parent, Some(parent_id));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "known bug: rejected CSSOM writes update the JavaScript style map before native validation"]
+    async fn rejected_style_write_preserves_javascript_and_native_values() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        let javascript_width: String = runtime
+            .eval(
+                r##"
+                (() => {
+                  const card = document.createElement("div");
+                  card.style.width = "10px";
+                  document.body.appendChild(card);
+                  try {
+                    card.style.width = "bogus";
+                  } catch {}
+                  return card.style.width;
+                })()
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        let card = snapshot.node(snapshot.body().children[0]).unwrap();
+        assert_eq!(
+            card.style.width,
+            elements::styles::SizeValue::Px(10.0),
+            "native validation should preserve the previous width"
+        );
+        assert_eq!(
+            javascript_width, "10px",
+            "the JavaScript CSSOM should roll back a rejected write"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "known bug: DocumentFragment insertion validates and moves children incrementally"]
+    async fn rejected_document_fragment_insertion_is_atomic() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        let state: Vec<u64> = runtime
+            .eval(
+                r##"
+                (() => {
+                  const parent = document.createElement("div");
+                  const preserved = document.createElement("div");
+                  const inserted = document.createElement("div");
+                  const fragment = document.createDocumentFragment();
+                  parent.appendChild(preserved);
+                  document.body.appendChild(parent);
+                  fragment.appendChild(inserted);
+                  fragment.appendChild(parent);
+
+                  let rejected = false;
+                  try {
+                    parent.appendChild(fragment);
+                  } catch {
+                    rejected = true;
+                  }
+
+                  const unchanged =
+                    rejected &&
+                    fragment.childNodes.length === 2 &&
+                    fragment.childNodes[0] === inserted &&
+                    fragment.childNodes[1] === parent &&
+                    inserted.parentNode === fragment &&
+                    parent.childNodes.length === 1 &&
+                    parent.firstChild === preserved;
+                  return [
+                    parent.__burokkuId,
+                    preserved.__burokkuId,
+                    inserted.__burokkuId,
+                    unchanged ? 1 : 0,
+                  ];
+                })()
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        let native_unchanged = snapshot.node(state[0]).unwrap().children == [state[1]]
+            && snapshot.node(state[2]).unwrap().parent.is_none();
+        assert!(
+            state[3] == 1 && native_unchanged,
+            "a rejected fragment insertion must preserve both trees"
+        );
+    }
 }
