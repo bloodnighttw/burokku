@@ -67,11 +67,18 @@
         throw new Error("The reference node is not a child of this node");
       }
       if (child === before) return child;
+      const oldParent = child.parentNode;
       if (this.__burokkuId !== null && child.__burokkuId !== null) {
         __burokku_dom_insert(this.__burokkuId, child.__burokkuId, before?.__burokkuId ?? -1);
+      } else if (
+        this.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+        child.__burokkuId !== null &&
+        oldParent !== null &&
+        oldParent.__burokkuId !== null
+      ) {
+        __burokku_dom_remove(oldParent.__burokkuId, child.__burokkuId);
       }
-      if (child.parentNode) {
-        const oldParent = child.parentNode;
+      if (oldParent) {
         oldParent.childNodes.splice(oldParent.childNodes.indexOf(child), 1);
       }
       const index = before === null ? this.childNodes.length : this.childNodes.indexOf(before);
