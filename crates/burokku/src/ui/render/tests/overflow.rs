@@ -510,3 +510,49 @@ fn canvas_culls_boxes_outside_the_scroll_clip() {
     assert!(!backgrounds.contains(&Color::from_rgba8(0, 0xff, 0, 0xff)));
     assert!(backgrounds.contains(&Color::from_rgba8(0, 0, 0xff, 0xff)));
 }
+
+#[test]
+#[ignore = "known bug: transformed scrollbar culling mixes local and world coordinate spaces"]
+fn transformed_scrollbars_remain_painted_when_the_transform_makes_them_visible() {
+    let mut document = Document::new();
+    let container = document.create_node(ElementKind::Div);
+    let content = document.create_node(ElementKind::Div);
+    for (property, value) in [
+        ("position", "absolute"),
+        ("left", "400px"),
+        ("top", "0px"),
+        ("width", "100px"),
+        ("height", "60px"),
+        ("overflow", "scroll"),
+        ("transform", "translateX(-400px)"),
+    ] {
+        document
+            .set_style(container, property, Some(value))
+            .unwrap();
+    }
+    document.set_style(content, "width", Some("240px")).unwrap();
+    document
+        .set_style(content, "height", Some("180px"))
+        .unwrap();
+    document.insert(BODY_ID, container, None).unwrap();
+    document.insert(container, content, None).unwrap();
+
+    let frame = build_frame(&document, 300.0, 200.0, 1.0, &mut TextSystem::new());
+    let scrollbar_commands = ordered_commands(&frame.canvas)
+        .into_iter()
+        .filter(|command| {
+            matches!(
+                command,
+                DrawCommand::Decoration {
+                    layer: PaintLayer::Scrollbar,
+                    ..
+                }
+            )
+        })
+        .count();
+
+    assert_eq!(
+        scrollbar_commands, 4,
+        "both tracks and both thumbs should paint after translation into the viewport"
+    );
+}

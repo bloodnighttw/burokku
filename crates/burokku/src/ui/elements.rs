@@ -214,6 +214,10 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime::{
+        rquickjs::{Ctx, Function},
+        Runtime,
+    };
 
     #[test]
     fn nodes_can_be_moved_detached_and_reattached() {
@@ -264,6 +268,49 @@ mod tests {
         assert_eq!(
             ElementKind::from("CUSTOM-CARD".to_owned()),
             ElementKind::Other("custom-card".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "known bug: collected detached DOM wrappers leave their native nodes in every snapshot"]
+    async fn collected_detached_wrappers_release_native_nodes() {
+        let store = crate::ui::UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| {
+            crate::ui::install(context, host_store)?;
+            context.globals().set(
+                "__test_collect_garbage",
+                Function::new(context.clone(), |context: Ctx<'_>| context.run_gc())?,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        runtime
+            .eval::<()>(
+                r##"
+                (() => {
+                  for (let index = 0; index < 128; index += 1) {
+                    const node = document.createElement("div");
+                    document.body.appendChild(node);
+                    node.remove();
+                  }
+                })();
+                "##,
+            )
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>("__test_collect_garbage()")
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        assert_eq!(
+            snapshot.nodes.len(),
+            1,
+            "only the body should remain after unreachable detached wrappers are collected"
         );
     }
 }

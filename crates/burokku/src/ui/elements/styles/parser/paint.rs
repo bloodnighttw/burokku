@@ -798,3 +798,17 @@ pub(super) fn named_color(value: &str) -> Option<u32> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "known bug: malformed non-ASCII hex colors panic instead of returning InvalidValue"]
+    fn non_ascii_hex_color_returns_invalid_value() {
+        assert!(matches!(
+            parse_color("color", "#€aaa"),
+            Err(StyleError::InvalidValue(_, _))
+        ));
+    }
+}

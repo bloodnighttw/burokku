@@ -426,3 +426,38 @@ fn scales_geometry_and_paint_styles_for_physical_pixels() {
     assert_eq!(border.width, 4.0);
     assert_eq!(style.corner_radius.top_left, 8.0);
 }
+
+#[test]
+#[ignore = "known bug: offset-shadow culling uses the expanded bounds center as the transform origin"]
+fn transformed_offset_shadow_uses_the_element_origin_when_culling() {
+    let mut document = Document::new();
+    let card = document.create_node(ElementKind::Div);
+    for (property, value) in [
+        ("position", "absolute"),
+        ("left", "200px"),
+        ("top", "20px"),
+        ("width", "10px"),
+        ("height", "10px"),
+        ("box-shadow", "100px 0 0 0 red"),
+        ("transform", "rotate(180deg)"),
+    ] {
+        document.set_style(card, property, Some(value)).unwrap();
+    }
+    document.insert(BODY_ID, card, None).unwrap();
+
+    // Rotating around the 10px box's center moves the offset shadow from
+    // x=300..310 to x=100..110, which is inside this 150px viewport.
+    let canvas = build_canvas(&document, 150.0, 80.0, 1.0, &mut TextSystem::new());
+    assert!(
+        ordered_commands(&canvas).into_iter().any(|command| {
+            matches!(
+                command,
+                DrawCommand::Decoration {
+                    decoration: BoxDecoration::Shadow(_),
+                    ..
+                }
+            )
+        }),
+        "the visible transformed shadow must not be culled"
+    );
+}
