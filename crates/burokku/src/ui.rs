@@ -96,4 +96,69 @@ mod tests {
         assert_eq!(parent.parent, Some(elements::BODY_ID));
         assert_eq!(snapshot.node(child_id).unwrap().parent, Some(parent_id));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn moving_connected_node_into_fragment_detaches_the_native_node() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>(
+                r##"
+                globalThis.__testMovedNode = document.createElement("div");
+                document.body.appendChild(globalThis.__testMovedNode);
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let child_id = store.snapshot().body().children[0];
+        runtime
+            .eval::<()>(
+                r##"
+                globalThis.__testFragment = document.createDocumentFragment();
+                globalThis.__testFragment.appendChild(globalThis.__testMovedNode);
+
+                if (document.body.firstChild !== null) {
+                  throw new Error("fragment move left the child under the body");
+                }
+                if (globalThis.__testMovedNode.parentNode !== globalThis.__testFragment) {
+                  throw new Error("fragment did not become the JavaScript parent");
+                }
+                if (globalThis.__testMovedNode.isConnected) {
+                  throw new Error("node in a fragment should be disconnected");
+                }
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let detached = store.snapshot();
+        assert!(detached.body().children.is_empty());
+        assert_eq!(detached.node(child_id).unwrap().parent, None);
+
+        runtime
+            .eval::<()>(
+                r##"
+                document.body.appendChild(globalThis.__testFragment);
+                if (document.body.firstChild !== globalThis.__testMovedNode) {
+                  throw new Error("fragment child was not reattached");
+                }
+                if (globalThis.__testFragment.firstChild !== null) {
+                  throw new Error("inserted fragment should be empty");
+                }
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let reattached = store.snapshot();
+        assert_eq!(reattached.body().children, [child_id]);
+        assert_eq!(
+            reattached.node(child_id).unwrap().parent,
+            Some(elements::BODY_ID)
+        );
+    }
 }
