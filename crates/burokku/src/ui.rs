@@ -161,4 +161,43 @@ mod tests {
             Some(elements::BODY_ID)
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replacing_a_node_with_itself_is_a_noop() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>(
+                r##"
+                const parent = document.createElement("div");
+                const child = document.createElement("div");
+                document.body.appendChild(parent);
+                parent.appendChild(child);
+
+                const replaced = parent.replaceChild(child, child);
+                if (replaced !== child) {
+                  throw new Error("replaceChild should return the replaced node");
+                }
+                if (child.parentNode !== parent) {
+                  throw new Error("self-replacement detached the child");
+                }
+                if (parent.childNodes.length !== 1 || parent.firstChild !== child) {
+                  throw new Error("self-replacement changed the parent's children");
+                }
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        let parent_id = snapshot.body().children[0];
+        let parent = snapshot.node(parent_id).unwrap();
+        let child_id = parent.children[0];
+
+        assert_eq!(parent.children, [child_id]);
+        assert_eq!(snapshot.node(child_id).unwrap().parent, Some(parent_id));
+    }
 }
