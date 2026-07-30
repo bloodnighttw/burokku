@@ -100,7 +100,7 @@
 
     replaceChild(next, previous) {
       this.insertBefore(next, previous);
-      this.removeChild(previous);
+      if (next !== previous) this.removeChild(previous);
       return previous;
     }
 
