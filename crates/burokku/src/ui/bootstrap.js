@@ -67,6 +67,9 @@
         throw new Error("The reference node is not a child of this node");
       }
       if (child === before) return child;
+      if (this.__burokkuId !== null && child.__burokkuId !== null) {
+        __burokku_dom_insert(this.__burokkuId, child.__burokkuId, before?.__burokkuId ?? -1);
+      }
       if (child.parentNode) {
         const oldParent = child.parentNode;
         oldParent.childNodes.splice(oldParent.childNodes.indexOf(child), 1);
@@ -74,9 +77,6 @@
       const index = before === null ? this.childNodes.length : this.childNodes.indexOf(before);
       this.childNodes.splice(index, 0, child);
       child.parentNode = this;
-      if (this.__burokkuId !== null && child.__burokkuId !== null) {
-        __burokku_dom_insert(this.__burokkuId, child.__burokkuId, before?.__burokkuId ?? -1);
-      }
       return child;
     }
 

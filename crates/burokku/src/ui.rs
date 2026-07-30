@@ -50,4 +50,50 @@ mod tests {
             ElementKind::Text("after".into())
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_dom_insert_preserves_the_javascript_and_native_trees() {
+        let store = UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| install(context, host_store))
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>(
+                r##"
+                const parent = document.createElement("div");
+                const child = document.createElement("div");
+                document.body.appendChild(parent);
+                parent.appendChild(child);
+
+                let rejected = false;
+                try {
+                  child.appendChild(parent);
+                } catch {
+                  rejected = true;
+                }
+
+                if (!rejected) throw new Error("cyclic insertion should be rejected");
+                if (parent.parentNode !== document.body) {
+                  throw new Error("rejected insertion moved the parent");
+                }
+                if (child.parentNode !== parent) {
+                  throw new Error("rejected insertion detached the child");
+                }
+                if (document.body.firstChild !== parent || parent.firstChild !== child) {
+                  throw new Error("rejected insertion changed child order");
+                }
+                "##,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        let parent_id = snapshot.body().children[0];
+        let parent = snapshot.node(parent_id).unwrap();
+        let child_id = parent.children[0];
+
+        assert_eq!(parent.parent, Some(elements::BODY_ID));
+        assert_eq!(snapshot.node(child_id).unwrap().parent, Some(parent_id));
+    }
 }
