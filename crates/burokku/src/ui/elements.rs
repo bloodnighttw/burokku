@@ -271,6 +271,19 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "known bug: rejected opacity writes mutate the document before returning an error"]
+    fn rejected_opacity_write_preserves_document_value() {
+        let mut document = Document::new();
+        let element = document.create_node(ElementKind::Div);
+        document
+            .set_style(element, "opacity", Some("0.35"))
+            .unwrap();
+
+        assert!(document.set_style(element, "opacity", Some("1.1")).is_err());
+        assert_eq!(document.node(element).unwrap().style.opacity, 0.35);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "known bug: collected detached DOM wrappers leave their native nodes in every snapshot"]
     async fn collected_detached_wrappers_release_native_nodes() {
