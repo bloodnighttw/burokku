@@ -1144,4 +1144,23 @@ mod tests {
         assert!(set_style(&mut style, "grid-row", Some("1 / 2 / 3")).is_err());
         assert!(set_style(&mut style, "grid-area", Some("0")).is_err());
     }
+
+    #[test]
+    #[ignore = "known bug: single-value named grid-axis shorthands leave the end placement auto"]
+    fn named_grid_axis_shorthands_repeat_custom_identifiers() {
+        let mut style = Style::default();
+
+        set_style(&mut style, "grid-row", Some("hero")).unwrap();
+        set_style(&mut style, "grid-column", Some("content")).unwrap();
+
+        assert_eq!(
+            (
+                style.grid_row_start.as_deref(),
+                style.grid_row_end.as_deref(),
+                style.grid_column_start.as_deref(),
+                style.grid_column_end.as_deref(),
+            ),
+            (Some("hero"), Some("hero"), Some("content"), Some("content"),)
+        );
+    }
 }

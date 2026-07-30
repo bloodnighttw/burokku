@@ -351,6 +351,72 @@ fn decorates_only_the_styled_nested_text() {
 }
 
 #[test]
+#[ignore = "known bug: nested text span opacity is retained but not consumed by paint commands"]
+fn nested_text_element_opacity_applies_to_its_decorations() {
+    fn collect_effective_decoration_alpha(
+        canvas: &Canvas,
+        target: Color,
+        inherited_opacity: f32,
+        output: &mut Vec<f32>,
+    ) {
+        for command in canvas.commands() {
+            match command {
+                DrawCommand::Decoration {
+                    decoration: BoxDecoration::Background { color, .. },
+                    style,
+                    ..
+                } if *color == target => {
+                    output.push(inherited_opacity * style.opacity * color.alpha);
+                }
+                DrawCommand::Group {
+                    canvas, opacity, ..
+                } => collect_effective_decoration_alpha(
+                    canvas,
+                    target,
+                    inherited_opacity * opacity,
+                    output,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    let mut document = Document::new();
+    let line = document.create_node(ElementKind::TextElement);
+    let before = document.create_node(ElementKind::Text("before ".into()));
+    let hidden = document.create_node(ElementKind::TextElement);
+    let hidden_text = document.create_node(ElementKind::Text("hidden".into()));
+    let after = document.create_node(ElementKind::Text(" after".into()));
+    document.set_style(hidden, "opacity", Some("0")).unwrap();
+    document
+        .set_style(hidden, "text-decoration", Some("underline #7c3aed"))
+        .unwrap();
+    document.insert(BODY_ID, line, None).unwrap();
+    document.insert(line, before, None).unwrap();
+    document.insert(line, hidden, None).unwrap();
+    document.insert(hidden, hidden_text, None).unwrap();
+    document.insert(line, after, None).unwrap();
+
+    let frame = build_frame(&document, 300.0, 100.0, 1.0, &mut TextSystem::new());
+    let mut decoration_alpha = Vec::new();
+    collect_effective_decoration_alpha(
+        &frame.canvas,
+        Color::from_rgba8(0x7c, 0x3a, 0xed, 0xff),
+        1.0,
+        &mut decoration_alpha,
+    );
+
+    assert!(
+        !decoration_alpha.is_empty(),
+        "the nested underlined span should produce a decoration"
+    );
+    assert!(
+        decoration_alpha.iter().all(|alpha| *alpha <= f32::EPSILON),
+        "opacity: 0 must make every nested-span decoration transparent, got {decoration_alpha:?}"
+    );
+}
+
+#[test]
 fn wrapped_centered_decorations_follow_each_shaped_line() {
     let mut document = Document::new();
     let container = document.create_node(ElementKind::Div);
