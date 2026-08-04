@@ -61,7 +61,7 @@ impl<'a> Iterator for ElementsIter<'a> {
 
 impl FusedIterator for ElementsIter<'_> {}
 
-fn accepts_child(parent: &Elements, child: &Elements) -> bool {
+pub(super) fn accepts_child(parent: &Elements, child: &Elements) -> bool {
     match parent {
         Elements::App { .. } => matches!(child, Elements::Window { .. }),
         Elements::Window { .. }
