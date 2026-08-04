@@ -1,5 +1,7 @@
 struct Composite {
-    screen_origin: vec4<f32>,
+    destination: vec4<f32>,
+    source: vec4<f32>,
+    effect: vec4<f32>,
     transform_x: vec4<f32>,
     transform_y: vec4<f32>,
 }
@@ -36,16 +38,17 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
     );
     let uv = corners[vertex_index];
-    let pixel = uv * composite.screen_origin.xy;
-    let relative = pixel - composite.screen_origin.zw;
-    let transformed = composite.screen_origin.zw + vec2(
+    let pixel = composite.source.xy + uv * composite.source.zw;
+    let relative = pixel - composite.effect.xy;
+    let transformed = composite.effect.xy + vec2(
         dot(composite.transform_x.xy, relative) + composite.transform_x.z,
         dot(composite.transform_y.xy, relative) + composite.transform_y.z,
     );
+    let target_pixel = transformed - composite.destination.zw;
     var output: VertexOutput;
     output.position = vec4(
-        transformed.x / composite.screen_origin.x * 2.0 - 1.0,
-        1.0 - transformed.y / composite.screen_origin.y * 2.0,
+        target_pixel.x / composite.destination.x * 2.0 - 1.0,
+        1.0 - target_pixel.y / composite.destination.y * 2.0,
         0.0,
         1.0,
     );
@@ -69,9 +72,10 @@ fn rounded_box_distance(position: vec2<f32>, half_size: vec2<f32>, radii: vec4<f
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var clip_coverage = 1.0;
-    for (var index = 0u; index < u32(composite.transform_y.w); index += 1u) {
+    let pixel = input.position.xy + composite.destination.zw;
+    for (var index = 0u; index < u32(composite.effect.w); index += 1u) {
         let clip = clips[index];
-        let relative = input.position.xy - clip.center;
+        let relative = pixel - clip.center;
         let local = vec2(
             dot(clip.inverse_x.xy, relative) + clip.inverse_x.z,
             dot(clip.inverse_y.xy, relative) + clip.inverse_y.z,
@@ -91,6 +95,6 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if color.a > 0.0001 {
         color = vec4(color.rgb / color.a, color.a);
     }
-    color.a *= composite.transform_x.w * clip_coverage;
+    color.a *= composite.effect.z * clip_coverage;
     return color;
 }

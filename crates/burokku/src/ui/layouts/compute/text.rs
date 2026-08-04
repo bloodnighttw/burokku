@@ -1,17 +1,16 @@
 use render::{
-    FontFamily, FontStyle, TextAlign, TextDecorationLine, TextOverflowWrap, TextShadow, TextSpan,
-    TextStyle, TextWhiteSpace, TextWordBreak, TextWrap, Transform,
+    FontFamily, TextOverflowWrap, TextSpan, TextStyle, TextWhiteSpace, TextWordBreak, TextWrap,
+    Transform,
 };
 
-use crate::ui::elements::styles::{
-    FontStyleValue, LengthPercentageValue, LineHeightValue, OverflowWrapValue,
-    Style as ElementStyle, TextAlignValue, TextDecorationLineValue, WhiteSpaceValue,
-    WordBreakValue,
-};
+use crate::ui::elements::styles::{LengthPercentageValue, LineHeightValue, Style as ElementStyle};
 
 use super::paint::rgba;
 
-pub(super) fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> TextStyle {
+pub(in crate::ui::layouts) fn merge_text_style(
+    parent: &TextStyle,
+    style: &ElementStyle,
+) -> TextStyle {
     let mut merged = parent.clone();
     if let Some(color) = style.color {
         merged.color = rgba(color);
@@ -47,70 +46,36 @@ pub(super) fn merge_text_style(parent: &TextStyle, style: &ElementStyle) -> Text
             .collect();
     }
     if let Some(font_style) = style.font_style {
-        merged.font_style = match font_style {
-            FontStyleValue::Normal => FontStyle::Normal,
-            FontStyleValue::Italic => FontStyle::Italic,
-            FontStyleValue::Oblique => FontStyle::Oblique,
-        };
+        merged.font_style = font_style.into();
     }
     if let Some(text_align) = style.text_align {
-        merged.text_align = match text_align {
-            TextAlignValue::Start => TextAlign::Start,
-            TextAlignValue::End => TextAlign::End,
-            TextAlignValue::Left => TextAlign::Left,
-            TextAlignValue::Right => TextAlign::Right,
-            TextAlignValue::Center => TextAlign::Center,
-            TextAlignValue::Justify => TextAlign::Justify,
-        };
+        merged.text_align = text_align.into();
     }
     if let Some(letter_spacing) = style.letter_spacing {
-        merged.letter_spacing = letter_spacing.px();
+        merged.letter_spacing = letter_spacing.into();
     }
     if let Some(word_spacing) = style.word_spacing {
-        merged.word_spacing = word_spacing.px();
+        merged.word_spacing = word_spacing.into();
     }
     if let Some(line) = style.text_decoration_line {
-        merged.text_decoration_line = text_decoration_line(line);
+        merged.text_decoration_line = line.into();
     }
     if let Some(color) = style.text_decoration_color {
         merged.text_decoration_color = rgba(color);
         merged.text_decoration_color_is_current = false;
     }
     if let Some(white_space) = style.white_space {
-        merged.white_space = match white_space {
-            WhiteSpaceValue::Normal => TextWhiteSpace::Normal,
-            WhiteSpaceValue::NoWrap => TextWhiteSpace::NoWrap,
-            WhiteSpaceValue::Pre => TextWhiteSpace::Pre,
-            WhiteSpaceValue::PreWrap => TextWhiteSpace::PreWrap,
-            WhiteSpaceValue::PreLine => TextWhiteSpace::PreLine,
-            WhiteSpaceValue::BreakSpaces => TextWhiteSpace::BreakSpaces,
-        };
+        merged.white_space = white_space.into();
     }
     if let Some(overflow_wrap) = style.overflow_wrap {
-        merged.overflow_wrap = match overflow_wrap {
-            OverflowWrapValue::Normal => TextOverflowWrap::Normal,
-            OverflowWrapValue::BreakWord => TextOverflowWrap::BreakWord,
-            OverflowWrapValue::Anywhere => TextOverflowWrap::Anywhere,
-        };
+        merged.overflow_wrap = overflow_wrap.into();
     }
     if let Some(word_break) = style.word_break {
-        merged.word_break = match word_break {
-            WordBreakValue::Normal => TextWordBreak::Normal,
-            WordBreakValue::BreakAll => TextWordBreak::BreakAll,
-            WordBreakValue::KeepAll => TextWordBreak::KeepAll,
-        };
+        merged.word_break = word_break.into();
     }
     merged.opacity = style.opacity;
     merged.transform = Transform::IDENTITY;
-    merged.shadows = style
-        .text_shadow
-        .iter()
-        .map(|shadow| TextShadow {
-            offset: [shadow.offset_x, shadow.offset_y],
-            blur: shadow.blur,
-            color: rgba(shadow.color),
-        })
-        .collect();
+    merged.shadows = style.text_shadow.iter().copied().map(Into::into).collect();
     merged.wrap = resolve_text_wrap(&merged);
     merged
 }
@@ -148,30 +113,7 @@ fn font_family(family: &str) -> FontFamily {
     }
 }
 
-fn text_decoration_line(value: TextDecorationLineValue) -> TextDecorationLine {
-    let mut result = TextDecorationLine::NONE;
-    for (source, target) in [
-        (
-            TextDecorationLineValue::UNDERLINE,
-            TextDecorationLine::UNDERLINE,
-        ),
-        (
-            TextDecorationLineValue::OVERLINE,
-            TextDecorationLine::OVERLINE,
-        ),
-        (
-            TextDecorationLineValue::LINE_THROUGH,
-            TextDecorationLine::LINE_THROUGH,
-        ),
-    ] {
-        if value.contains(source) {
-            result = result.union(target);
-        }
-    }
-    result
-}
-
-pub(super) fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String {
+pub(in crate::ui::layouts) fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String {
     match mode {
         TextWhiteSpace::Pre | TextWhiteSpace::PreWrap | TextWhiteSpace::BreakSpaces => {
             text.to_owned()
@@ -181,7 +123,10 @@ pub(super) fn normalize_white_space(text: &str, mode: TextWhiteSpace) -> String 
     }
 }
 
-pub(super) fn normalize_text_spans(spans: &[TextSpan], mode: TextWhiteSpace) -> Vec<TextSpan> {
+pub(in crate::ui::layouts) fn normalize_text_spans(
+    spans: &[TextSpan],
+    mode: TextWhiteSpace,
+) -> Vec<TextSpan> {
     if matches!(
         mode,
         TextWhiteSpace::Pre | TextWhiteSpace::PreWrap | TextWhiteSpace::BreakSpaces

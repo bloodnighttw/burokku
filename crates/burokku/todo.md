@@ -11,8 +11,8 @@
 - [x] Propagate Glyphon text baselines into Taffy so baseline alignment is accurate.
 - [x] Recompute `line-height: normal` when the effective font size changes.
 - [ ] Support elliptical border radii and the `border-radius` slash syntax.
-- [ ] Distinguish `position: static` from `position: relative`.
-- [ ] Implement viewport-relative behavior for `position: fixed`.
+- [x] Distinguish `position: static` from `position: relative`.
+- [x] Implement viewport-relative behavior for `position: fixed`.
 
 ## Layout
 

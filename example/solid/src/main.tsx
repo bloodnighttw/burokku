@@ -39,7 +39,7 @@ function ScrollablePanel() {
               "border-radius": "8px",
             }}
           >
-            <span
+            <text
               style={{
                 color: "#263246",
                 "font-size": "14px",
@@ -49,7 +49,7 @@ function ScrollablePanel() {
               }}
             >
               Scroll item {index + 1} · drag either thumb or use the mouse wheel
-            </span>
+            </text>
           </div>
         ))}
       </div>
@@ -84,9 +84,9 @@ function FlexExample() {
             "border-radius": "7px",
           }}
         >
-          <span style={{ color: "#263246", "font-size": "14px", "line-height": "18px", "font-weight": 700 }}>
+          <text style={{ color: "#263246", "font-size": "14px", "line-height": "18px", "font-weight": 700 }}>
             {index === 1 ? "2×" : "1×"}
-          </span>
+          </text>
         </div>
       ))}
     </div>
@@ -126,11 +126,196 @@ function GridExample() {
             "border-radius": "7px",
           }}
         >
-          <span style={{ color: "#263246", "font-size": "14px", "line-height": "18px", "font-weight": 700 }}>
+          <text style={{ color: "#263246", "font-size": "14px", "line-height": "18px", "font-weight": 700 }}>
             {item.label}
-          </span>
+          </text>
         </div>
       ))}
+    </div>
+  );
+}
+
+function PositionExamples() {
+  const stageStyle = {
+    position: "relative",
+    height: "112px",
+    padding: "10px",
+    "background-color": "#eef2f7",
+    "border-color": "#c5cfdd",
+    "border-width": "2px",
+    "border-radius": "10px",
+  } as const;
+
+  const badgeStyle = {
+    display: "flex",
+    height: "24px",
+    padding: "6px",
+    color: "#ffffff",
+    "font-size": "12px",
+    "line-height": "16px",
+    "font-weight": 700,
+    "border-radius": "6px",
+  } as const;
+
+  return (
+    <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
+      <text
+        style={{
+          color: "#18202b",
+          "font-size": "20px",
+          "line-height": "26px",
+          "font-weight": 700,
+          "letter-spacing": "-0.3px",
+        }}
+      >
+        Positioning
+      </text>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <ExampleCard title="Static ignores inset · relative keeps flow">
+          <div style={stageStyle}>
+            <div
+              style={{
+                ...badgeStyle,
+                position: "static",
+                left: "180px",
+                top: "50px",
+                width: "112px",
+                "background-color": "#475569",
+              }}
+            >
+              <text>STATIC · left ignored</text>
+            </div>
+            <div
+              style={{
+                ...badgeStyle,
+                position: "relative",
+                left: "128px",
+                top: "6px",
+                width: "116px",
+                "background-color": "#7c3aed",
+              }}
+            >
+              <text>RELATIVE · shifted</text>
+            </div>
+            <div
+              style={{
+                ...badgeStyle,
+                width: "120px",
+                "background-color": "#0f766e",
+              }}
+            >
+              <text>SIBLING · flow intact</text>
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Absolute skips static wrappers">
+          <div style={stageStyle}>
+            <div
+              style={{
+                width: "118px",
+                height: "74px",
+                "margin-left": "24px",
+                padding: "8px",
+                "background-color": "#dbeafe",
+                "border-color": "#60a5fa",
+                "border-width": "1px",
+                "border-radius": "7px",
+              }}
+            >
+              <text style={{ color: "#1e40af", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
+                STATIC WRAPPER
+              </text>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "absolute",
+                  right: "10px",
+                  top: "10px",
+                  width: "104px",
+                  "background-color": "#dc2626",
+                }}
+              >
+                <text>ABS · outer right</text>
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+      </div>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <ExampleCard title="Absolute retains DOM scroll + clip">
+          <div style={stageStyle}>
+            <div
+              style={{
+                width: "100%",
+                height: "88px",
+                "overflow-y": "scroll",
+                "background-color": "#dbeafe",
+                "border-radius": "7px",
+              }}
+            >
+              <div style={{ height: "180px", padding: "8px", "background-color": "#eeeeee", }}>
+                <text style={{ color: "#1e40af", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
+                  Scroll this panel
+                </text>
+              </div>
+              <div style={{
+                  height: "400px",
+                  width: "240px",
+                  "background-color": "#ea580c",
+              }}>
+
+                <div
+                  style={{
+                    ...badgeStyle,
+                    position: "absolute",
+                    left: "32px",
+                    top: "76px",
+                    width: "142px",
+                    "background-color": "#ea580c",
+                  }}
+                >
+                  <text>ABsssS · moves + clips</text>
+                </div>
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+        <ExampleCard title="Transform contains fixed">
+          <div
+            style={{
+              ...stageStyle,
+              overflow: "hidden",
+              transform: "translateX(0px)",
+            }}
+          >
+            <div
+              style={{
+                width: "120px",
+                height: "58px",
+                padding: "8px",
+                "background-color": "#dcfce7",
+                "border-radius": "7px",
+              }}
+            >
+              <text style={{ color: "#166534", "font-size": "12px", "line-height": "16px", "font-weight": 700 }}>
+                STATIC DESCENDANT
+              </text>
+              <div
+                style={{
+                  ...badgeStyle,
+                  position: "fixed",
+                  right: "10px",
+                  bottom: "10px",
+                  width: "126px",
+                  "background-color": "#059669",
+                }}
+              >
+                <text>FIXED · transformed CB</text>
+              </div>
+            </div>
+          </div>
+        </ExampleCard>
+      </div>
     </div>
   );
 }
@@ -151,9 +336,9 @@ function ExampleCard(props: { title: string; children: JSX.Element }) {
         "border-radius": "12px",
       }}
     >
-      <span style={{ color: "#18202b", "font-size": "16px", "line-height": "22px", "font-weight": 700 }}>
+      <text style={{ color: "#18202b", "font-size": "16px", "line-height": "22px", "font-weight": 700 }}>
         {props.title}
-      </span>
+      </text>
       {props.children}
     </div>
   );
@@ -184,7 +369,7 @@ function TypographyExamples(props: { remaining: number }) {
 
   return (
     <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
-      <span
+      <text
         style={{
           color: "#18202b",
           "font-size": "20px",
@@ -194,11 +379,11 @@ function TypographyExamples(props: { remaining: number }) {
         }}
       >
         Typography
-      </span>
+      </text>
       <div style={{ display: "flex", gap: "12px" }}>
         <div style={panelStyle}>
-          <span style={labelStyle}>FONT STACK · STYLE · SPACING</span>
-          <span
+          <text style={labelStyle}>FONT STACK · STYLE · SPACING</text>
+          <text
             style={{
               color: "#312e81",
               "font-family": '"Charter", Georgia, serif',
@@ -210,8 +395,8 @@ function TypographyExamples(props: { remaining: number }) {
             }}
           >
             Fallback fonts stay expressive.
-          </span>
-          <span
+          </text>
+          <text
             style={{
               color: "#475569",
               "font-family": '"JetBrains Mono", monospace',
@@ -220,11 +405,11 @@ function TypographyExamples(props: { remaining: number }) {
             }}
           >
             "JetBrains Mono", monospace
-          </span>
+          </text>
         </div>
         <div style={panelStyle}>
-          <span style={labelStyle}>ALIGNMENT · DECORATION</span>
-          <div
+          <text style={labelStyle}>ALIGNMENT · DECORATION</text>
+          <text
             style={{
               width: "100%",
               color: "#0f766e",
@@ -236,8 +421,8 @@ function TypographyExamples(props: { remaining: number }) {
             }}
           >
             Centered, underlined, overlined
-          </div>
-          <div
+          </text>
+          <text
             style={{
               width: "100%",
               color: "#7c2d12",
@@ -249,13 +434,13 @@ function TypographyExamples(props: { remaining: number }) {
             }}
           >
             Right aligned with a custom color
-          </div>
+          </text>
         </div>
       </div>
       <div style={{ display: "flex", gap: "12px" }}>
         <div style={panelStyle}>
-          <span style={labelStyle}>WHITE-SPACE: PRE-WRAP</span>
-          <span
+          <text style={labelStyle}>WHITE-SPACE: PRE-WRAP</text>
+          <text
             style={{
               color: "#334155",
               "font-family": "monospace",
@@ -265,11 +450,11 @@ function TypographyExamples(props: { remaining: number }) {
             }}
           >
             {"spaces   remain\nline breaks remain too"}
-          </span>
+          </text>
         </div>
         <div style={panelStyle}>
-          <span style={labelStyle}>INLINE SPANS · REACTIVE TEXT</span>
-          <span
+          <text style={labelStyle}>NESTED TEXT · REACTIVE STYLES</text>
+          <text
             style={{
               width: "190px",
               color: "#334155",
@@ -279,11 +464,11 @@ function TypographyExamples(props: { remaining: number }) {
             }}
           >
             build/
-            <span style={{ color: "#7c3aed", "font-weight": 700 }}>
+            <text style={{ color: "#7c3aed", "font-weight": 700 }}>
               a-very-long-styled-identifier
-            </span>
+            </text>
             /
-            <span
+            <text
               style={{
                 color: props.remaining === 0 ? "#059669" : "#ea580c",
                 "font-weight": 700,
@@ -291,9 +476,9 @@ function TypographyExamples(props: { remaining: number }) {
               }}
             >
               {props.remaining}
-            </span>
-          </span>
-          <span
+            </text>
+          </text>
+          <text
             style={{
               width: "150px",
               color: "#64748b",
@@ -302,8 +487,8 @@ function TypographyExamples(props: { remaining: number }) {
               "word-break": "break-all",
             }}
           >
-            mode:<span style={{ color: "#0369a1" }}>break-all-in-one-flow</span>
-          </span>
+            mode:<text style={{ color: "#0369a1" }}>break-all-in-one-flow</text>
+          </text>
         </div>
       </div>
     </div>
@@ -316,7 +501,7 @@ function PaintExamples() {
 
   return (
     <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
-      <span
+      <text
         style={{
           color: "#18202b",
           "font-size": "20px",
@@ -326,7 +511,7 @@ function PaintExamples() {
         }}
       >
         Paint
-      </span>
+      </text>
       <div style={{ display: "flex", gap: "12px" }}>
         <ExampleCard title="Linear gradient · box shadow">
           <div
@@ -342,20 +527,19 @@ function PaintExamples() {
               "box-shadow": "0px 12px 24px -10px rgba(37, 99, 235, 0.75)",
             }}
           >
-            <span
+            <text
               style={{
                 color: "white",
                 "font-size": "21px",
                 "line-height": "27px",
                 "font-weight": 700,
-                "text-shadow": "0px 2px 5px rgba(15, 23, 42, 0.45)",
               }}
             >
               Aurora
-            </span>
-            <span style={{ color: "rgba(255, 255, 255, 0.82)", "font-size": "13px", "line-height": "18px" }}>
+            </text>
+            <text style={{ color: "rgba(255, 255, 255, 0.82)", "font-size": "13px", "line-height": "18px" }}>
               HSL + RGB color stops
-            </span>
+            </text>
           </div>
         </ExampleCard>
         <ExampleCard title="Radial gradient · inset shadow">
@@ -373,20 +557,19 @@ function PaintExamples() {
               "box-shadow": "inset 0px 0px 22px rgba(49, 46, 129, 0.55)",
             }}
           >
-            <span
+            <text
               style={{
                 color: "lightgoldenrodyellow",
                 "font-size": "21px",
                 "line-height": "27px",
                 "font-weight": 700,
-                "text-shadow": "1px 2px 4px navy, -1px 0px 3px rgba(255, 255, 255, 0.4)",
               }}
             >
               Solar bloom
-            </span>
-            <span style={{ color: "rgb(255 255 255 / 78%)", "font-size": "13px", "line-height": "18px" }}>
+            </text>
+            <text style={{ color: "rgb(255 255 255 / 78%)", "font-size": "13px", "line-height": "18px" }}>
               HSLA + expanded named colors
-            </span>
+            </text>
           </div>
         </ExampleCard>
       </div>
@@ -415,16 +598,16 @@ function PaintExamples() {
                 "box-shadow": "0px 8px 15px rgba(6, 95, 70, 0.4)",
               }}
             >
-              <span style={{ color: "white", "font-size": "17px", "line-height": "22px", "font-weight": 700 }}>
+              <text style={{ color: "white", "font-size": "17px", "line-height": "22px", "font-weight": 700 }}>
                 Composited card
-              </span>
-              <span style={{ color: "rgba(255, 255, 255, 0.9)", "font-size": "12px", "line-height": "17px" }}>
+              </text>
+              <text style={{ color: "rgba(255, 255, 255, 0.9)", "font-size": "12px", "line-height": "17px" }}>
                 72% opacity · rotate · scale
-              </span>
+              </text>
             </div>
           </div>
         </ExampleCard>
-        <ExampleCard title="PNG data URL · text shadow">
+        <ExampleCard title="PNG data URL · raster fill">
           <div
             style={{
               display: "flex",
@@ -437,27 +620,25 @@ function PaintExamples() {
               "box-shadow": "0px 8px 18px -8px rgba(15, 23, 42, 0.65)",
             }}
           >
-            <span
+            <text
               style={{
                 color: "white",
                 "font-size": "19px",
                 "line-height": "25px",
                 "font-weight": 700,
-                "text-shadow": "0px 2px 4px black",
               }}
             >
               Raster fill
-            </span>
-            <span
+            </text>
+            <text
               style={{
                 color: "white",
                 "font-size": "12px",
                 "line-height": "17px",
-                "text-shadow": "0px 1px 3px black",
               }}
             >
               Decoded from an embedded PNG
-            </span>
+            </text>
           </div>
         </ExampleCard>
       </div>
@@ -493,12 +674,12 @@ function App() {
         "border-radius": "16px",
       }}
     >
-      <span style={{ display: "flex", "flex-direction": "row", gap: "6px" }}>
-        <span style={{ color: "#18202b", "font-size": "28px", "line-height": "34px", "font-weight": 700 }}>
+      <div style={{ display: "flex", "flex-direction": "row", gap: "6px" }}>
+        <text style={{ color: "#18202b", "font-size": "28px", "line-height": "34px", "font-weight": 700 }}>
           Burokku
-        </span>
-        <span style={{ color: "#526071", "font-size": "28px", "line-height": "34px" }}>Solid DOM</span>
-      </span>
+        </text>
+        <text style={{ color: "#526071", "font-size": "28px", "line-height": "34px" }}>Solid DOM</text>
+      </div>
       <div style={{ display: "flex", gap: "16px" }}>
         <div
           style={{
@@ -513,12 +694,12 @@ function App() {
             "border-radius": "12px",
           }}
         >
-          <span style={{ color: "#526071", "font-size": "16px", "line-height": "24px" }}>
+          <text style={{ color: "#526071", "font-size": "16px", "line-height": "24px" }}>
             Countdown
-          </span>
-          <span style={{ color: "#18202b", "font-size": "52px", "line-height": "60px", "font-weight": 700 }}>
+          </text>
+          <text style={{ color: "#18202b", "font-size": "52px", "line-height": "60px", "font-weight": 700 }}>
             {remaining()}
-          </span>
+          </text>
         </div>
         <div
           style={{
@@ -532,9 +713,9 @@ function App() {
             "border-radius": "12px",
           }}
         >
-          <span style={{ color: "#18202b", "font-size": "16px", "line-height": "22px", "font-weight": 700 }}>
+          <text style={{ color: "#18202b", "font-size": "16px", "line-height": "22px", "font-weight": 700 }}>
             Usable scroll container
-          </span>
+          </text>
           <ScrollablePanel />
         </div>
       </div>
@@ -546,13 +727,36 @@ function App() {
           <GridExample />
         </ExampleCard>
       </div>
+      <PositionExamples />
       <TypographyExamples remaining={remaining()} />
       <PaintExamples />
+      <div
+        style={{
+          display: "flex",
+          position: "fixed",
+          right: "12px",
+          bottom: "12px",
+          width: "154px",
+          padding: "10px",
+          color: "#ffffff",
+          "font-size": "12px",
+          "line-height": "16px",
+          "font-weight": 700,
+          "background-color": "#0f172a",
+          "border-radius": "8px",
+          "box-shadow": "0px 8px 18px rgba(15, 23, 42, 0.35)",
+        }}
+      >
+        <text>FIXED · viewport corner</text>
+      </div>
     </div>
   );
 }
 
+document.body.style.padding = "12px";
+document.body.style.borderWidth = "4px";
+document.body.style.borderColor = "#94a3b8";
 document.body.style.overflowY = "auto";
-document.body.style.overflowX = "auto";
+document.body.style.overflowX = "scroll";
 
 render(() => <App />, document.body);

@@ -1,25 +1,44 @@
 use taffy::{
     geometry::{Point, Rect, Size},
-    prelude::{Dimension, Display, LengthPercentage, LengthPercentageAuto, TaffyAuto},
+    prelude::Display,
     style::{
         GridAutoTracks, GridPlacement, GridTemplateComponent, GridTemplateTracks,
-        Style as TaffyStyle,
+        Position as TaffyPosition, Style as TaffyStyle,
     },
 };
 
 use crate::ui::elements::{
-    styles::{
-        LengthPercentageValue, MaxSizeValue, Overflow as ElementOverflow, SizeValue,
-        Style as ElementStyle,
-    },
+    styles::{Position, SizeValue, Style as ElementStyle},
     ElementKind,
 };
 
-pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyStyle {
+pub(in crate::ui::layouts) fn to_taffy_style(
+    kind: &ElementKind,
+    style: &ElementStyle,
+) -> TaffyStyle {
     let (grid_template_rows, grid_template_row_names) =
         grid_template(style.grid_template_rows.as_deref());
     let (grid_template_columns, grid_template_column_names) =
         grid_template(style.grid_template_columns.as_deref());
+    let inset = if style.position == Position::Static {
+        Rect {
+            left: SizeValue::Auto.into(),
+            right: SizeValue::Auto.into(),
+            top: SizeValue::Auto.into(),
+            bottom: SizeValue::Auto.into(),
+        }
+    } else {
+        Rect {
+            left: style.left.into(),
+            right: style.right.into(),
+            top: style.top.into(),
+            bottom: style.bottom.into(),
+        }
+    };
+    let position = match style.position {
+        Position::Static | Position::Relative => TaffyPosition::Relative,
+        Position::Absolute | Position::Fixed => TaffyPosition::Absolute,
+    };
     TaffyStyle {
         display: if matches!(kind, ElementKind::Comment(_)) {
             Display::None
@@ -27,59 +46,54 @@ pub(super) fn to_taffy_style(kind: &ElementKind, style: &ElementStyle) -> TaffyS
             style.display
         },
         box_sizing: style.box_sizing,
-        position: style.position,
+        position,
         overflow: Point {
-            x: taffy_overflow(style.overflow_x),
-            y: taffy_overflow(style.overflow_y),
+            x: style.overflow_x.into(),
+            y: style.overflow_y.into(),
         },
-        inset: Rect {
-            left: length_percentage_auto(style.left),
-            right: length_percentage_auto(style.right),
-            top: length_percentage_auto(style.top),
-            bottom: length_percentage_auto(style.bottom),
-        },
+        inset,
         size: Size {
-            width: dimension(style.width),
-            height: dimension(style.height),
+            width: style.width.into(),
+            height: style.height.into(),
         },
         min_size: Size {
-            width: dimension(style.min_width),
-            height: dimension(style.min_height),
+            width: style.min_width.into(),
+            height: style.min_height.into(),
         },
         max_size: Size {
-            width: max_dimension(style.max_width),
-            height: max_dimension(style.max_height),
+            width: style.max_width.into(),
+            height: style.max_height.into(),
         },
         aspect_ratio: style.aspect_ratio,
         margin: Rect {
-            left: length_percentage_auto(style.margin_left),
-            right: length_percentage_auto(style.margin_right),
-            top: length_percentage_auto(style.margin_top),
-            bottom: length_percentage_auto(style.margin_bottom),
+            left: style.margin_left.into(),
+            right: style.margin_right.into(),
+            top: style.margin_top.into(),
+            bottom: style.margin_bottom.into(),
         },
         padding: Rect {
-            left: length_percentage(style.padding_left),
-            right: length_percentage(style.padding_right),
-            top: length_percentage(style.padding_top),
-            bottom: length_percentage(style.padding_bottom),
+            left: style.padding_left.into(),
+            right: style.padding_right.into(),
+            top: style.padding_top.into(),
+            bottom: style.padding_bottom.into(),
         },
         border: Rect {
-            left: LengthPercentage::length(style.border_left_width.px()),
-            right: LengthPercentage::length(style.border_right_width.px()),
-            top: LengthPercentage::length(style.border_top_width.px()),
-            bottom: LengthPercentage::length(style.border_bottom_width.px()),
+            left: style.border_left_width.into(),
+            right: style.border_right_width.into(),
+            top: style.border_top_width.into(),
+            bottom: style.border_bottom_width.into(),
         },
         align_content: style.align_content,
         align_items: style.align_items,
         align_self: style.align_self,
         justify_content: style.justify_content,
         gap: Size {
-            width: length_percentage(style.column_gap),
-            height: length_percentage(style.row_gap),
+            width: style.column_gap.into(),
+            height: style.row_gap.into(),
         },
         flex_direction: style.flex_direction,
         flex_wrap: style.flex_wrap,
-        flex_basis: dimension(style.flex_basis),
+        flex_basis: style.flex_basis.into(),
         flex_grow: style.flex_grow,
         flex_shrink: style.flex_shrink,
         grid_template_rows,
@@ -131,44 +145,4 @@ fn grid_placement(value: Option<&str>) -> GridPlacement<String> {
             .parse()
             .expect("grid placement is validated when styles are set")
     })
-}
-
-fn dimension(value: SizeValue) -> Dimension {
-    match value {
-        SizeValue::Auto => Dimension::AUTO,
-        SizeValue::Px(value) => Dimension::length(value),
-        SizeValue::Percent(value) => Dimension::percent(value / 100.0),
-    }
-}
-
-fn taffy_overflow(value: ElementOverflow) -> taffy::style::Overflow {
-    match value {
-        ElementOverflow::Visible => taffy::style::Overflow::Visible,
-        ElementOverflow::Hidden => taffy::style::Overflow::Hidden,
-        ElementOverflow::Clip => taffy::style::Overflow::Clip,
-        ElementOverflow::Auto | ElementOverflow::Scroll => taffy::style::Overflow::Scroll,
-    }
-}
-
-fn max_dimension(value: MaxSizeValue) -> Dimension {
-    match value {
-        MaxSizeValue::None => Dimension::AUTO,
-        MaxSizeValue::Px(value) => Dimension::length(value),
-        MaxSizeValue::Percent(value) => Dimension::percent(value / 100.0),
-    }
-}
-
-fn length_percentage(value: LengthPercentageValue) -> LengthPercentage {
-    match value {
-        LengthPercentageValue::Px(value) => LengthPercentage::length(value),
-        LengthPercentageValue::Percent(value) => LengthPercentage::percent(value / 100.0),
-    }
-}
-
-fn length_percentage_auto(value: SizeValue) -> LengthPercentageAuto {
-    match value {
-        SizeValue::Auto => LengthPercentageAuto::AUTO,
-        SizeValue::Px(value) => LengthPercentageAuto::length(value),
-        SizeValue::Percent(value) => LengthPercentageAuto::percent(value / 100.0),
-    }
 }

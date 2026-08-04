@@ -3,6 +3,8 @@
 
 mod compute;
 mod iter;
+mod layout_node;
+mod render_node;
 mod stacking;
 
 use render::{BoxStyle, Clip, Rect, TextRunMetrics, TextSpan, TextStyle, TextSystem};
@@ -10,7 +12,10 @@ use std::collections::HashMap;
 
 use crate::ui::elements::Document;
 
+pub use crate::ui::elements::styles::Position;
+
 pub use iter::{LayoutIter, ReverseLayoutIter};
+pub(crate) use stacking::{descendant_contexts, zero_level_entries, Stacking, ZeroLevelEntry};
 
 /// Computes a renderable layout tree from an element document.
 pub fn compute_layout(
@@ -117,7 +122,9 @@ pub enum LayoutKind {
         has_transform: bool,
         z_index: Option<i32>,
         isolated: bool,
-        positioned: bool,
+        position: Position,
+        fixed_containing_block: Option<u64>,
+        fixed_to_viewport: bool,
         flex_or_grid_item: bool,
         children: Vec<Layout>,
     },
@@ -126,6 +133,11 @@ pub enum LayoutKind {
         spans: Vec<TextSpan>,
         style: TextStyle,
         has_transform: bool,
+        z_index: Option<i32>,
+        isolated: bool,
+        position: Position,
+        fixed_to_viewport: bool,
+        flex_or_grid_item: bool,
         line_count: usize,
         runs: Vec<TextRunMetrics>,
     },
@@ -227,6 +239,9 @@ impl Layout {
         let stationary_clip_count = self.clips.len() + 1;
         if let LayoutKind::Box { children, .. } = &mut self.kind {
             for child in children {
+                if child.is_fixed_to_viewport() {
+                    continue;
+                }
                 child.translate_scrolled_subtree(translation, stationary_clip_count);
             }
         }
@@ -239,6 +254,19 @@ impl Layout {
             position_scrollbar_thumb(scrollbar, offset.y, scroll.max_offset.y);
         }
         true
+    }
+
+    pub(crate) fn is_fixed_to_viewport(&self) -> bool {
+        matches!(
+            self.kind,
+            LayoutKind::Box {
+                fixed_to_viewport: true,
+                ..
+            } | LayoutKind::Text {
+                fixed_to_viewport: true,
+                ..
+            }
+        )
     }
 
     fn translate_scrolled_subtree(
@@ -266,6 +294,9 @@ impl Layout {
 
         if let LayoutKind::Box { children, .. } = &mut self.kind {
             for child in children {
+                if child.is_fixed_to_viewport() {
+                    continue;
+                }
                 child.translate_scrolled_subtree(translation, stationary_clip_count);
             }
         }
@@ -324,6 +355,8 @@ impl LayoutKind {
 mod tests {
     use render::{BoxStyle, TextSpan, TextStyle};
 
+    use crate::ui::elements::{ElementKind, BODY_ID};
+
     use super::*;
 
     fn text_layout(element_id: u64, x: f32, y: f32) -> Layout {
@@ -341,6 +374,11 @@ mod tests {
                 spans: vec![TextSpan::new("Burokku", TextStyle::default())],
                 style: TextStyle::default(),
                 has_transform: false,
+                z_index: None,
+                isolated: false,
+                position: Position::Static,
+                fixed_to_viewport: false,
+                flex_or_grid_item: false,
                 line_count: 1,
                 runs: Vec::new(),
             },
@@ -351,6 +389,31 @@ mod tests {
         element_id: u64,
         z_index: Option<i32>,
         isolated: bool,
+        children: Vec<Layout>,
+    ) -> Layout {
+        box_layout_with_position(element_id, z_index, isolated, Position::Relative, children)
+    }
+
+    fn box_layout_with_positioning(
+        element_id: u64,
+        z_index: Option<i32>,
+        isolated: bool,
+        positioned: bool,
+        children: Vec<Layout>,
+    ) -> Layout {
+        let position = if positioned {
+            Position::Relative
+        } else {
+            Position::Static
+        };
+        box_layout_with_position(element_id, z_index, isolated, position, children)
+    }
+
+    fn box_layout_with_position(
+        element_id: u64,
+        z_index: Option<i32>,
+        isolated: bool,
+        position: Position,
         children: Vec<Layout>,
     ) -> Layout {
         Layout {
@@ -367,7 +430,9 @@ mod tests {
                 has_transform: false,
                 z_index,
                 isolated,
-                positioned: true,
+                position,
+                fixed_containing_block: None,
+                fixed_to_viewport: false,
                 flex_or_grid_item: false,
                 children,
             },
@@ -404,7 +469,9 @@ mod tests {
                 has_transform: false,
                 z_index: None,
                 isolated: false,
-                positioned: false,
+                position: Position::Static,
+                fixed_containing_block: None,
+                fixed_to_viewport: false,
                 flex_or_grid_item: false,
                 children: vec![text_layout(2, 20.0, 20.0), text_layout(3, 20.0, 20.0)],
             },
@@ -454,5 +521,102 @@ mod tests {
 
         assert_eq!(forward, [1, 2, 3, 4, 5]);
         assert_eq!(reverse, [5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn iterator_separates_block_decorations_from_text_content() {
+        let first =
+            box_layout_with_positioning(2, None, false, false, vec![text_layout(3, 20.0, 20.0)]);
+        let second = box_layout_with_positioning(4, None, false, false, vec![]);
+        let root = box_layout(1, None, false, vec![first, second]);
+
+        assert_eq!(element_ids(root.iter()), [1, 2, 4, 3]);
+        assert_eq!(element_ids(root.iter_rev()), [3, 4, 2, 1]);
+        assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 3);
+    }
+
+    #[test]
+    fn zero_level_contexts_paint_after_ordinary_content() {
+        let zero = box_layout(2, Some(0), false, vec![]);
+        let ordinary = box_layout_with_positioning(3, None, false, false, vec![]);
+        let root = box_layout(1, None, false, vec![zero, ordinary]);
+
+        assert_eq!(element_ids(root.iter()), [1, 3, 2]);
+        assert_eq!(element_ids(root.iter_rev()), [2, 3, 1]);
+        assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 2);
+    }
+
+    #[test]
+    fn positioned_auto_paints_at_zero_level_without_containing_child_contexts() {
+        let high_descendant = box_layout(3, Some(10), false, vec![]);
+        let positioned_auto = box_layout(2, None, false, vec![high_descendant]);
+        let ordinary = box_layout_with_positioning(4, None, false, false, vec![]);
+        let middle_context = box_layout(5, Some(5), false, vec![]);
+        let root = box_layout(
+            1,
+            None,
+            false,
+            vec![positioned_auto, ordinary, middle_context],
+        );
+
+        assert_eq!(element_ids(root.iter()), [1, 4, 2, 5, 3]);
+        assert_eq!(element_ids(root.iter_rev()), [3, 5, 2, 4, 1]);
+    }
+
+    #[test]
+    fn zero_z_index_contains_child_contexts_atomically() {
+        let high_descendant = box_layout(3, Some(10), false, vec![]);
+        let zero = box_layout(2, Some(0), false, vec![high_descendant]);
+        let middle_context = box_layout(4, Some(5), false, vec![]);
+        let root = box_layout(1, None, false, vec![zero, middle_context]);
+
+        assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
+        assert_eq!(element_ids(root.iter_rev()), [4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn fixed_auto_contains_child_contexts_atomically() {
+        let high_descendant = box_layout(3, Some(10), false, vec![]);
+        let fixed =
+            box_layout_with_position(2, None, false, Position::Fixed, vec![high_descendant]);
+        let middle_context = box_layout(4, Some(5), false, vec![]);
+        let root = box_layout(1, None, false, vec![fixed, middle_context]);
+
+        assert_eq!(element_ids(root.iter()), [1, 2, 3, 4]);
+        assert_eq!(element_ids(root.iter_rev()), [4, 3, 2, 1]);
+        assert_eq!(root.hit_test(20.0, 20.0).unwrap().element_id(), 4);
+    }
+
+    #[test]
+    fn effect_contexts_paint_after_ordinary_content_in_tree_order() {
+        let mut document = Document::new();
+        let isolated = document.create_node(ElementKind::Div);
+        let translucent = document.create_node(ElementKind::Div);
+        let transformed = document.create_node(ElementKind::Div);
+        let ordinary = document.create_node(ElementKind::Div);
+
+        document
+            .set_style(isolated, "isolation", Some("isolate"))
+            .unwrap();
+        document
+            .set_style(translucent, "opacity", Some("0.5"))
+            .unwrap();
+        document
+            .set_style(transformed, "transform", Some("translateX(4px)"))
+            .unwrap();
+        for child in [isolated, translucent, transformed, ordinary] {
+            document.insert(BODY_ID, child, None).unwrap();
+        }
+
+        let layout = compute_layout(&document, 100.0, 100.0, &mut TextSystem::new());
+
+        assert_eq!(
+            element_ids(layout.iter()),
+            [BODY_ID, ordinary, isolated, translucent, transformed]
+        );
+        assert_eq!(
+            element_ids(layout.iter_rev()),
+            [transformed, translucent, isolated, ordinary, BODY_ID]
+        );
     }
 }

@@ -67,10 +67,11 @@ pub(crate) fn set_style(
             };
         }
         "position" => {
-            (style.position, style.positioned) = match value {
-                "static" => (Position::Relative, false),
-                "relative" => (Position::Relative, true),
-                "absolute" | "fixed" => (Position::Absolute, true),
+            style.position = match value {
+                "static" => Position::Static,
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
                 _ => return invalid(name, value),
             }
         }
@@ -273,8 +274,7 @@ pub(crate) fn set_style(
             }
         }
         "transform" => style.transform = parse_transform(name, value)?,
-        "box-shadow" => style.box_shadow = parse_shadow(name, value, true)?,
-        "text-shadow" => style.text_shadow = parse_shadow(name, value, false)?,
+        "box-shadow" => style.box_shadow = parse_shadow(name, value)?,
         "border-color" => color!(border_color),
         "border-radius" => {
             let [top_left, top_right, bottom_right, bottom_left] =
@@ -404,10 +404,7 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
     match name {
         "display" => reset!(display),
         "box-sizing" => reset!(box_sizing),
-        "position" => {
-            reset!(position);
-            reset!(positioned);
-        }
+        "position" => reset!(position),
         "overflow" => {
             reset!(overflow_x);
             reset!(overflow_y);
@@ -508,7 +505,6 @@ fn clear_style(style: &mut Style, name: &str) -> Result<(), StyleError> {
         "opacity" => reset!(opacity),
         "transform" => reset!(transform),
         "box-shadow" => reset!(box_shadow),
-        "text-shadow" => reset!(text_shadow),
         "border-color" => reset!(border_color),
         "border-radius" => reset_box!(
             border_top_left_radius,
@@ -592,21 +588,24 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_static_from_positioned_boxes() {
+    fn preserves_css_position_values() {
         let mut style = Style::default();
-        assert!(!style.positioned);
+        assert_eq!(style.position, Position::Static);
 
         set_style(&mut style, "position", Some("relative")).unwrap();
-        assert!(style.positioned);
+        assert_eq!(style.position, Position::Relative);
 
         set_style(&mut style, "position", Some("static")).unwrap();
-        assert!(!style.positioned);
+        assert_eq!(style.position, Position::Static);
 
         set_style(&mut style, "position", Some("absolute")).unwrap();
-        assert!(style.positioned);
+        assert_eq!(style.position, Position::Absolute);
+
+        set_style(&mut style, "position", Some("fixed")).unwrap();
+        assert_eq!(style.position, Position::Fixed);
 
         set_style(&mut style, "position", None).unwrap();
-        assert!(!style.positioned);
+        assert_eq!(style.position, Position::Static);
     }
 
     #[test]
@@ -677,6 +676,18 @@ mod tests {
         assert_eq!(style.text_decoration_color, Some([255, 0, 0, 255]));
         assert_eq!(style.white_space, Some(WhiteSpaceValue::PreWrap));
         assert_eq!(style.overflow_wrap, Some(OverflowWrapValue::Anywhere));
+    }
+
+    #[test]
+    #[ignore = "known bug: text-decoration shorthand retains an omitted previous color"]
+    fn text_decoration_shorthand_resets_an_omitted_color() {
+        let mut style = Style::default();
+        set_style(&mut style, "text-decoration", Some("underline red")).unwrap();
+        assert_eq!(style.text_decoration_color, Some([255, 0, 0, 255]));
+
+        set_style(&mut style, "text-decoration", Some("line-through")).unwrap();
+
+        assert_eq!(style.text_decoration_color, None);
     }
 
     #[test]
@@ -791,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_opacity_transform_and_shadows() {
+    fn parses_opacity_transform_and_box_shadows() {
         let mut style = Style::default();
         set_style(&mut style, "opacity", Some("0.35")).unwrap();
         set_style(
@@ -806,8 +817,6 @@ mod tests {
             Some("4px 6px 8px 2px rgba(0, 0, 0, 0.5)"),
         )
         .unwrap();
-        set_style(&mut style, "text-shadow", Some("1px 2px 3px navy")).unwrap();
-
         assert_eq!(style.opacity, 0.35);
         assert_eq!(
             style.transform,
@@ -815,9 +824,7 @@ mod tests {
         );
         assert_eq!(style.box_shadow[0].spread, 2.0);
         assert_eq!(style.box_shadow[0].color, [0, 0, 0, 128]);
-        assert_eq!(style.text_shadow[0].color, [0, 0, 128, 255]);
         assert!(set_style(&mut style, "opacity", Some("1.1")).is_err());
-        assert!(set_style(&mut style, "text-shadow", Some("1px 2px 3px 4px red")).is_err());
 
         set_style(&mut style, "opacity", Some("35%")).unwrap();
         set_style(
@@ -826,17 +833,10 @@ mod tests {
             Some("inset 1px 2px 3px red, 4px 5px blue"),
         )
         .unwrap();
-        set_style(
-            &mut style,
-            "text-shadow",
-            Some("1px 2px red, 3px 4px 5px blue"),
-        )
-        .unwrap();
         assert_eq!(style.opacity, 0.35);
         assert_eq!(style.box_shadow.len(), 2);
         assert!(style.box_shadow[0].inset);
         assert!(!style.box_shadow[1].inset);
-        assert_eq!(style.text_shadow.len(), 2);
 
         set_style(&mut style, "transform", Some("skewX(45deg)")).unwrap();
         assert!((style.transform.matrix()[2] - 1.0).abs() < 0.0001);
@@ -848,6 +848,16 @@ mod tests {
         assert_eq!(
             style.transform,
             Transform::Matrix(Transform::IDENTITY_MATRIX)
+        );
+    }
+
+    #[test]
+    fn does_not_parse_text_shadow() {
+        let mut style = Style::default();
+
+        assert_eq!(
+            set_style(&mut style, "text-shadow", Some("1px 2px 3px black")),
+            Err(StyleError::UnsupportedProperty("text-shadow".to_owned()))
         );
     }
 
@@ -1145,5 +1155,24 @@ mod tests {
 
         assert!(set_style(&mut style, "grid-row", Some("1 / 2 / 3")).is_err());
         assert!(set_style(&mut style, "grid-area", Some("0")).is_err());
+    }
+
+    #[test]
+    #[ignore = "known bug: single-value named grid-axis shorthands leave the end placement auto"]
+    fn named_grid_axis_shorthands_repeat_custom_identifiers() {
+        let mut style = Style::default();
+
+        set_style(&mut style, "grid-row", Some("hero")).unwrap();
+        set_style(&mut style, "grid-column", Some("content")).unwrap();
+
+        assert_eq!(
+            (
+                style.grid_row_start.as_deref(),
+                style.grid_row_end.as_deref(),
+                style.grid_column_start.as_deref(),
+                style.grid_column_end.as_deref(),
+            ),
+            (Some("hero"), Some("hero"), Some("content"), Some("content"),)
+        );
     }
 }

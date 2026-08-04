@@ -1,7 +1,4 @@
-use render::{
-    BackgroundImage, Border, BoxShadow, BoxStyle, Color, CornerRadius, GradientStop, Outline,
-    Transform,
-};
+use render::{Border, BoxStyle, Color, CornerRadius, Outline, Transform};
 
 use crate::ui::elements::styles::{
     Color as ElementColor, LengthPercentageValue, Style as ElementStyle,
@@ -15,10 +12,10 @@ pub(super) fn box_style(
     transform: Transform,
 ) -> BoxStyle {
     let border_width = [
-        style.border_top_width.px(),
-        style.border_right_width.px(),
-        style.border_bottom_width.px(),
-        style.border_left_width.px(),
+        f32::from(style.border_top_width),
+        f32::from(style.border_right_width),
+        f32::from(style.border_bottom_width),
+        f32::from(style.border_left_width),
     ]
     .into_iter()
     .reduce(f32::max)
@@ -26,34 +23,7 @@ pub(super) fn box_style(
 
     BoxStyle {
         background: style.background_color.map_or(Color::TRANSPARENT, rgba),
-        background_image: style.background_image.clone().map(|image| match image {
-            crate::ui::elements::styles::BackgroundImage::LinearGradient { direction, stops } => {
-                BackgroundImage::LinearGradient {
-                    direction,
-                    stops: stops
-                        .into_iter()
-                        .map(|stop| GradientStop {
-                            color: rgba(stop.color),
-                            position: stop.position,
-                        })
-                        .collect(),
-                }
-            }
-            crate::ui::elements::styles::BackgroundImage::RadialGradient { stops } => {
-                BackgroundImage::RadialGradient {
-                    stops: stops
-                        .into_iter()
-                        .map(|stop| GradientStop {
-                            color: rgba(stop.color),
-                            position: stop.position,
-                        })
-                        .collect(),
-                }
-            }
-            crate::ui::elements::styles::BackgroundImage::Raster(image) => {
-                BackgroundImage::Raster(image)
-            }
-        }),
+        background_image: style.background_image.clone().map(Into::into),
         corner_radius: CornerRadius::new(
             radius(style.border_top_left_radius, width, height),
             radius(style.border_top_right_radius, width, height),
@@ -62,26 +32,16 @@ pub(super) fn box_style(
         ),
         border: (border_width > 0.0)
             .then(|| Border::new(border_width, style.border_color.map_or(Color::BLACK, rgba))),
-        outline: (style.outline_width.px() > 0.0).then(|| {
+        outline: (f32::from(style.outline_width) > 0.0).then(|| {
             Outline::new(
-                style.outline_width.px(),
-                style.outline_offset.px(),
+                style.outline_width.into(),
+                style.outline_offset.into(),
                 style.outline_color.map_or(Color::BLACK, rgba),
             )
         }),
         opacity,
         transform,
-        shadows: style
-            .box_shadow
-            .iter()
-            .map(|shadow| BoxShadow {
-                offset: [shadow.offset_x, shadow.offset_y],
-                blur: shadow.blur,
-                spread: shadow.spread,
-                color: rgba(shadow.color),
-                inset: shadow.inset,
-            })
-            .collect(),
+        shadows: style.box_shadow.iter().copied().map(Into::into).collect(),
     }
 }
 

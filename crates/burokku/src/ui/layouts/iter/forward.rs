@@ -1,7 +1,7 @@
 use std::iter::FusedIterator;
 
 use super::super::{
-    stacking::{descendant_contexts, Stacking},
+    stacking::{descendant_contexts, zero_level_entries, Stacking, ZeroLevelEntry},
     Layout,
 };
 
@@ -17,9 +17,23 @@ pub struct LayoutIter<'a> {
 
 #[derive(Debug)]
 enum Task<'a> {
+    /// Enter an atomic stacking context, yielding its root before its layers.
     Context(&'a Layout),
-    Middle(&'a Layout),
-    MiddleChildren(std::slice::Iter<'a, Layout>),
+    /// Paint a positioned `z-index: auto` subtree in the zero-level phase
+    /// without containing descendant stacking contexts.
+    PositionedAuto(&'a Layout),
+    /// Paint the ordinary contents of a flex/grid item atomically.
+    FlexOrGridItem(&'a Layout),
+    /// Visit an ordinary layout in one in-flow paint phase.
+    Middle(&'a Layout, MiddlePhase),
+    /// Continue visiting ordinary children from first to last.
+    MiddleChildren(std::slice::Iter<'a, Layout>, MiddlePhase),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MiddlePhase {
+    Box,
+    Content,
 }
 
 impl<'a> LayoutIter<'a> {
@@ -34,28 +48,58 @@ impl<'a> Iterator for LayoutIter<'a> {
     type Item = &'a Layout;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Tasks form an explicit depth-first traversal stack. Each branch
+        // schedules the work that must follow the returned layout, allowing
+        // the iterator to yield one layout without flattening the whole tree.
         while let Some(task) = self.pending.pop() {
             match task {
                 Task::Context(layout) => {
                     self.schedule_context(layout);
                     return Some(layout);
                 }
-                Task::Middle(layout) => {
-                    if layout.establishes_stacking_context() {
-                        if layout.stacking_index() == 0 {
-                            self.pending.push(Task::Context(layout));
+                Task::PositionedAuto(layout) => {
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Content,
+                    ));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Box,
+                    ));
+                    return Some(layout);
+                }
+                Task::FlexOrGridItem(layout) => {
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Content,
+                    ));
+                    self.pending.push(Task::MiddleChildren(
+                        layout.children().iter(),
+                        MiddlePhase::Box,
+                    ));
+                    return Some(layout);
+                }
+                Task::Middle(layout, phase) => {
+                    if layout.establishes_stacking_context() || layout.is_positioned_auto() {
+                        continue;
+                    }
+                    if layout.is_flex_or_grid_item_auto() {
+                        if matches!(phase, MiddlePhase::Content) {
+                            self.pending.push(Task::FlexOrGridItem(layout));
                         }
                         continue;
                     }
 
                     self.pending
-                        .push(Task::MiddleChildren(layout.children().iter()));
-                    return Some(layout);
+                        .push(Task::MiddleChildren(layout.children().iter(), phase));
+                    if phase.matches(layout) {
+                        return Some(layout);
+                    }
                 }
-                Task::MiddleChildren(mut children) => {
+                Task::MiddleChildren(mut children, phase) => {
                     if let Some(child) = children.next() {
-                        self.pending.push(Task::MiddleChildren(children));
-                        self.pending.push(Task::Middle(child));
+                        self.pending.push(Task::MiddleChildren(children, phase));
+                        self.pending.push(Task::Middle(child, phase));
                     }
                 }
             }
@@ -70,7 +114,11 @@ impl FusedIterator for LayoutIter<'_> {}
 impl<'a> LayoutIter<'a> {
     fn schedule_context(&mut self, context_root: &'a Layout) {
         let contexts = descendant_contexts(context_root);
+        let zero_level = zero_level_entries(context_root);
 
+        // `pending` is LIFO, so phases are pushed from frontmost to backmost.
+        // They are consequently visited as negative contexts, ordinary
+        // content, zero-level entries, and finally positive contexts.
         self.pending.extend(
             contexts
                 .iter()
@@ -79,7 +127,18 @@ impl<'a> LayoutIter<'a> {
                 .map(|layout| Task::Context(layout)),
         );
         self.pending
-            .push(Task::MiddleChildren(context_root.children().iter()));
+            .extend(zero_level.iter().rev().map(|entry| match entry {
+                ZeroLevelEntry::Context(layout) => Task::Context(layout),
+                ZeroLevelEntry::PositionedAuto(layout) => Task::PositionedAuto(layout),
+            }));
+        self.pending.push(Task::MiddleChildren(
+            context_root.children().iter(),
+            MiddlePhase::Content,
+        ));
+        self.pending.push(Task::MiddleChildren(
+            context_root.children().iter(),
+            MiddlePhase::Box,
+        ));
         self.pending.extend(
             contexts
                 .iter()
@@ -87,5 +146,15 @@ impl<'a> LayoutIter<'a> {
                 .filter(|layout| layout.stacking_index() < 0)
                 .map(|layout| Task::Context(layout)),
         );
+    }
+}
+
+impl MiddlePhase {
+    fn matches(self, layout: &Layout) -> bool {
+        matches!(
+            (self, &layout.kind),
+            (Self::Box, super::super::LayoutKind::Box { .. })
+                | (Self::Content, super::super::LayoutKind::Text { .. })
+        )
     }
 }
