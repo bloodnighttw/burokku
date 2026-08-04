@@ -5,30 +5,66 @@ pub mod styles;
 // represent the layout tree of window app
 pub enum Elements {
     // the root of app, its children should only accept [`Self::Window`]
-    // and if user pass other element to App, it should panic.
-    App,
-    
-    // the top of window, we can use it to create multiple window 
+    // and if user pass other element to App, it should ignore.
+    App {
+        // should only have Window
+        children: Vec<Elements>,
+    },
+
+    // the top of window, we can use it to create multiple window
     // in js.
-    // 
+    //
     // currently, we only supported one <window> inside <app>, in future, we will
     // support mulitple window.
-    // 
-    // note it shouldn't nested Window inside Window, if user do so, it should panic
-    Window,
-    
-    // the block layout just like css
-    Div,
-    
-    // the flex layout
+    //
+    // note it shouldn't nested Window inside Window, if user do so, it should ignore
+    Window {
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
+    },
+
+    // the block layout <div>
+    Div {
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
+    },
+
+    // the flex layout element <flex>
     Flex {
         style: Box<FlexStyle>,
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
     },
-    
-    // the grid layout
+
+    // the grid layout <grid>
     Grid {
-        style: Box<GridStyle>
+        style: Box<GridStyle>,        
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
     },
-    // the text element
-    Text,    
+    // the text element <text>
+    Text {
+        // should only have Self::_String or Self::Text
+        children: Vec<Elements>,
+    },
+    // internel element, it is to allow somethings like
+    // <text> hi! I'm <text style={{...}}/> Ben </text> <text>
+    // it should not being used by user.
+    _String {
+        string: String,
+    },
+}
+
+impl Elements {
+    pub fn children(&self) -> Option<&Vec<Elements>> {
+        match self {
+            Self::App { children }
+            | Self::Window { children }
+            | Self::Div { children }
+            | Self::Flex { children, .. }
+            | Self::Grid { children, .. }
+            | Self::Text { children } => Some(children),
+            Self::_String { .. } => None,
+        }
+    }
 }
