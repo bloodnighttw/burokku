@@ -1129,6 +1129,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glyphon",
+ "taffy",
  "thiserror",
  "tokio",
  "wgpu",

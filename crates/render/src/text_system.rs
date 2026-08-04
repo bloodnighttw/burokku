@@ -2,6 +2,7 @@ use glyphon::{
     cosmic_text::Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as GlyphStyle,
     Weight, Wrap,
 };
+use taffy::{AvailableSpace, Size};
 
 use crate::{FontFamily, FontStyle, TextAlign, TextSpan, TextStyle, TextWrap};
 
@@ -91,6 +92,36 @@ impl TextSystem {
         constraints: TextConstraints,
     ) -> TextMetrics {
         self.layout_metrics(text, style, constraints).text
+    }
+
+    /// Shapes and measures a text leaf using Taffy's layout constraints.
+    ///
+    /// A known width controls line wrapping before the block-axis size is
+    /// measured. Known dimensions override the corresponding intrinsic result,
+    /// while min-content, max-content, and definite available widths map to the
+    /// equivalent [`TextConstraints`]. Available height does not affect
+    /// horizontal text shaping.
+    pub fn measure_for_taffy(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        known_dimensions: Size<Option<f32>>,
+        available_space: Size<AvailableSpace>,
+    ) -> Size<f32> {
+        let width = known_dimensions
+            .width
+            .map(TextWidth::AtMost)
+            .unwrap_or_else(|| match available_space.width {
+                AvailableSpace::Definite(width) => TextWidth::AtMost(width),
+                AvailableSpace::MinContent => TextWidth::MinContent,
+                AvailableSpace::MaxContent => TextWidth::Unconstrained,
+            });
+        let measured = self.measure(text, style, TextConstraints { width });
+
+        Size {
+            width: known_dimensions.width.unwrap_or(measured.width),
+            height: known_dimensions.height.unwrap_or(measured.height),
+        }
     }
 
     /// Shapes text and returns aggregate dimensions plus per-font-run geometry.
@@ -393,6 +424,8 @@ fn text_spans<'a>(
 
 #[cfg(test)]
 mod tests {
+    use taffy::prelude::TaffyMaxContent;
+
     use super::*;
 
     #[test]
@@ -419,6 +452,60 @@ mod tests {
         assert!(wrapped.width < unconstrained.width);
         assert!(wrapped.height > unconstrained.height);
         assert!(wrapped.line_count > unconstrained.line_count);
+    }
+
+    #[test]
+    fn maps_taffy_constraints_to_text_measurement() {
+        let mut system = TextSystem::new();
+        let style = TextStyle {
+            font_size: 20.0,
+            line_height: 24.0,
+            wrap: TextWrap::Glyph,
+            ..TextStyle::default()
+        };
+        let max_content =
+            system.measure_for_taffy("Burokku text layout", &style, Size::NONE, Size::MAX_CONTENT);
+        if max_content.width == 0.0 {
+            return;
+        }
+
+        let available_width = max_content.width * 0.5;
+        let wrapped = system.measure_for_taffy(
+            "Burokku text layout",
+            &style,
+            Size::NONE,
+            Size {
+                width: AvailableSpace::Definite(available_width),
+                height: AvailableSpace::MaxContent,
+            },
+        );
+
+        assert!(wrapped.width <= available_width);
+        assert!(wrapped.height > max_content.height);
+    }
+
+    #[test]
+    fn taffy_known_dimensions_override_intrinsic_text_size() {
+        let mut system = TextSystem::new();
+        let known_dimensions = Size {
+            width: Some(80.0),
+            height: Some(45.0),
+        };
+
+        let measured = system.measure_for_taffy(
+            "known dimensions",
+            &TextStyle::default(),
+            known_dimensions,
+            Size::MAX_CONTENT,
+        );
+
+        assert_eq!(
+            measured,
+            Size {
+                width: 80.0,
+                height: 45.0,
+            }
+        );
     }
 
     #[test]
