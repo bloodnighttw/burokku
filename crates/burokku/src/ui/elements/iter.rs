@@ -5,15 +5,24 @@ use super::Elements;
 /// A pre-order iterator over an element tree.
 ///
 /// Children that are not valid for their parent element are skipped together
-/// with their descendants.
+/// with their descendants. Traversal stores one child iterator per ancestor,
+/// so its auxiliary memory usage is proportional to the tree's depth rather
+/// than its width.
 pub struct ElementsIter<'a> {
-    pending: Vec<&'a Elements>,
+    root: Option<&'a Elements>,
+    ancestors: Vec<Children<'a>>,
+}
+
+struct Children<'a> {
+    parent: &'a Elements,
+    children: std::slice::Iter<'a, Elements>,
 }
 
 impl<'a> ElementsIter<'a> {
     pub(super) fn new(root: &'a Elements) -> Self {
         Self {
-            pending: vec![root],
+            root: Some(root),
+            ancestors: Vec::new(),
         }
     }
 }
@@ -22,15 +31,28 @@ impl<'a> Iterator for ElementsIter<'a> {
     type Item = &'a Elements;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let element = self.pending.pop()?;
+        let element = if let Some(root) = self.root.take() {
+            root
+        } else {
+            loop {
+                let Some(ancestor) = self.ancestors.last_mut() else {
+                    return None;
+                };
+                let parent = ancestor.parent;
+
+                if let Some(child) = ancestor.children.find(|child| accepts_child(parent, child)) {
+                    break child;
+                }
+
+                self.ancestors.pop();
+            }
+        };
 
         if let Some(children) = element.children() {
-            self.pending.extend(
-                children
-                    .iter()
-                    .rev()
-                    .filter(|child| accepts_child(element, child)),
-            );
+            self.ancestors.push(Children {
+                parent: element,
+                children: children.iter(),
+            });
         }
 
         Some(element)
