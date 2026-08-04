@@ -67,16 +67,23 @@
         throw new Error("The reference node is not a child of this node");
       }
       if (child === before) return child;
-      if (child.parentNode) {
-        const oldParent = child.parentNode;
+      const oldParent = child.parentNode;
+      if (this.__burokkuId !== null && child.__burokkuId !== null) {
+        __burokku_dom_insert(this.__burokkuId, child.__burokkuId, before?.__burokkuId ?? -1);
+      } else if (
+        this.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+        child.__burokkuId !== null &&
+        oldParent !== null &&
+        oldParent.__burokkuId !== null
+      ) {
+        __burokku_dom_remove(oldParent.__burokkuId, child.__burokkuId);
+      }
+      if (oldParent) {
         oldParent.childNodes.splice(oldParent.childNodes.indexOf(child), 1);
       }
       const index = before === null ? this.childNodes.length : this.childNodes.indexOf(before);
       this.childNodes.splice(index, 0, child);
       child.parentNode = this;
-      if (this.__burokkuId !== null && child.__burokkuId !== null) {
-        __burokku_dom_insert(this.__burokkuId, child.__burokkuId, before?.__burokkuId ?? -1);
-      }
       return child;
     }
 
@@ -93,7 +100,7 @@
 
     replaceChild(next, previous) {
       this.insertBefore(next, previous);
-      this.removeChild(previous);
+      if (next !== previous) this.removeChild(previous);
       return previous;
     }
 

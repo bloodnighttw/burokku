@@ -3,6 +3,11 @@ export type BurokkuStyle = Partial<{
   overflow: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowX: "visible" | "hidden" | "clip" | "auto" | "scroll";
   overflowY: "visible" | "hidden" | "clip" | "auto" | "scroll";
+  position: "static" | "relative" | "absolute" | "fixed";
+  top: number | string;
+  right: number | string;
+  bottom: number | string;
+  left: number | string;
   flexDirection: "row" | "column";
   width: number | string;
   height: number | string;
@@ -19,6 +24,10 @@ export type BurokkuStyle = Partial<{
   gridRow: string;
   padding: number | string;
   margin: number | string;
+  marginTop: number | string;
+  marginRight: number | string;
+  marginBottom: number | string;
+  marginLeft: number | string;
   backgroundColor: string;
   backgroundImage: string;
   color: string;

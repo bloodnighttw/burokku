@@ -1,28 +1,25 @@
 mod output;
 mod paint;
 mod scroll;
-mod style;
-mod text;
-mod tree;
+pub(super) mod style;
+pub(super) mod text;
 
 use std::collections::HashMap;
 
-use render::{Rect as RenderRect, TextStyle, TextSystem, Transform};
+use render::{Rect as RenderRect, TextSystem, Transform};
 use taffy::{
-    compute_root_layout,
     geometry::{Point, Size},
-    prelude::{AvailableSpace, Dimension, NodeId},
+    prelude::{AvailableSpace, Dimension},
 };
 
-use crate::ui::elements::{Document, BODY_ID};
+use crate::ui::elements::Document;
 
-use super::{Layout, ScrollOffset};
-use tree::{add_element, ElementLayoutTree};
+use super::{layout_node::LayoutNode, render_node::RenderNode, Layout, ScrollOffset};
 
 #[cfg(test)]
 use super::LayoutKind;
 #[cfg(test)]
-use crate::ui::elements::ElementKind;
+use crate::ui::elements::{ElementKind, BODY_ID};
 
 /// Computes a renderable layout tree from an element document.
 ///
@@ -55,25 +52,29 @@ pub(super) fn compute_layout_with_scroll(
         width: viewport_width.max(0.0),
         height: viewport_height.max(0.0),
     };
-    let mut nodes = Vec::new();
-    let root = add_element(&mut nodes, document, BODY_ID, &TextStyle::default());
-    nodes[root].style.size = Size {
-        width: Dimension::length(viewport.width),
-        height: Dimension::length(viewport.height),
+    // The pipeline is deliberately staged:
+    // Document -> stable paint-ordered RenderNode -> reparented Taffy LayoutNode.
+    let render_root = RenderNode::viewport(RenderNode::from_document(document));
+    let static_locations = if render_root.has_out_of_flow_descendant() {
+        let mut static_tree =
+            LayoutNode::static_position_probe(&render_root, text_system, scroll_offsets);
+        configure_viewport(&mut static_tree, viewport);
+        static_tree.compute_layout(viewport.map(AvailableSpace::Definite));
+        Some(static_tree.absolute_render_locations())
+    } else {
+        None
     };
 
-    let mut tree = ElementLayoutTree {
-        nodes,
-        text_system,
-        scroll_offsets,
-    };
-    compute_root_layout(
-        &mut tree,
-        NodeId::from(root),
-        viewport.map(AvailableSpace::Definite),
-    );
+    let mut tree = LayoutNode::from_render_node(&render_root, text_system, scroll_offsets);
+    configure_viewport(&mut tree, viewport);
+    if let Some(static_locations) = &static_locations {
+        tree.set_static_offsets(static_locations);
+    }
+    let root = tree.viewport_root;
+    tree.compute_layout(viewport.map(AvailableSpace::Definite));
+    let body = tree.nodes[root].render_children[0];
     tree.to_layout(
-        root,
+        body,
         Point::ZERO,
         &[],
         RenderRect::new(0.0, 0.0, viewport.width, viewport.height),
@@ -82,9 +83,26 @@ pub(super) fn compute_layout_with_scroll(
     )
 }
 
+fn configure_viewport(tree: &mut LayoutNode<'_, '_>, viewport: Size<f32>) {
+    let root = tree.viewport_root;
+    let body = tree.nodes[root].render_children[0];
+    tree.nodes[body].style.size = Size {
+        width: Dimension::length(viewport.width),
+        height: Dimension::length(viewport.height),
+    };
+    tree.nodes[root].style = taffy::style::Style {
+        size: Size {
+            width: Dimension::length(viewport.width),
+            height: Dimension::length(viewport.height),
+        },
+        ..taffy::style::Style::default()
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::layouts::ScrollbarAxis;
     use render::{Color, FontFamily, FontStyle, TextAlign, TextConstraints, TextWrap};
 
     #[test]
@@ -142,9 +160,9 @@ mod tests {
         let gallery = document.create_node(ElementKind::Div);
         let card = document.create_node(ElementKind::Div);
         let row = document.create_node(ElementKind::Div);
-        let large_box = document.create_node(ElementKind::Span);
-        let small_box = document.create_node(ElementKind::Span);
-        let fixed_width_sibling = document.create_node(ElementKind::Span);
+        let large_box = document.create_node(ElementKind::Div);
+        let small_box = document.create_node(ElementKind::Div);
+        let fixed_width_sibling = document.create_node(ElementKind::Div);
         let large = document.create_node(ElementKind::Text("Baseline".into()));
         let small =
             document.create_node(ElementKind::Text("aligned through Glyphon metrics".into()));
@@ -241,11 +259,41 @@ mod tests {
     }
 
     #[test]
-    fn nested_spans_share_inline_layout_and_keep_individual_styles() {
+    #[ignore = "known bug: inherited unitless line-height is frozen instead of scaling with descendant font-size"]
+    fn inherited_unitless_line_height_scales_with_descendant_font_size() {
         let mut document = Document::new();
-        let line = document.create_node(ElementKind::Span);
+        let parent = document.create_node(ElementKind::Div);
+        let child = document.create_node(ElementKind::Div);
+        let text = document.create_node(ElementKind::Text("scaled line height".into()));
+        document
+            .set_style(parent, "font-size", Some("10px"))
+            .unwrap();
+        document
+            .set_style(parent, "line-height", Some("2"))
+            .unwrap();
+        document
+            .set_style(child, "font-size", Some("20px"))
+            .unwrap();
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, child, None).unwrap();
+        document.insert(child, text, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 100.0, &mut TextSystem::new());
+        let text = &layout.children()[0].children()[0].children()[0];
+        let LayoutKind::Text { style, .. } = &text.kind else {
+            panic!("descendant should be text");
+        };
+
+        assert_eq!(style.font_size, 20.0);
+        assert_eq!(style.line_height, 40.0);
+    }
+
+    #[test]
+    fn nested_text_elements_share_layout_and_keep_individual_styles() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::TextElement);
         let leading = document.create_node(ElementKind::Text("Hello  ".into()));
-        let emphasized = document.create_node(ElementKind::Span);
+        let emphasized = document.create_node(ElementKind::TextElement);
         let emphasized_text = document.create_node(ElementKind::Text("world".into()));
         let reactive = document.create_node(ElementKind::Text(" 1".into()));
         document.set_style(line, "width", Some("70px")).unwrap();
@@ -273,7 +321,7 @@ mod tests {
             ..
         } = &inline.kind
         else {
-            panic!("a text-only span tree should become one inline text layout");
+            panic!("a nested text tree should become one rich text layout");
         };
 
         assert_eq!(text, "Hello world 1");
@@ -296,9 +344,33 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: rich-text normalization ignores nested white-space overrides"]
+    fn nested_text_preserves_its_own_white_space_mode() {
+        let mut document = Document::new();
+        let line = document.create_node(ElementKind::TextElement);
+        let preserved = document.create_node(ElementKind::TextElement);
+        let text = document.create_node(ElementKind::Text("a  b".into()));
+        document
+            .set_style(preserved, "white-space", Some("pre"))
+            .unwrap();
+        document.insert(BODY_ID, line, None).unwrap();
+        document.insert(line, preserved, None).unwrap();
+        document.insert(preserved, text, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let LayoutKind::Text { text, spans, .. } = &layout.children()[0].kind else {
+            panic!("nested text should become one rich text layout");
+        };
+
+        assert_eq!(text, "a  b");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "a  b");
+    }
+
+    #[test]
     fn jsx_text_fragments_and_variables_share_a_nowrap_line() {
         let mut document = Document::new();
-        let line = document.create_node(ElementKind::Span);
+        let line = document.create_node(ElementKind::TextElement);
         let prefix = document.create_node(ElementKind::Text("Scroll item ".into()));
         let variable = document.create_node(ElementKind::Text("1".into()));
         let suffix = document.create_node(ElementKind::Text(
@@ -590,6 +662,146 @@ mod tests {
     }
 
     #[test]
+    fn static_boxes_ignore_inset_properties() {
+        let mut document = Document::new();
+        let first = document.create_node(ElementKind::Div);
+        let second = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "static"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "50px"),
+            ("height", "20px"),
+        ] {
+            document.set_style(first, property, Some(value)).unwrap();
+        }
+        document.set_style(second, "width", Some("50px")).unwrap();
+        document.set_style(second, "height", Some("20px")).unwrap();
+        document.insert(BODY_ID, first, None).unwrap();
+        document.insert(BODY_ID, second, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let first = &layout.children()[0];
+        let second = &layout.children()[1];
+
+        assert_eq!((first.x, first.y), (0.0, 0.0));
+        assert_eq!((second.x, second.y), (0.0, 20.0));
+    }
+
+    #[test]
+    fn relative_boxes_offset_without_moving_siblings() {
+        let mut document = Document::new();
+        let relative = document.create_node(ElementKind::Div);
+        let sibling = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "50px"),
+            ("height", "20px"),
+        ] {
+            document.set_style(relative, property, Some(value)).unwrap();
+        }
+        document.set_style(sibling, "width", Some("50px")).unwrap();
+        document.set_style(sibling, "height", Some("20px")).unwrap();
+        document.insert(BODY_ID, relative, None).unwrap();
+        document.insert(BODY_ID, sibling, None).unwrap();
+
+        let layout = compute_layout(&document, 200.0, 100.0, &mut TextSystem::new());
+        let relative = &layout.children()[0];
+        let sibling = &layout.children()[1];
+
+        assert_eq!((relative.x, relative.y), (40.0, 30.0));
+        assert_eq!((sibling.x, sibling.y), (0.0, 20.0));
+    }
+
+    #[test]
+    fn absolute_boxes_use_the_nearest_positioned_ancestor() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let static_wrapper = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("width", "300px"),
+            ("height", "100px"),
+        ] {
+            document
+                .set_style(positioned, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("margin-left", "50px"),
+            ("width", "100px"),
+            ("height", "20px"),
+        ] {
+            document
+                .set_style(static_wrapper, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "absolute"),
+            ("right", "0px"),
+            ("top", "5px"),
+            ("width", "10px"),
+            ("height", "10px"),
+        ] {
+            document.set_style(absolute, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, static_wrapper, None).unwrap();
+        document.insert(static_wrapper, absolute, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 200.0, &mut TextSystem::new());
+        let positioned = &layout.children()[0];
+        let static_wrapper = &positioned.children()[0];
+        let absolute = &static_wrapper.children()[0];
+
+        assert_eq!((static_wrapper.x, static_wrapper.y), (50.0, 0.0));
+        assert_eq!((absolute.x, absolute.y), (290.0, 5.0));
+    }
+
+    #[test]
+    fn absolute_auto_insets_preserve_their_static_position() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let preceding = document.create_node(ElementKind::Div);
+        let static_wrapper = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        document
+            .set_style(positioned, "position", Some("relative"))
+            .unwrap();
+        document
+            .set_style(positioned, "width", Some("300px"))
+            .unwrap();
+        document
+            .set_style(preceding, "height", Some("20px"))
+            .unwrap();
+        document
+            .set_style(static_wrapper, "margin-left", Some("30px"))
+            .unwrap();
+        document
+            .set_style(static_wrapper, "height", Some("40px"))
+            .unwrap();
+        document
+            .set_style(absolute, "position", Some("absolute"))
+            .unwrap();
+        document.set_style(absolute, "width", Some("10px")).unwrap();
+        document
+            .set_style(absolute, "height", Some("10px"))
+            .unwrap();
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, preceding, None).unwrap();
+        document.insert(positioned, static_wrapper, None).unwrap();
+        document.insert(static_wrapper, absolute, None).unwrap();
+
+        let layout = compute_layout(&document, 400.0, 200.0, &mut TextSystem::new());
+        let absolute = &layout.children()[0].children()[1].children()[0];
+
+        assert_eq!((absolute.x, absolute.y), (30.0, 20.0));
+    }
+
+    #[test]
     fn carries_z_index_and_isolation_into_layout() {
         let mut document = Document::new();
         let indexed = document.create_node(ElementKind::Div);
@@ -624,6 +836,485 @@ mod tests {
     }
 
     #[test]
+    fn fixed_boxes_use_the_viewport_for_layout_and_escape_ancestor_clips() {
+        let mut document = Document::new();
+        let clipped_parent = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "100px"),
+            ("height", "60px"),
+            ("overflow", "hidden"),
+        ] {
+            document
+                .set_style(clipped_parent, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "25%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, clipped_parent, None).unwrap();
+        document.insert(clipped_parent, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+
+        assert_eq!((fixed.x, fixed.y), (215.0, 165.0));
+        assert_eq!((fixed.width, fixed.height), (75.0, 20.0));
+        assert!(fixed.clips.is_empty());
+        assert!(fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
+    fn viewport_fixed_boxes_ignore_body_box_model_and_clipping() {
+        let mut document = Document::new();
+        let wrapper = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("margin-left", "30px"),
+            ("padding", "20px"),
+            ("border-width", "5px"),
+            ("overflow", "hidden"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+        for (property, value) in [
+            ("width", "50px"),
+            ("height", "50px"),
+            ("overflow", "hidden"),
+        ] {
+            document.set_style(wrapper, property, Some(value)).unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "50%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, wrapper, None).unwrap();
+        document.insert(wrapper, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+
+        assert_eq!((fixed.x, fixed.y), (140.0, 165.0));
+        assert_eq!((fixed.width, fixed.height), (150.0, 20.0));
+        assert!(fixed.clips.is_empty());
+        assert!(fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
+    fn body_border_and_scrollbars_remain_inside_the_viewport() {
+        let mut document = Document::new();
+        for (property, value) in [
+            ("padding", "12px"),
+            ("border-width", "4px"),
+            ("overflow-x", "scroll"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        assert_eq!(
+            (layout.x, layout.y, layout.width, layout.height),
+            (0.0, 0.0, 300.0, 200.0)
+        );
+
+        let scroll = layout.scroll.expect("body scroll container");
+        assert_eq!(scroll.viewport, RenderRect::new(4.0, 4.0, 292.0, 192.0));
+        let horizontal = scroll.horizontal.expect("horizontal scrollbar");
+        let vertical = scroll.vertical.expect("vertical scrollbar");
+        assert!(horizontal.track.y + horizontal.track.height <= layout.height - 4.0);
+        assert!(vertical.track.x + vertical.track.width <= layout.width - 4.0);
+    }
+
+    #[test]
+    #[ignore = "known bug: body margins shift the viewport-sized retained root"]
+    fn body_margins_do_not_shift_the_retained_viewport_root() {
+        let mut document = Document::new();
+        document
+            .set_style(BODY_ID, "margin-left", Some("30px"))
+            .unwrap();
+        document
+            .set_style(BODY_ID, "margin-top", Some("20px"))
+            .unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+
+        assert_eq!(
+            (layout.x, layout.y, layout.width, layout.height),
+            (0.0, 0.0, 300.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn body_transform_uses_the_retained_viewport_center_for_descendants_and_clips() {
+        let mut document = Document::new();
+        let child = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("padding", "20px"),
+            ("overflow", "hidden"),
+            ("transform", "rotate(180deg)"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+        document.set_style(child, "width", Some("10px")).unwrap();
+        document.set_style(child, "height", Some("10px")).unwrap();
+        document.insert(BODY_ID, child, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let child = &layout.children()[0];
+
+        assert_eq!((layout.width, layout.height), (300.0, 200.0));
+        assert!(child.contains(275.0, 175.0));
+        assert!(child.clips[0].contains(275.0, 175.0));
+        assert!(!child.contains(315.0, 215.0));
+    }
+
+    #[test]
+    fn transformed_body_contains_fixed_boxes() {
+        let mut document = Document::new();
+        let wrapper = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("padding", "20px"),
+            ("overflow", "hidden"),
+            ("transform", "translateX(0px)"),
+        ] {
+            document.set_style(BODY_ID, property, Some(value)).unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "50%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, wrapper, None).unwrap();
+        document.insert(wrapper, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0];
+        let LayoutKind::Box {
+            fixed_containing_block,
+            ..
+        } = fixed.kind
+        else {
+            panic!("fixed element should produce a box");
+        };
+
+        assert_eq!((fixed.x, fixed.y), (140.0, 205.0));
+        assert_eq!((fixed.width, fixed.height), (150.0, 20.0));
+        assert_eq!(fixed_containing_block, Some(BODY_ID));
+        assert_eq!(fixed.clips.len(), 1);
+        assert!(!fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
+    fn viewport_fixed_auto_insets_keep_their_static_position() {
+        let mut document = Document::new();
+        let parent = document.create_node(ElementKind::Div);
+        let preceding = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("margin-top", "50px"),
+            ("width", "100px"),
+            ("height", "100px"),
+        ] {
+            document.set_style(parent, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(preceding, "height", Some("20px"))
+            .unwrap();
+        for (property, value) in [("position", "fixed"), ("width", "10px"), ("height", "10px")] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, parent, None).unwrap();
+        document.insert(parent, preceding, None).unwrap();
+        document.insert(parent, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[1];
+
+        assert_eq!((fixed.x, fixed.y), (0.0, 70.0));
+    }
+
+    #[test]
+    fn retained_scrolling_does_not_move_viewport_fixed_descendants() {
+        let mut document = Document::new();
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        for (property, value) in [
+            ("position", "fixed"),
+            ("left", "9px"),
+            ("top", "8px"),
+            ("width", "20px"),
+            ("height", "10px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+        document.insert(scroller, fixed, None).unwrap();
+
+        let mut layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let before_content_y = layout.children()[0].children()[0].y;
+        let before_fixed = {
+            let fixed = &layout.children()[0].children()[1];
+            (fixed.x, fixed.y)
+        };
+
+        assert!(layout.apply_scroll_offset(scroller, ScrollOffset::new(0.0, 30.0)));
+
+        let scroller = &layout.children()[0];
+        assert_eq!(scroller.children()[0].y, before_content_y - 30.0);
+        assert_eq!(
+            (scroller.children()[1].x, scroller.children()[1].y),
+            before_fixed
+        );
+        assert!(scroller.children()[1].clips.is_empty());
+
+        let rebuilt = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(scroller.element_id, ScrollOffset::new(0.0, 30.0))]),
+        );
+        let rebuilt_scroller = &rebuilt.children()[0];
+        assert_eq!(
+            (
+                rebuilt_scroller.children()[0].y,
+                rebuilt_scroller.children()[1].x,
+                rebuilt_scroller.children()[1].y,
+            ),
+            (
+                scroller.children()[0].y,
+                scroller.children()[1].x,
+                scroller.children()[1].y,
+            )
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: retained scrolling does not rebase cumulative transforms"]
+    fn retained_scrolling_under_a_transformed_ancestor_matches_a_full_rebuild() {
+        let mut document = Document::new();
+        let transformed = document.create_node(ElementKind::Div);
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "100px"),
+            ("transform", "rotate(90deg)"),
+        ] {
+            document
+                .set_style(transformed, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document.set_style(content, "width", Some("20px")).unwrap();
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document.insert(BODY_ID, transformed, None).unwrap();
+        document.insert(transformed, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+
+        let requested = ScrollOffset::new(0.0, 30.0);
+        let mut retained = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        assert!(retained.apply_scroll_offset(scroller, requested));
+        let rebuilt = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(scroller, requested)]),
+        );
+        let retained_content = &retained.children()[0].children()[0].children()[0];
+        let rebuilt_content = &rebuilt.children()[0].children()[0].children()[0];
+
+        assert_eq!(retained_content.transform, rebuilt_content.transform);
+        assert_eq!(retained_content.clips, rebuilt_content.clips);
+    }
+
+    #[test]
+    #[ignore = "known bug: scroll extent ignores overflow from nested descendants"]
+    fn descendant_overflow_through_a_smaller_wrapper_contributes_to_scroll_extent() {
+        let mut document = Document::new();
+        let scroller = document.create_node(ElementKind::Div);
+        let wrapper = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-x", "auto"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document.set_style(wrapper, "width", Some("50px")).unwrap();
+        document.set_style(content, "width", Some("200px")).unwrap();
+        document.set_style(content, "height", Some("10px")).unwrap();
+        document.insert(BODY_ID, scroller, None).unwrap();
+        document.insert(scroller, wrapper, None).unwrap();
+        document.insert(wrapper, content, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let scroll = layout.children()[0]
+            .scroll
+            .expect("overflow-x: auto should retain a scroll container");
+
+        assert_eq!(scroll.content_width, 200.0);
+        assert_eq!(scroll.max_offset.x, 100.0);
+        assert!(scroll.horizontal.is_some());
+    }
+
+    #[test]
+    fn absolute_descendants_keep_dom_scroll_and_clip_state() {
+        let mut document = Document::new();
+        let positioned = document.create_node(ElementKind::Div);
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        let absolute = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("width", "300px"),
+            ("height", "200px"),
+        ] {
+            document
+                .set_style(positioned, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        for (property, value) in [
+            ("position", "absolute"),
+            ("left", "10px"),
+            ("top", "80px"),
+            ("width", "20px"),
+            ("height", "10px"),
+        ] {
+            document.set_style(absolute, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, positioned, None).unwrap();
+        document.insert(positioned, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+        document.insert(scroller, absolute, None).unwrap();
+
+        let mut retained = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        assert!(retained.apply_scroll_offset(scroller, ScrollOffset::new(0.0, 30.0)));
+        let retained_absolute = &retained.children()[0].children()[0].children()[1];
+
+        let rebuilt = compute_layout_with_scroll(
+            &document,
+            300.0,
+            200.0,
+            &mut TextSystem::new(),
+            &HashMap::from([(scroller, ScrollOffset::new(0.0, 30.0))]),
+        );
+        let rebuilt_absolute = &rebuilt.children()[0].children()[0].children()[1];
+
+        assert_eq!((retained_absolute.x, retained_absolute.y), (10.0, 50.0));
+        assert_eq!(
+            (rebuilt_absolute.x, rebuilt_absolute.y),
+            (retained_absolute.x, retained_absolute.y)
+        );
+        assert_eq!(rebuilt_absolute.clips.len(), 1);
+    }
+
+    #[test]
+    fn transformed_ancestors_contain_fixed_boxes() {
+        let mut document = Document::new();
+        let transformed = document.create_node(ElementKind::Div);
+        let intermediate = document.create_node(ElementKind::Div);
+        let fixed = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "40px"),
+            ("top", "30px"),
+            ("width", "100px"),
+            ("height", "60px"),
+            ("overflow", "hidden"),
+            ("transform", "translateX(0px)"),
+        ] {
+            document
+                .set_style(transformed, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "relative"),
+            ("left", "20px"),
+            ("top", "10px"),
+            ("width", "40px"),
+            ("height", "30px"),
+            ("overflow", "hidden"),
+        ] {
+            document
+                .set_style(intermediate, property, Some(value))
+                .unwrap();
+        }
+        for (property, value) in [
+            ("position", "fixed"),
+            ("width", "25%"),
+            ("height", "20px"),
+            ("right", "10px"),
+            ("bottom", "15px"),
+        ] {
+            document.set_style(fixed, property, Some(value)).unwrap();
+        }
+        document.insert(BODY_ID, transformed, None).unwrap();
+        document.insert(transformed, intermediate, None).unwrap();
+        document.insert(intermediate, fixed, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let fixed = &layout.children()[0].children()[0].children()[0];
+
+        assert_eq!((fixed.x, fixed.y), (105.0, 55.0));
+        assert_eq!((fixed.width, fixed.height), (25.0, 20.0));
+        assert_eq!(fixed.clips.len(), 2);
+        assert!(!fixed.is_fixed_to_viewport());
+    }
+
+    #[test]
     fn parent_transform_moves_descendants_clips_and_hit_testing_around_parent_center() {
         let mut document = Document::new();
         let parent = document.create_node(ElementKind::Div);
@@ -650,6 +1341,48 @@ mod tests {
         assert_eq!(child.clips.len(), 1);
         assert!(child.clips[0].contains(95.0, 10.0));
         assert!(!child.clips[0].contains(10.0, 120.0));
+    }
+
+    #[test]
+    #[ignore = "known bug: scroll hit testing ignores the container transform"]
+    fn transformed_scroll_container_and_scrollbar_hit_test_at_visual_coordinates() {
+        let mut document = Document::new();
+        let scroller = document.create_node(ElementKind::Div);
+        let content = document.create_node(ElementKind::Div);
+        for (property, value) in [
+            ("width", "100px"),
+            ("height", "50px"),
+            ("overflow-y", "scroll"),
+            ("transform", "translateX(100px)"),
+        ] {
+            document.set_style(scroller, property, Some(value)).unwrap();
+        }
+        document
+            .set_style(content, "height", Some("200px"))
+            .unwrap();
+        document.insert(BODY_ID, scroller, None).unwrap();
+        document.insert(scroller, content, None).unwrap();
+
+        let layout = compute_layout(&document, 300.0, 200.0, &mut TextSystem::new());
+        let scroll = layout.children()[0]
+            .scroll
+            .expect("overflow-y: scroll should retain a scroll container");
+        let vertical = scroll.vertical.expect("vertical scrollbar");
+        let raw_x = vertical.track.x + vertical.track.width * 0.5;
+        let y = vertical.track.y + vertical.track.height * 0.5;
+        let visual_x = raw_x + 100.0;
+
+        assert_eq!(
+            (
+                layout
+                    .scroll_container_at(visual_x, y)
+                    .map(Layout::element_id),
+                scroll.scrollbar_at(visual_x, y).map(|bar| bar.axis),
+                layout.scroll_container_at(raw_x, y).map(Layout::element_id),
+                scroll.scrollbar_at(raw_x, y).map(|bar| bar.axis),
+            ),
+            (Some(scroller), Some(ScrollbarAxis::Vertical), None, None,)
+        );
     }
 
     #[test]

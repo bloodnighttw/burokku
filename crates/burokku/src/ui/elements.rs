@@ -20,7 +20,7 @@ pub enum ElementKind {
     Heading(u8),
     Image,
     Select,
-    Span,
+    TextElement,
     Body,
     Other(String),
 }
@@ -51,7 +51,7 @@ impl From<String> for ElementKind {
             "h6" => Self::Heading(6),
             "img" => Self::Image,
             "select" => Self::Select,
-            "span" => Self::Span,
+            "text" => Self::TextElement,
             _ => Self::Other(name),
         }
     }
@@ -214,12 +214,16 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime::{
+        rquickjs::{Ctx, Function},
+        Runtime,
+    };
 
     #[test]
     fn nodes_can_be_moved_detached_and_reattached() {
         let mut document = Document::new();
         let first = document.create_node(ElementKind::Div);
-        let second = document.create_node(ElementKind::Span);
+        let second = document.create_node(ElementKind::Div);
         let text = document.create_node(ElementKind::Text("hello".into()));
         document.insert(BODY_ID, first, None).unwrap();
         document.insert(BODY_ID, second, None).unwrap();
@@ -250,12 +254,96 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: text and comment nodes can adopt children"]
+    fn leaf_nodes_reject_child_insertion_without_moving_the_child() {
+        for kind in [
+            ElementKind::Text("leaf".into()),
+            ElementKind::Comment("leaf".into()),
+        ] {
+            let mut document = Document::new();
+            let leaf = document.create_node(kind);
+            let child = document.create_node(ElementKind::Div);
+            document.insert(BODY_ID, leaf, None).unwrap();
+            document.insert(BODY_ID, child, None).unwrap();
+
+            assert!(document.insert(leaf, child, None).is_err());
+            assert_eq!(document.body().children, [leaf, child]);
+            assert!(document.node(leaf).unwrap().children.is_empty());
+            assert_eq!(document.node(child).unwrap().parent, Some(BODY_ID));
+        }
+    }
+
+    #[test]
     fn element_names_map_to_semantic_kinds() {
         assert_eq!(ElementKind::from("BUTTON".to_owned()), ElementKind::Button);
         assert_eq!(ElementKind::from("h3".to_owned()), ElementKind::Heading(3));
         assert_eq!(
+            ElementKind::from("text".to_owned()),
+            ElementKind::TextElement
+        );
+        assert_eq!(
+            ElementKind::from("span".to_owned()),
+            ElementKind::Other("span".to_owned())
+        );
+        assert_eq!(
             ElementKind::from("CUSTOM-CARD".to_owned()),
             ElementKind::Other("custom-card".to_owned())
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: rejected opacity writes mutate the document before returning an error"]
+    fn rejected_opacity_write_preserves_document_value() {
+        let mut document = Document::new();
+        let element = document.create_node(ElementKind::Div);
+        document
+            .set_style(element, "opacity", Some("0.35"))
+            .unwrap();
+
+        assert!(document.set_style(element, "opacity", Some("1.1")).is_err());
+        assert_eq!(document.node(element).unwrap().style.opacity, 0.35);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "known bug: collected detached DOM wrappers leave their native nodes in every snapshot"]
+    async fn collected_detached_wrappers_release_native_nodes() {
+        let store = crate::ui::UiStore::new();
+        let host_store = store.clone();
+        let runtime = Runtime::new_with_host(move |context| {
+            crate::ui::install(context, host_store)?;
+            context.globals().set(
+                "__test_collect_garbage",
+                Function::new(context.clone(), |context: Ctx<'_>| context.run_gc())?,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        runtime
+            .eval::<()>(
+                r##"
+                (() => {
+                  for (let index = 0; index < 128; index += 1) {
+                    const node = document.createElement("div");
+                    document.body.appendChild(node);
+                    node.remove();
+                  }
+                })();
+                "##,
+            )
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>("__test_collect_garbage()")
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        assert_eq!(
+            snapshot.nodes.len(),
+            1,
+            "only the body should remain after unreachable detached wrappers are collected"
         );
     }
 }

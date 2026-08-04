@@ -15,7 +15,6 @@ pub(crate) struct Style {
     pub(crate) display: Display,
     pub(crate) box_sizing: BoxSizing,
     pub(crate) position: Position,
-    pub(crate) positioned: bool,
     pub(crate) overflow_x: Overflow,
     pub(crate) overflow_y: Overflow,
     pub(crate) z_index: ZIndex,
@@ -112,8 +111,7 @@ impl Default for Style {
         Self {
             display: Display::Block,
             box_sizing: BoxSizing::ContentBox,
-            position: Position::Relative,
-            positioned: false,
+            position: Position::Static,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
             z_index: ZIndex::Auto,

@@ -151,11 +151,7 @@ pub(super) fn parse_angle(name: &str, value: &str) -> Result<f32, StyleError> {
     invalid(name, value)
 }
 
-pub(super) fn parse_shadow(
-    name: &str,
-    value: &str,
-    allow_spread: bool,
-) -> Result<Vec<Shadow>, StyleError> {
+pub(super) fn parse_shadow(name: &str, value: &str) -> Result<Vec<Shadow>, StyleError> {
     if value.eq_ignore_ascii_case("none") {
         return Ok(Vec::new());
     }
@@ -165,20 +161,13 @@ pub(super) fn parse_shadow(
     }
     shadows
         .into_iter()
-        .map(|shadow| parse_shadow_item(name, shadow, allow_spread))
+        .map(|shadow| parse_shadow_item(name, shadow))
         .collect()
 }
 
-pub(super) fn parse_shadow_item(
-    name: &str,
-    value: &str,
-    allow_spread: bool,
-) -> Result<Shadow, StyleError> {
+fn parse_shadow_item(name: &str, value: &str) -> Result<Shadow, StyleError> {
     let parts = split_whitespace_preserving_functions(value);
     let inset = parts.iter().any(|part| part.eq_ignore_ascii_case("inset"));
-    if inset && !allow_spread {
-        return invalid(name, value);
-    }
     let color_index = parts
         .iter()
         .position(|part| parse_color(name, part).is_ok());
@@ -192,19 +181,14 @@ pub(super) fn parse_shadow_item(
         .filter(|(index, part)| Some(*index) != color_index && !part.eq_ignore_ascii_case("inset"))
         .map(|(_, part)| parse_length(name, part))
         .collect::<Result<Vec<_>, _>>()?;
-    let valid = if allow_spread { 2..=4 } else { 2..=3 };
-    if !valid.contains(&lengths.len()) || lengths.get(2).is_some_and(|value| *value < 0.0) {
+    if !(2..=4).contains(&lengths.len()) || lengths.get(2).is_some_and(|value| *value < 0.0) {
         return invalid(name, value);
     }
     Ok(Shadow {
         offset_x: lengths[0],
         offset_y: lengths[1],
         blur: lengths.get(2).copied().unwrap_or(0.0),
-        spread: if allow_spread {
-            lengths.get(3).copied().unwrap_or(0.0)
-        } else {
-            0.0
-        },
+        spread: lengths.get(3).copied().unwrap_or(0.0),
         color,
         inset,
     })
@@ -813,4 +797,18 @@ pub(super) fn named_color(value: &str) -> Option<u32> {
         "yellowgreen" => 0x9acd32,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "known bug: malformed non-ASCII hex colors panic instead of returning InvalidValue"]
+    fn non_ascii_hex_color_returns_invalid_value() {
+        assert!(matches!(
+            parse_color("color", "#€aaa"),
+            Err(StyleError::InvalidValue(_, _))
+        ));
+    }
 }

@@ -8,10 +8,10 @@ mod renderer;
 mod text_system;
 
 pub use drawing::{
-    BackgroundImage, Border, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius, DrawCommand,
-    FontFamily, FontStyle, GradientStop, Outline, RasterImage, Rect, TextAlign, TextDecorationLine,
-    TextOverflowWrap, TextShadow, TextSpan, TextStyle, TextWhiteSpace, TextWordBreak, TextWrap,
-    Transform,
+    BackgroundImage, Border, BoxDecoration, BoxShadow, BoxStyle, Canvas, Clip, Color, CornerRadius,
+    DecorationStyle, DrawCommand, FontFamily, FontStyle, GradientStop, Outline, PaintLayer,
+    RasterImage, Rect, TextAlign, TextDecorationLine, TextOverflowWrap, TextShadow, TextSpan,
+    TextStyle, TextWhiteSpace, TextWordBreak, TextWrap, Transform,
 };
 pub use renderer::{RenderError, RenderTimings, Renderer, SurfaceSize};
 pub use text_system::{
