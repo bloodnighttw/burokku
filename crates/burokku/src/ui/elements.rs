@@ -1,5 +1,8 @@
-use crate::ui::elements::styles::{flex::FlexStyle, grid::GridStyle};
+use self::styles::{flex::FlexStyle, grid::GridStyle};
 
+mod iter;
+
+pub use iter::ElementsIter;
 pub mod styles;
 
 // represent the layout tree of window app
@@ -38,7 +41,7 @@ pub enum Elements {
 
     // the grid layout <grid>
     Grid {
-        style: Box<GridStyle>,        
+        style: Box<GridStyle>,
         // should only have Div/Flex/Grid/Text
         children: Vec<Elements>,
     },
@@ -56,6 +59,11 @@ pub enum Elements {
 }
 
 impl Elements {
+    /// Iterates over this element and its valid descendants in tree order.
+    pub fn iter(&self) -> ElementsIter<'_> {
+        ElementsIter::new(self)
+    }
+
     pub fn children(&self) -> Option<&Vec<Elements>> {
         match self {
             Self::App { children }
@@ -66,5 +74,14 @@ impl Elements {
             | Self::Text { children } => Some(children),
             Self::_String { .. } => None,
         }
+    }
+}
+
+impl<'a> IntoIterator for &'a Elements {
+    type Item = &'a Elements;
+    type IntoIter = ElementsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
