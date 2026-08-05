@@ -5,7 +5,11 @@ use taffy::{
     TrackSizingFunction,
 };
 
-use super::shared::background::{impl_background_style, Background};
+use super::shared::{
+    background::{impl_background_style, Background},
+    border::{impl_border_style, Border},
+    corner_radius::{impl_corner_radius_style, CornerRadius},
+};
 
 /// The properties used to lay out a grid container and its grid items.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,9 +37,13 @@ pub struct GridStyle {
 
     // Shared paint properties
     pub background: Background,
+    pub border: Option<Border>,
+    pub corner_radius: CornerRadius,
 }
 
 impl_background_style!(GridStyle);
+impl_border_style!(GridStyle);
+impl_corner_radius_style!(GridStyle);
 
 impl Default for GridStyle {
     fn default() -> Self {
@@ -67,6 +75,8 @@ impl Default for GridStyle {
             align_self: None,
             justify_self: None,
             background: Background::default(),
+            border: None,
+            corner_radius: CornerRadius::ZERO,
         }
     }
 }
@@ -98,5 +108,7 @@ mod tests {
         assert_eq!(grid.align_self, taffy.align_self);
         assert_eq!(grid.justify_self, taffy.justify_self);
         assert_eq!(grid.background, Background::default());
+        assert_eq!(grid.border, None);
+        assert_eq!(grid.corner_radius, CornerRadius::ZERO);
     }
 }

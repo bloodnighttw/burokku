@@ -3,7 +3,11 @@ use taffy::{
     JustifyContent, LengthPercentage,
 };
 
-use super::shared::background::{impl_background_style, Background};
+use super::shared::{
+    background::{impl_background_style, Background},
+    border::{impl_border_style, Border},
+    corner_radius::{impl_corner_radius_style, CornerRadius},
+};
 
 /// The properties used to lay out a flex container and its flex items.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,9 +28,13 @@ pub struct FlexStyle {
 
     // Shared paint properties
     pub background: Background,
+    pub border: Option<Border>,
+    pub corner_radius: CornerRadius,
 }
 
 impl_background_style!(FlexStyle);
+impl_border_style!(FlexStyle);
+impl_corner_radius_style!(FlexStyle);
 
 impl Default for FlexStyle {
     fn default() -> Self {
@@ -45,6 +53,8 @@ impl Default for FlexStyle {
             shrink: 1.0,
             align_self: None,
             background: Background::default(),
+            border: None,
+            corner_radius: CornerRadius::ZERO,
         }
     }
 }
@@ -69,5 +79,7 @@ mod tests {
         assert_eq!(flex.shrink, taffy.flex_shrink);
         assert_eq!(flex.align_self, taffy.align_self);
         assert_eq!(flex.background, Background::default());
+        assert_eq!(flex.border, None);
+        assert_eq!(flex.corner_radius, CornerRadius::ZERO);
     }
 }
