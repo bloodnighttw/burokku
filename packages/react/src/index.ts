@@ -1,23 +1,37 @@
 /// <reference path="./react-reconciler.d.ts" />
 import { createContext, type ReactNode } from "react";
 import createReconciler from "react-reconciler";
-import { updateProperties, type HostProps } from "@burokku/runtime";
-
-type HostNode = HTMLElement | Text;
+import {
+  commitHostRoot,
+  createHostElement,
+  createHostRoot,
+  createHostText,
+  insertHostNode,
+  removeHostNode,
+  setHostText,
+  updateHostProperties,
+  type ElementName,
+  type HostElement,
+  type HostNode,
+  type HostParent,
+  type HostProps,
+  type HostRoot,
+  type HostText,
+} from "@burokku/runtime";
 
 let currentUpdatePriority = 32;
 const hostContext = {};
 
-const append = (parent: HTMLElement, child: HostNode): void => {
-  parent.appendChild(child);
+const append = (parent: HostParent, child: HostNode): void => {
+  insertHostNode(parent, child);
 };
 
-const insert = (parent: HTMLElement, child: HostNode, before: HostNode): void => {
-  parent.insertBefore(child, before);
+const insert = (parent: HostParent, child: HostNode, before: HostNode): void => {
+  insertHostNode(parent, child, before);
 };
 
-const remove = (parent: HTMLElement, child: HostNode): void => {
-  parent.removeChild(child);
+const remove = (parent: HostParent, child: HostNode): void => {
+  removeHostNode(parent, child);
 };
 
 const hostConfig: Record<string, unknown> = {
@@ -37,13 +51,14 @@ const hostConfig: Record<string, unknown> = {
   getChildHostContext: () => hostContext,
   getPublicInstance: (instance: HostNode) => instance,
   prepareForCommit: () => null,
-  resetAfterCommit: () => undefined,
-  createInstance: (type: string, props: HostProps): HTMLElement => {
-    const element = document.createElement(type);
-    updateProperties(element, {}, props);
+  resetAfterCommit: (container: HostRoot) => commitHostRoot(container),
+  createInstance: (type: string, props: HostProps): HostElement => {
+    if (!isElementName(type)) throw new Error(`Unsupported Burokku element <${type}>`);
+    const element = createHostElement(type);
+    updateHostProperties(element, {}, props);
     return element;
   },
-  createTextInstance: (text: string): Text => document.createTextNode(text),
+  createTextInstance: (text: string): HostText => createHostText(text),
   appendInitialChild: append,
   appendChild: append,
   appendChildToContainer: append,
@@ -51,27 +66,21 @@ const hostConfig: Record<string, unknown> = {
   insertInContainerBefore: insert,
   removeChild: remove,
   removeChildFromContainer: remove,
-  clearContainer: (container: HTMLElement) => container.replaceChildren(),
+  clearContainer: (container: HostRoot) => {
+    for (const child of [...container.children]) removeHostNode(container, child);
+  },
   finalizeInitialChildren: () => false,
   shouldSetTextContent: () => false,
-  commitUpdate: (instance: HTMLElement, _type: string, previous: HostProps, next: HostProps) => {
-    updateProperties(instance, previous, next);
+  commitUpdate: (instance: HostElement, _type: string, previous: HostProps, next: HostProps) => {
+    updateHostProperties(instance, previous, next);
   },
-  commitTextUpdate: (instance: Text, _previous: string, next: string) => {
-    instance.data = next;
+  commitTextUpdate: (instance: HostText, _previous: string, next: string) => {
+    setHostText(instance, next);
   },
-  hideInstance: (instance: HTMLElement) => {
-    instance.style.display = "none";
-  },
-  unhideInstance: (instance: HTMLElement, props: HostProps) => {
-    instance.style.display = props.style?.display ?? "";
-  },
-  hideTextInstance: (instance: Text) => {
-    instance.data = "";
-  },
-  unhideTextInstance: (instance: Text, text: string) => {
-    instance.data = text;
-  },
+  hideInstance: () => undefined,
+  unhideInstance: () => undefined,
+  hideTextInstance: () => undefined,
+  unhideTextInstance: () => undefined,
   getCurrentEventPriority: () => 32,
   getCurrentUpdatePriority: () => currentUpdatePriority,
   setCurrentUpdatePriority: (priority: number) => {
@@ -107,7 +116,8 @@ export interface Root {
   unmount(): void;
 }
 
-export function createRoot(container: HTMLElement = document.body): Root {
+export function createRoot(): Root {
+  const container = createHostRoot();
   let pendingError: unknown;
   const captureError = (error: unknown): void => {
     pendingError ??= error;
@@ -140,4 +150,21 @@ export function createRoot(container: HTMLElement = document.body): Root {
   return { render: update, unmount: () => update(null) };
 }
 
-export type { BurokkuStyle, HostProps } from "@burokku/runtime";
+function isElementName(name: string): name is ElementName {
+  return name === "window" || name === "div" || name === "flex" || name === "grid" || name === "text";
+}
+
+export type {
+  BackgroundImage,
+  BurokkuStyle,
+  ContentAlignment,
+  DivStyle,
+  ElementName,
+  FlexStyle,
+  GradientStop,
+  GridStyle,
+  HostProps,
+  ItemAlignment,
+  SharedPaintStyle,
+  TextStyle,
+} from "@burokku/runtime";

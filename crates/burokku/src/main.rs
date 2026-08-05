@@ -9,30 +9,32 @@ mod ui;
 mod window;
 
 const DEFAULT_SCRIPT: &str = r##"
-const card = document.createElement("div");
-Object.assign(card.style, {
-    display: "flex",
-    flexDirection: "column",
-    width: "360px",
-    margin: "32px",
-    padding: "24px",
-    gap: "12px",
-    backgroundColor: "#f5f7fa",
-    borderColor: "#cbd2dc",
-    borderWidth: "1px",
-    borderRadius: "16px",
-});
-
-const title = document.createElement("span");
-Object.assign(title.style, { color: "#18202b", fontSize: "28px", lineHeight: "34px", fontWeight: "700" });
-title.textContent = "Burokku DOM";
-
-const detail = document.createElement("span");
-Object.assign(detail.style, { color: "#526071", fontSize: "16px", lineHeight: "24px" });
-detail.textContent = "Solid and React can mutate this native tree with familiar DOM operations.";
-
-card.append(title, detail);
-document.body.appendChild(card);
+__burokku_render(JSON.stringify({
+  type: "app",
+  children: [{
+    type: "window",
+    children: [{
+      type: "flex",
+      style: {
+        flexDirection: "column",
+        gap: 12,
+        backgroundColor: "#f5f7fa",
+        borderColor: "#cbd2dc",
+        borderWidth: 1,
+        borderRadius: 16
+      },
+      children: [{
+        type: "text",
+        style: { color: "#18202b", fontSize: 28, lineHeight: 34, fontWeight: 700 },
+        children: [{ type: "string", value: "Burokku UI" }]
+      }, {
+        type: "text",
+        style: { color: "#526071", fontSize: 16, lineHeight: 24 },
+        children: [{ type: "string", value: "React and Solid render this native element tree." }]
+      }]
+    }]
+  }]
+}));
 "##;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -72,15 +74,21 @@ async fn check_ui(store: ui::UiStore, source: String) -> Result<(), Box<dyn Erro
     runtime.eval::<()>(source).await?;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let snapshot = store.snapshot();
-    if snapshot.body().children.is_empty() {
-        return Err("script did not attach any nodes to document.body".into());
+    let snapshot = ui::Elements::from_json(&store.snapshot())?;
+    let ui::Elements::App { children } = &snapshot else {
+        return Err("script did not render an app root".into());
+    };
+    if !children
+        .iter()
+        .any(|child| matches!(child, ui::Elements::Window { .. }))
+    {
+        return Err("script did not render a window".into());
     }
     let mut text_system = render::TextSystem::new();
     let canvas = ui::build_canvas(&snapshot, 800.0, 600.0, 1.0, &mut text_system);
     println!(
-        "UI check: {} root nodes, {} drawing commands",
-        snapshot.body().children.len(),
+        "UI check: {} windows, {} drawing commands",
+        children.len(),
         canvas.commands().len()
     );
     Ok(())

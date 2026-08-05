@@ -1,12 +1,15 @@
-use self::styles::{flex::FlexStyle, grid::GridStyle};
+use self::styles::{div::DivStyle, flex::FlexStyle, grid::GridStyle, text::TextStyle};
 
 mod iter;
+mod wire;
 
 pub(crate) use iter::accepts_child;
 pub use iter::ElementsIter;
+pub use wire::ElementJsonError;
 pub mod styles;
 
 // represent the layout tree of window app
+#[derive(Clone, Debug, PartialEq)]
 pub enum Elements {
     // the root of app, its children should only accept [`Self::Window`]
     // and if user pass other element to App, it should ignore.
@@ -29,6 +32,7 @@ pub enum Elements {
 
     // the block layout <div>
     Div {
+        style: Box<DivStyle>,
         // should only have Div/Flex/Grid/Text
         children: Vec<Elements>,
     },
@@ -48,6 +52,7 @@ pub enum Elements {
     },
     // the text element <text>
     Text {
+        style: Box<TextStyle>,
         // should only have Self::_String or Self::Text
         children: Vec<Elements>,
     },
@@ -60,6 +65,12 @@ pub enum Elements {
 }
 
 impl Elements {
+    /// Parses an element tree from the JSON wire format used by the JavaScript
+    /// renderers.
+    pub fn from_json(json: &str) -> Result<Self, ElementJsonError> {
+        wire::parse(json)
+    }
+
     /// Iterates over this element and its valid descendants in tree order.
     pub fn iter(&self) -> ElementsIter<'_> {
         ElementsIter::new(self)
@@ -69,10 +80,10 @@ impl Elements {
         match self {
             Self::App { children }
             | Self::Window { children }
-            | Self::Div { children }
+            | Self::Div { children, .. }
             | Self::Flex { children, .. }
             | Self::Grid { children, .. }
-            | Self::Text { children } => Some(children),
+            | Self::Text { children, .. } => Some(children),
             Self::_String { .. } => None,
         }
     }

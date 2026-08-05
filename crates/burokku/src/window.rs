@@ -4,7 +4,7 @@ use runtime::{InputState, ModifiersState, MouseButton, WindowEventMessage};
 use tokio::sync::mpsc::UnboundedSender;
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalPosition},
+    dpi::LogicalSize,
     event::{ElementState, Modifiers, MouseButton as NativeMouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowId},
@@ -43,7 +43,6 @@ pub struct AppWindow {
     gpu: GPU,
     surface_version: u16,
     config_surface_version: u16,
-    cursor_position: PhysicalPosition<f64>,
     error: Option<String>,
 }
 
@@ -55,7 +54,6 @@ impl AppWindow {
             gpu,
             surface_version: 0,
             config_surface_version: 0,
-            cursor_position: PhysicalPosition::new(0.0, 0.0),
             error: None,
         }
     }
@@ -158,33 +156,12 @@ impl ApplicationHandler for AppWindow {
                     .send(WindowEventMessage::ModifiersChanged(modifiers(state)));
             }
             WindowEvent::CursorMoved { position } => {
-                self.cursor_position = position;
                 let _ = self.events.send(WindowEventMessage::CursorMoved {
                     x: position.x,
                     y: position.y,
                 });
-                if self
-                    .gpu
-                    .update_scroll_drag(&self.window, position.x, position.y)
-                {
-                    self.request_redraw();
-                }
             }
             WindowEvent::MouseInput { state, button } => {
-                if button == NativeMouseButton::Left {
-                    match state {
-                        ElementState::Pressed => {
-                            if self.gpu.begin_scroll_drag(
-                                &self.window,
-                                self.cursor_position.x,
-                                self.cursor_position.y,
-                            ) {
-                                self.request_redraw();
-                            }
-                        }
-                        ElementState::Released => self.gpu.end_scroll_drag(),
-                    }
-                }
                 let _ = self.events.send(WindowEventMessage::MouseInput {
                     state: input_state(state),
                     button: mouse_button(button),
@@ -195,16 +172,6 @@ impl ApplicationHandler for AppWindow {
                 delta_y,
                 precise,
             } => {
-                if self.gpu.scroll_wheel(
-                    &self.window,
-                    self.cursor_position.x,
-                    self.cursor_position.y,
-                    delta_x,
-                    delta_y,
-                    precise,
-                ) {
-                    self.request_redraw();
-                }
                 let _ = self.events.send(WindowEventMessage::MouseWheel {
                     delta_x,
                     delta_y,

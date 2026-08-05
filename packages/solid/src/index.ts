@@ -1,44 +1,86 @@
 import { createRenderer } from "solid-js/universal";
-import type { JSX } from "solid-js";
-import { setProperty as setHostProperty } from "@burokku/runtime";
+import type { JSX as SolidJSX } from "solid-js";
+import {
+  commitHostRoot,
+  createHostElement,
+  createHostRoot,
+  createHostText,
+  getHostFirstChild,
+  getHostNextSibling,
+  getHostParentNode,
+  insertHostNode,
+  removeHostNode,
+  setHostProperty,
+  setHostText,
+  type ElementName,
+  type HostNode,
+  type HostParent,
+} from "@burokku/runtime";
 
-const renderer = createRenderer<Node>({
+type SolidHostNode = HostNode | HostParent;
+const elementNames = new Set<ElementName>(["window", "div", "flex", "grid", "text"]);
+
+function isElementName(name: string): name is ElementName {
+  return elementNames.has(name as ElementName);
+}
+
+const renderer = createRenderer<SolidHostNode>({
   createElement(name) {
-    return document.createElement(name);
+    if (!isElementName(name)) throw new TypeError(`unsupported host element '${name}'`);
+    return createHostElement(name);
   },
   createTextNode(value) {
-    return document.createTextNode(value);
+    return createHostText(value);
   },
   replaceText(textNode, value) {
-    (textNode as Text).data = value;
+    if (textNode.kind !== "text") throw new TypeError("expected a host text node");
+    setHostText(textNode, value);
   },
   setProperty(node, name, value, previous) {
-    setHostProperty(node as HTMLElement, name, value, previous);
+    if (node.kind !== "element") throw new TypeError("expected a host element");
+    setHostProperty(node, name, value, previous);
   },
   insertNode(parent, node, anchor) {
-    parent.insertBefore(node, anchor ?? null);
+    if (parent.kind === "text" || node.kind === "root" || anchor?.kind === "root") {
+      throw new TypeError("invalid host tree insertion");
+    }
+    insertHostNode(parent, node, anchor);
   },
   isTextNode(node) {
-    return node.nodeType === Node.TEXT_NODE;
+    return node.kind === "text";
   },
   removeNode(parent, node) {
-    parent.removeChild(node);
+    if (parent.kind === "text" || node.kind === "root") {
+      throw new TypeError("invalid host tree removal");
+    }
+    removeHostNode(parent, node);
   },
   getParentNode(node) {
-    return node.parentNode ?? undefined;
+    return node.kind === "root" ? undefined : getHostParentNode(node);
   },
   getFirstChild(node) {
-    return node.firstChild ?? undefined;
+    return node.kind === "text" ? undefined : getHostFirstChild(node);
   },
   getNextSibling(node) {
-    return node.nextSibling ?? undefined;
+    return node.kind === "root" ? undefined : getHostNextSibling(node);
   },
 });
 
-export const render = renderer.render as unknown as (
-  code: () => JSX.Element,
-  element: Node,
-) => () => void;
+export function render(code: () => SolidJSX.Element): () => void {
+  const root = createHostRoot(true);
+  const dispose = renderer.render(code as unknown as () => SolidHostNode, root);
+  commitHostRoot(root);
+
+  return () => {
+    dispose();
+    let child = getHostFirstChild(root);
+    while (child) {
+      removeHostNode(root, child);
+      child = getHostFirstChild(root);
+    }
+    commitHostRoot(root);
+  };
+}
 
 export const {
   effect,
@@ -53,4 +95,15 @@ export const {
   mergeProps,
 } = renderer;
 
-export type { BurokkuStyle, HostProps } from "@burokku/runtime";
+export type {
+  BurokkuStyle,
+  DivStyle,
+  ElementName,
+  FlexStyle,
+  GridStyle,
+  HostNode,
+  HostParent,
+  HostProps,
+  TextStyle,
+} from "@burokku/runtime";
+export type { JSX } from "./jsx-runtime";

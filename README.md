@@ -7,8 +7,8 @@ A Rust workspace containing an asynchronous JavaScript runtime and the Burokku a
 - `crates/runtime` — rquickjs-based JavaScript runtime with Tokio integration
 - `crates/render` — surface-backed WebGPU drawing library for boxes and text
 - `crates/winit` — small macOS/AppKit windowing layer with an async Tokio driver
-- `crates/burokku` — DOM-like API, Taffy layout, and application host
-- `packages/runtime` — shared DOM property and style operations
+- `crates/burokku` — typed element tree, Taffy layout, and application host
+- `packages/runtime` — shared in-memory host tree and native render bridge
 - `packages/react` — custom React reconciler for Burokku nodes
 - `packages/solid` — custom Solid universal renderer for Burokku nodes
 - `example/react` and `example/solid` — Vite examples compiled for QuickJS
@@ -92,22 +92,25 @@ the first argument to run it instead:
 cargo run -p burokku -- ./script.js
 ```
 
-## DOM UI
+## Element UI
 
-Burokku installs `document`, `Node`, `Element`, `HTMLElement`, `Text`, and
-`DocumentFragment` in QuickJS. JavaScript can use familiar DOM operations such
-as `document.createElement`, `appendChild`, `insertBefore`, `removeChild`,
-`textContent`, attributes, and `element.style`. Rust owns the persistent tree,
-measures text with `TextSystem`, computes layout with Taffy, then converts the
-result into `render::Canvas` drawing commands.
+React and Solid build a small semantic host tree made of `window`, `div`,
+`flex`, `grid`, and `text`. Each framework publishes the complete app tree to
+the native host after a commit. Rust parses that tree into typed `Elements`,
+measures rich text with `TextSystem`, computes layout with Taffy, and converts
+the result into `render::Canvas` drawing commands.
 
 React uses the custom reconciler in `@burokku/react`:
 
 ```tsx
 import { createRoot } from "@burokku/react";
 
-createRoot(document.body).render(
-  <div style={{ padding: 24, backgroundColor: "#f5f7fa" }}>Hello</div>,
+createRoot().render(
+  <window>
+    <flex style={{ flexDirection: "column", gap: 12, backgroundColor: "#f5f7fa" }}>
+      <text>Hello</text>
+    </flex>
+  </window>,
 );
 ```
 
@@ -117,14 +120,19 @@ fine-grained updates against the same native nodes:
 ```tsx
 import { render } from "@burokku/solid";
 
-render(() => <div style={{ padding: "24px" }}>Hello</div>, document.body);
+render(() => (
+  <window>
+    <text style={{ fontSize: 24 }}>Hello</text>
+  </window>
+));
 ```
 
-The currently supported visual CSS subset is flex/block display, width and
-height constraints, gap, padding, margin, clipped and scrollable overflow,
-background and text color, border, outline, radius, and basic font properties.
-Scrollable boxes respond to mouse-wheel input, scrollbar track clicks, and
-thumb dragging.
+The supported style surface follows the typed Rust elements: box backgrounds,
+borders and corner radii; flex and grid layout properties; and text color,
+font, alignment, spacing, wrapping, and decoration properties. Unsupported CSS
+such as sizing, padding, margins, positioning, overflow, transforms, shadows,
+opacity, and outlines is intentionally not exposed by the TypeScript JSX
+types.
 
 Build and run the Vite example with:
 

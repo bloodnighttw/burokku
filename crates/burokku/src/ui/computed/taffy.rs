@@ -192,13 +192,17 @@ where
         let node_id = NodeId::from(self.nodes.len());
         self.nodes.push(LayoutNode::new(element));
 
-        if let Some(children) = element.children() {
-            for child in children
-                .iter()
-                .filter(|child| accepts_child(element, child))
-            {
-                let child_id = self.add_element(child);
-                self.nodes[node_index(node_id)].children.push(child_id);
+        // A text element and all of its nested strings/spans are shaped as one
+        // inline flow, so text is a leaf from Taffy's point of view.
+        if !matches!(element, Elements::Text { .. }) {
+            if let Some(children) = element.children() {
+                for child in children
+                    .iter()
+                    .filter(|child| accepts_child(element, child))
+                {
+                    let child_id = self.add_element(child);
+                    self.nodes[node_index(node_id)].children.push(child_id);
+                }
             }
         }
 
@@ -470,10 +474,11 @@ mod tests {
     use taffy::{geometry::Point, prelude::TaffyMaxContent, style_helpers::length, FlexDirection};
 
     use super::*;
-    use crate::ui::elements::styles::{flex::FlexStyle, grid::GridStyle};
+    use crate::ui::elements::styles::{flex::FlexStyle, grid::GridStyle, text::TextStyle};
 
     fn text(value: &str) -> Elements {
         Elements::Text {
+            style: Box::new(TextStyle::default()),
             children: vec![Elements::_String {
                 string: value.into(),
             }],
@@ -491,11 +496,18 @@ mod tests {
         };
 
         let mut tree = LayoutTree::with_measure(&root, |element: &Elements, _, _| {
-            let Elements::_String { string } = element else {
+            let Elements::Text { children, .. } = element else {
                 return Size::ZERO;
             };
+            let length = children
+                .iter()
+                .filter_map(|child| match child {
+                    Elements::_String { string } => Some(string.len()),
+                    _ => None,
+                })
+                .sum::<usize>();
             Size {
-                width: string.len() as f32 * 4.5,
+                width: length as f32 * 4.5,
                 height: 7.5,
             }
         });
@@ -522,10 +534,14 @@ mod tests {
         let root = Elements::App {
             children: vec![
                 Elements::Div {
+                    style: Box::default(),
                     children: vec![Elements::Window { children: vec![] }],
                 },
                 Elements::Window {
-                    children: vec![Elements::Div { children: vec![] }],
+                    children: vec![Elements::Div {
+                        style: Box::default(),
+                        children: vec![],
+                    }],
                 },
             ],
         };
