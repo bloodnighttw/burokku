@@ -3,8 +3,10 @@ use taffy::{
     JustifyContent, LengthPercentage,
 };
 
+use super::shared::background::{impl_background_style, Background};
+
 /// The properties used to lay out a flex container and its flex items.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FlexStyle {
     // Container properties
     pub direction: FlexDirection,
@@ -19,7 +21,12 @@ pub struct FlexStyle {
     pub grow: f32,
     pub shrink: f32,
     pub align_self: Option<AlignSelf>,
+
+    // Shared paint properties
+    pub background: Background,
 }
+
+impl_background_style!(FlexStyle);
 
 impl Default for FlexStyle {
     fn default() -> Self {
@@ -37,6 +44,7 @@ impl Default for FlexStyle {
             grow: 0.0,
             shrink: 1.0,
             align_self: None,
+            background: Background::default(),
         }
     }
 }
@@ -60,5 +68,6 @@ mod tests {
         assert_eq!(flex.grow, taffy.flex_grow);
         assert_eq!(flex.shrink, taffy.flex_shrink);
         assert_eq!(flex.align_self, taffy.align_self);
+        assert_eq!(flex.background, Background::default());
     }
 }

@@ -5,6 +5,8 @@ use taffy::{
     TrackSizingFunction,
 };
 
+use super::shared::background::{impl_background_style, Background};
+
 /// The properties used to lay out a grid container and its grid items.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridStyle {
@@ -28,7 +30,12 @@ pub struct GridStyle {
     pub column: Line<GridPlacement<String>>,
     pub align_self: Option<AlignSelf>,
     pub justify_self: Option<JustifySelf>,
+
+    // Shared paint properties
+    pub background: Background,
 }
+
+impl_background_style!(GridStyle);
 
 impl Default for GridStyle {
     fn default() -> Self {
@@ -59,6 +66,7 @@ impl Default for GridStyle {
             },
             align_self: None,
             justify_self: None,
+            background: Background::default(),
         }
     }
 }
@@ -89,5 +97,6 @@ mod tests {
         assert_eq!(grid.column, taffy.grid_column);
         assert_eq!(grid.align_self, taffy.align_self);
         assert_eq!(grid.justify_self, taffy.justify_self);
+        assert_eq!(grid.background, Background::default());
     }
 }
