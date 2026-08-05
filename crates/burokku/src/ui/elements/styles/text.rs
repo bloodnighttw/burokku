@@ -10,6 +10,13 @@ pub enum LineHeight {
     Value(f32),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TextDecorationColor {
+    #[default]
+    Current,
+    Color(Color),
+}
+
 /// The typography and paint properties used to lay out and render text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
@@ -24,9 +31,9 @@ pub struct TextStyle {
     pub letter_spacing: f32,
     pub word_spacing: f32,
     pub text_decoration_line: TextDecorationLine,
-    pub text_decoration_color: Color,
-    /// Whether the decoration color follows [`TextStyle::color`].
-    pub text_decoration_color_is_current: bool,
+    /// The decoration color, or [`TextDecorationColor::Current`] to follow
+    /// [`TextStyle::color`].
+    pub text_decoration_color: TextDecorationColor,
     pub white_space: TextWhiteSpace,
     pub overflow_wrap: TextOverflowWrap,
     pub word_break: TextWordBreak,
@@ -56,8 +63,11 @@ impl From<render::TextStyle> for TextStyle {
             letter_spacing: style.letter_spacing,
             word_spacing: style.word_spacing,
             text_decoration_line: style.text_decoration_line,
-            text_decoration_color: style.text_decoration_color,
-            text_decoration_color_is_current: style.text_decoration_color_is_current,
+            text_decoration_color: if style.text_decoration_color_is_current {
+                TextDecorationColor::Current
+            } else {
+                TextDecorationColor::Color(style.text_decoration_color)
+            },
             white_space: style.white_space,
             overflow_wrap: style.overflow_wrap,
             word_break: style.word_break,
@@ -73,6 +83,12 @@ impl From<TextStyle> for render::TextStyle {
             LineHeight::Value(value) => (value, false),
         };
 
+        let (text_decoration_color, text_decoration_color_is_current) =
+            match style.text_decoration_color {
+                TextDecorationColor::Current => (Color::BLACK, true),
+                TextDecorationColor::Color(color) => (color, false),
+            };
+
         Self {
             color: style.color,
             font_size: style.font_size,
@@ -85,8 +101,8 @@ impl From<TextStyle> for render::TextStyle {
             letter_spacing: style.letter_spacing,
             word_spacing: style.word_spacing,
             text_decoration_line: style.text_decoration_line,
-            text_decoration_color: style.text_decoration_color,
-            text_decoration_color_is_current: style.text_decoration_color_is_current,
+            text_decoration_color,
+            text_decoration_color_is_current,
             white_space: style.white_space,
             overflow_wrap: style.overflow_wrap,
             word_break: style.word_break,
@@ -136,5 +152,17 @@ mod tests {
 
         assert_eq!(actual.line_height, 24.0);
         assert!(actual.line_height_is_normal);
+    }
+
+    #[test]
+    fn explicit_decoration_color_does_not_follow_text_color() {
+        let actual = render::TextStyle::from(TextStyle {
+            color: Color::WHITE,
+            text_decoration_color: TextDecorationColor::Color(Color::TRANSPARENT),
+            ..TextStyle::default()
+        });
+
+        assert_eq!(actual.text_decoration_color, Color::TRANSPARENT);
+        assert!(!actual.text_decoration_color_is_current);
     }
 }
