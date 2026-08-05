@@ -2,9 +2,9 @@ use self::styles::{flex::FlexStyle, grid::GridStyle};
 
 mod iter;
 
+pub(crate) use iter::accepts_child;
 pub use iter::ElementsIter;
 pub mod styles;
-pub mod taffy;
 
 // represent the layout tree of window app
 pub enum Elements {

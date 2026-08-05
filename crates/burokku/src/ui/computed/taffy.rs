@@ -15,7 +15,7 @@ use taffy::{
     Size, Style, TraversePartialTree, TraverseTree,
 };
 
-use super::{iter::accepts_child, Elements};
+use crate::ui::elements::{accepts_child, Elements};
 
 /// Supplies intrinsic sizes for leaf elements.
 ///
