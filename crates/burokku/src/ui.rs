@@ -3,6 +3,7 @@ mod render;
 mod store;
 
 pub mod elements;
+pub mod computed;
 pub mod layouts;
 
 pub use bridge::install;
