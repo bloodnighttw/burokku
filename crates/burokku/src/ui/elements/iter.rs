@@ -16,6 +16,7 @@ pub struct ElementsIter<'a> {
 struct Children<'a> {
     parent: &'a Elements,
     children: std::slice::Iter<'a, Elements>,
+    accepted: usize,
 }
 
 impl<'a> ElementsIter<'a> {
@@ -40,7 +41,15 @@ impl<'a> Iterator for ElementsIter<'a> {
                 };
                 let parent = ancestor.parent;
 
+                // Multiple windows are not supported yet, so an App's
+                // traversal stops after its first valid Window child.
+                if matches!(parent, Elements::App { .. }) && ancestor.accepted == 1 {
+                    self.ancestors.pop();
+                    continue;
+                }
+
                 if let Some(child) = ancestor.children.find(|child| accepts_child(parent, child)) {
+                    ancestor.accepted += 1;
                     break child;
                 }
 
@@ -52,6 +61,7 @@ impl<'a> Iterator for ElementsIter<'a> {
             self.ancestors.push(Children {
                 parent: element,
                 children: children.iter(),
+                accepted: 0,
             });
         }
 
@@ -134,5 +144,27 @@ mod tests {
         };
 
         assert_eq!((&tree).into_iter().count(), 2);
+    }
+
+    #[test]
+    fn app_traverses_only_the_first_valid_window() {
+        let tree = Elements::App {
+            children: vec![
+                Elements::Div { children: vec![] },
+                Elements::Window {
+                    children: vec![Elements::Text { children: vec![] }],
+                },
+                Elements::Window {
+                    children: vec![Elements::Div { children: vec![] }],
+                },
+            ],
+        };
+
+        let elements: Vec<_> = tree.iter().collect();
+
+        assert_eq!(elements.len(), 3);
+        assert!(matches!(elements[0], Elements::App { .. }));
+        assert!(matches!(elements[1], Elements::Window { .. }));
+        assert!(matches!(elements[2], Elements::Text { .. }));
     }
 }
