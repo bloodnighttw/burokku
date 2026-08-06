@@ -90,6 +90,8 @@ mod tests {
         let tree = Elements::App {
             children: vec![
                 Elements::Div {
+                    flex_item_style: Default::default(),
+                    grid_item_style: Default::default(),
                     children: vec![Elements::Window { children: vec![] }],
                 },
                 Elements::Window {
@@ -98,18 +100,36 @@ mod tests {
                             string: "invalid window child".into(),
                         },
                         Elements::Text {
+                            flex_item_style: Default::default(),
+                            grid_item_style: Default::default(),
                             children: vec![
                                 Elements::_String {
                                     string: "valid text child".into(),
                                 },
-                                Elements::Div { children: vec![] },
-                                Elements::Text { children: vec![] },
+                                Elements::Div {
+                                    flex_item_style: Default::default(),
+                                    grid_item_style: Default::default(),
+                                    children: vec![],
+                                },
+                                Elements::Text {
+                                    flex_item_style: Default::default(),
+                                    grid_item_style: Default::default(),
+                                    children: vec![],
+                                },
                             ],
                         },
                         Elements::Window {
-                            children: vec![Elements::Div { children: vec![] }],
+                            children: vec![Elements::Div {
+                                flex_item_style: Default::default(),
+                                grid_item_style: Default::default(),
+                                children: vec![],
+                            }],
                         },
-                        Elements::Div { children: vec![] },
+                        Elements::Div {
+                            flex_item_style: Default::default(),
+                            grid_item_style: Default::default(),
+                            children: vec![],
+                        },
                     ],
                 },
             ],
@@ -130,7 +150,13 @@ mod tests {
     #[test]
     fn borrowed_element_implements_into_iterator() {
         let tree = Elements::Div {
-            children: vec![Elements::Text { children: vec![] }],
+            flex_item_style: Default::default(),
+            grid_item_style: Default::default(),
+            children: vec![Elements::Text {
+                flex_item_style: Default::default(),
+                grid_item_style: Default::default(),
+                children: vec![],
+            }],
         };
 
         assert_eq!((&tree).into_iter().count(), 2);

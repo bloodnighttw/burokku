@@ -5,7 +5,7 @@ use taffy::{
     TrackSizingFunction,
 };
 
-/// The properties used to lay out a grid container and its grid items.
+/// The properties used to lay out a grid container.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridStyle {
     // Container properties
@@ -22,8 +22,11 @@ pub struct GridStyle {
     pub justify_content: Option<JustifyContent>,
     pub align_items: Option<AlignItems>,
     pub justify_items: Option<JustifyItems>,
+}
 
-    // Item properties
+/// The properties used to lay out an element as a grid item.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridItemStyle {
     pub row: Line<GridPlacement<String>>,
     pub column: Line<GridPlacement<String>>,
     pub align_self: Option<AlignSelf>,
@@ -49,6 +52,13 @@ impl Default for GridStyle {
             justify_content: None,
             align_items: None,
             justify_items: None,
+        }
+    }
+}
+
+impl Default for GridItemStyle {
+    fn default() -> Self {
+        Self {
             row: Line {
                 start: GridPlacement::Auto,
                 end: GridPlacement::Auto,
@@ -85,9 +95,10 @@ mod tests {
         assert_eq!(grid.justify_content, taffy.justify_content);
         assert_eq!(grid.align_items, taffy.align_items);
         assert_eq!(grid.justify_items, taffy.justify_items);
-        assert_eq!(grid.row, taffy.grid_row);
-        assert_eq!(grid.column, taffy.grid_column);
-        assert_eq!(grid.align_self, taffy.align_self);
-        assert_eq!(grid.justify_self, taffy.justify_self);
+        let item = GridItemStyle::default();
+        assert_eq!(item.row, taffy.grid_row);
+        assert_eq!(item.column, taffy.grid_column);
+        assert_eq!(item.align_self, taffy.align_self);
+        assert_eq!(item.justify_self, taffy.justify_self);
     }
 }

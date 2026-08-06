@@ -3,7 +3,7 @@ use taffy::{
     JustifyContent, LengthPercentage,
 };
 
-/// The properties used to lay out a flex container and its flex items.
+/// The properties used to lay out a flex container.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlexStyle {
     // Container properties
@@ -13,8 +13,11 @@ pub struct FlexStyle {
     pub align_content: Option<AlignContent>,
     pub align_items: Option<AlignItems>,
     pub justify_content: Option<JustifyContent>,
+}
 
-    // Item properties
+/// The properties used to lay out an element as a flex item.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlexItemStyle {
     pub basis: Dimension,
     pub grow: f32,
     pub shrink: f32,
@@ -33,6 +36,13 @@ impl Default for FlexStyle {
             align_content: None,
             align_items: None,
             justify_content: None,
+        }
+    }
+}
+
+impl Default for FlexItemStyle {
+    fn default() -> Self {
+        Self {
             basis: Dimension::auto(),
             grow: 0.0,
             shrink: 1.0,
@@ -56,9 +66,10 @@ mod tests {
         assert_eq!(flex.align_content, taffy.align_content);
         assert_eq!(flex.align_items, taffy.align_items);
         assert_eq!(flex.justify_content, taffy.justify_content);
-        assert_eq!(flex.basis, taffy.flex_basis);
-        assert_eq!(flex.grow, taffy.flex_grow);
-        assert_eq!(flex.shrink, taffy.flex_shrink);
-        assert_eq!(flex.align_self, taffy.align_self);
+        let item = FlexItemStyle::default();
+        assert_eq!(item.basis, taffy.flex_basis);
+        assert_eq!(item.grow, taffy.flex_grow);
+        assert_eq!(item.shrink, taffy.flex_shrink);
+        assert_eq!(item.align_self, taffy.align_self);
     }
 }

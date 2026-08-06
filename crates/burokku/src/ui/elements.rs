@@ -1,4 +1,7 @@
-use self::styles::{flex::FlexStyle, grid::GridStyle};
+use self::styles::{
+    flex::{FlexItemStyle, FlexStyle},
+    grid::{GridItemStyle, GridStyle},
+};
 
 mod iter;
 
@@ -28,6 +31,8 @@ pub enum Elements {
 
     // the block layout <div>
     Div {
+        flex_item_style: Box<FlexItemStyle>,
+        grid_item_style: Box<GridItemStyle>,
         // should only have Div/Flex/Grid/Text
         children: Vec<Elements>,
     },
@@ -35,6 +40,8 @@ pub enum Elements {
     // the flex layout element <flex>
     Flex {
         style: Box<FlexStyle>,
+        flex_item_style: Box<FlexItemStyle>,
+        grid_item_style: Box<GridItemStyle>,
         // should only have Div/Flex/Grid/Text
         children: Vec<Elements>,
     },
@@ -42,11 +49,15 @@ pub enum Elements {
     // the grid layout <grid>
     Grid {
         style: Box<GridStyle>,
+        flex_item_style: Box<FlexItemStyle>,
+        grid_item_style: Box<GridItemStyle>,
         // should only have Div/Flex/Grid/Text
         children: Vec<Elements>,
     },
     // the text element <text>
     Text {
+        flex_item_style: Box<FlexItemStyle>,
+        grid_item_style: Box<GridItemStyle>,
         // should only have Self::_String or Self::Text
         children: Vec<Elements>,
     },
@@ -68,10 +79,10 @@ impl Elements {
         match self {
             Self::App { children }
             | Self::Window { children }
-            | Self::Div { children }
+            | Self::Div { children, .. }
             | Self::Flex { children, .. }
             | Self::Grid { children, .. }
-            | Self::Text { children } => Some(children),
+            | Self::Text { children, .. } => Some(children),
             Self::_String { .. } => None,
         }
     }
