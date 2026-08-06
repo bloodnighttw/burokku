@@ -1,349 +1,87 @@
-//! Uncomputed UI nodes, called elements.
+use self::styles::{flex::FlexStyle, grid::GridStyle};
 
-use std::collections::HashMap;
+mod iter;
 
-use crate::ui::elements::styles::{set_style, Style};
-mod error;
+pub use iter::ElementsIter;
+pub mod styles;
 
-pub(crate) mod styles;
+// represent the layout tree of window app
+pub enum Elements {
+    // the root of app, its children should only accept [`Self::Window`]
+    // and if user pass other element to App, it should ignore.
+    App {
+        // should only have Window
+        children: Vec<Elements>,
+    },
 
-pub use error::DocumentError;
+    // the top of window, we can use it to create multiple window
+    // in js.
+    //
+    // currently, we only supported one <window> inside <app>, in future, we will
+    // support mulitple window.
+    //
+    // note it shouldn't nested Window inside Window, if user do so, it should ignore
+    Window {
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
+    },
 
-pub(super) const BODY_ID: u64 = 0;
+    // the block layout <div>
+    Div {
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
+    },
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub enum ElementKind {
-    Text(String),
-    Comment(String),
-    Button,
-    Div,
-    Heading(u8),
-    Image,
-    Select,
-    TextElement,
-    Body,
-    Other(String),
+    // the flex layout element <flex>
+    Flex {
+        style: Box<FlexStyle>,
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
+    },
+
+    // the grid layout <grid>
+    Grid {
+        style: Box<GridStyle>,
+        // should only have Div/Flex/Grid/Text
+        children: Vec<Elements>,
+    },
+    // the text element <text>
+    Text {
+        // should only have Self::_String or Self::Text
+        children: Vec<Elements>,
+    },
+    // internel element, it is to allow somethings like
+    // <text> hi! I'm <text style={{...}}/> Ben </text> <text>
+    // it should not being used by user.
+    _String {
+        string: String,
+    },
 }
 
-impl ElementKind {
-    pub fn is_element(&self) -> bool {
-        !matches!(self, Self::Text(_) | Self::Comment(_))
+impl Elements {
+    /// Iterates over this element and its valid descendants in tree order.
+    pub fn iter(&self) -> ElementsIter<'_> {
+        ElementsIter::new(self)
     }
-}
 
-impl From<&str> for ElementKind {
-    fn from(name: &str) -> Self {
-        name.to_owned().into()
-    }
-}
-
-impl From<String> for ElementKind {
-    fn from(name: String) -> Self {
-        let name = name.to_ascii_lowercase();
-        match name.as_str() {
-            "button" => Self::Button,
-            "div" => Self::Div,
-            "h1" => Self::Heading(1),
-            "h2" => Self::Heading(2),
-            "h3" => Self::Heading(3),
-            "h4" => Self::Heading(4),
-            "h5" => Self::Heading(5),
-            "h6" => Self::Heading(6),
-            "img" => Self::Image,
-            "select" => Self::Select,
-            "text" => Self::TextElement,
-            _ => Self::Other(name),
+    pub fn children(&self) -> Option<&Vec<Elements>> {
+        match self {
+            Self::App { children }
+            | Self::Window { children }
+            | Self::Div { children }
+            | Self::Flex { children, .. }
+            | Self::Grid { children, .. }
+            | Self::Text { children } => Some(children),
+            Self::_String { .. } => None,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Element {
-    pub kind: ElementKind,
-    pub parent: Option<u64>,
-    pub children: Vec<u64>,
-    pub style: Style,
-}
-
-#[derive(Clone, Debug)]
-pub struct Document {
-    nodes: HashMap<u64, Element>,
-    next_id: u64,
-}
-
-impl Default for Document {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Document {
-    pub fn new() -> Self {
-        let body = Element {
-            kind: ElementKind::Body,
-            style: Style::default(),
-            children: Vec::new(),
-            parent: None,
-        };
-        Self {
-            nodes: HashMap::from([(BODY_ID, body)]),
-            next_id: 1,
-        }
-    }
-
-    pub fn body(&self) -> &Element {
-        self.nodes
-            .get(&BODY_ID)
-            .expect("the document body always exists")
-    }
-
-    pub fn node(&self, id: u64) -> Result<&Element, DocumentError> {
-        self.nodes.get(&id).ok_or(DocumentError::MissingNode(id))
-    }
-
-    pub fn create_node(&mut self, kind: ElementKind) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.nodes.insert(
-            id,
-            Element {
-                kind,
-                style: Style::default(),
-                children: Vec::new(),
-                parent: None,
-            },
-        );
-        id
-    }
-
-    pub fn set_text(&mut self, id: u64, text: String) -> Result<(), DocumentError> {
-        let node = self.node_mut(id)?;
-        match &mut node.kind {
-            ElementKind::Text(node_text) | ElementKind::Comment(node_text) => {
-                *node_text = text;
-                Ok(())
-            }
-            _ => Err(DocumentError::NotText(id)),
-        }
-    }
-
-    pub fn set_style(
-        &mut self,
-        id: u64,
-        name: &str,
-        value: Option<&str>,
-    ) -> Result<(), DocumentError> {
-        let node = self.node_mut(id)?;
-        if !node.kind.is_element() {
-            return Err(DocumentError::NotElement(id));
-        }
-        set_style(&mut node.style, name, value).map_err(DocumentError::Style)
-    }
-
-    pub fn insert(
-        &mut self,
-        parent: u64,
-        child: u64,
-        before: Option<u64>,
-    ) -> Result<(), DocumentError> {
-        self.node(parent)?;
-        self.node(child)?;
-        if child == BODY_ID {
-            return Err(DocumentError::MoveBody);
-        }
-        if before == Some(child) {
-            return Ok(());
-        }
-        if let Some(anchor) = before {
-            if self.node(anchor)?.parent != Some(parent) {
-                return Err(DocumentError::MissingAnchor { parent, anchor });
-            }
-        }
-
-        let mut ancestor = Some(parent);
-        while let Some(id) = ancestor {
-            if id == child {
-                return Err(DocumentError::Cycle { parent, child });
-            }
-            ancestor = self.node(id)?.parent;
-        }
-
-        if let Some(old_parent) = self.node(child)?.parent {
-            let old_children = &mut self.node_mut(old_parent)?.children;
-            if let Some(index) = old_children
-                .iter()
-                .position(|candidate| *candidate == child)
-            {
-                old_children.remove(index);
-            }
-        }
-
-        let index = match before {
-            Some(anchor) => self
-                .node(parent)?
-                .children
-                .iter()
-                .position(|candidate| *candidate == anchor)
-                .expect("the anchor was validated before moving the child"),
-            None => self.node(parent)?.children.len(),
-        };
-        self.node_mut(parent)?.children.insert(index, child);
-        self.node_mut(child)?.parent = Some(parent);
-        Ok(())
-    }
-
-    pub fn remove(&mut self, parent: u64, child: u64) -> Result<(), DocumentError> {
-        let index = self
-            .node(parent)?
-            .children
-            .iter()
-            .position(|candidate| *candidate == child)
-            .ok_or(DocumentError::NotAChild { parent, child })?;
-        self.node_mut(parent)?.children.remove(index);
-        self.node_mut(child)?.parent = None;
-        Ok(())
-    }
-
-    fn node_mut(&mut self, id: u64) -> Result<&mut Element, DocumentError> {
-        self.nodes
-            .get_mut(&id)
-            .ok_or(DocumentError::MissingNode(id))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use runtime::{
-        rquickjs::{Ctx, Function},
-        Runtime,
-    };
+impl<'a> IntoIterator for &'a Elements {
+    type Item = &'a Elements;
+    type IntoIter = ElementsIter<'a>;
 
-    #[test]
-    fn nodes_can_be_moved_detached_and_reattached() {
-        let mut document = Document::new();
-        let first = document.create_node(ElementKind::Div);
-        let second = document.create_node(ElementKind::Div);
-        let text = document.create_node(ElementKind::Text("hello".into()));
-        document.insert(BODY_ID, first, None).unwrap();
-        document.insert(BODY_ID, second, None).unwrap();
-        document.insert(first, text, None).unwrap();
-
-        document.insert(second, text, None).unwrap();
-        assert!(document.node(first).unwrap().children.is_empty());
-        assert_eq!(document.node(second).unwrap().children, [text]);
-
-        document.remove(second, text).unwrap();
-        assert_eq!(document.node(text).unwrap().parent, None);
-        document.insert(first, text, None).unwrap();
-        assert_eq!(document.node(text).unwrap().parent, Some(first));
-    }
-
-    #[test]
-    fn rejects_cycles() {
-        let mut document = Document::new();
-        let parent = document.create_node(ElementKind::Div);
-        let child = document.create_node(ElementKind::Div);
-        document.insert(BODY_ID, parent, None).unwrap();
-        document.insert(parent, child, None).unwrap();
-
-        assert!(matches!(
-            document.insert(child, parent, None),
-            Err(DocumentError::Cycle { .. })
-        ));
-    }
-
-    #[test]
-    #[ignore = "known bug: text and comment nodes can adopt children"]
-    fn leaf_nodes_reject_child_insertion_without_moving_the_child() {
-        for kind in [
-            ElementKind::Text("leaf".into()),
-            ElementKind::Comment("leaf".into()),
-        ] {
-            let mut document = Document::new();
-            let leaf = document.create_node(kind);
-            let child = document.create_node(ElementKind::Div);
-            document.insert(BODY_ID, leaf, None).unwrap();
-            document.insert(BODY_ID, child, None).unwrap();
-
-            assert!(document.insert(leaf, child, None).is_err());
-            assert_eq!(document.body().children, [leaf, child]);
-            assert!(document.node(leaf).unwrap().children.is_empty());
-            assert_eq!(document.node(child).unwrap().parent, Some(BODY_ID));
-        }
-    }
-
-    #[test]
-    fn element_names_map_to_semantic_kinds() {
-        assert_eq!(ElementKind::from("BUTTON".to_owned()), ElementKind::Button);
-        assert_eq!(ElementKind::from("h3".to_owned()), ElementKind::Heading(3));
-        assert_eq!(
-            ElementKind::from("text".to_owned()),
-            ElementKind::TextElement
-        );
-        assert_eq!(
-            ElementKind::from("span".to_owned()),
-            ElementKind::Other("span".to_owned())
-        );
-        assert_eq!(
-            ElementKind::from("CUSTOM-CARD".to_owned()),
-            ElementKind::Other("custom-card".to_owned())
-        );
-    }
-
-    #[test]
-    #[ignore = "known bug: rejected opacity writes mutate the document before returning an error"]
-    fn rejected_opacity_write_preserves_document_value() {
-        let mut document = Document::new();
-        let element = document.create_node(ElementKind::Div);
-        document
-            .set_style(element, "opacity", Some("0.35"))
-            .unwrap();
-
-        assert!(document.set_style(element, "opacity", Some("1.1")).is_err());
-        assert_eq!(document.node(element).unwrap().style.opacity, 0.35);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "known bug: collected detached DOM wrappers leave their native nodes in every snapshot"]
-    async fn collected_detached_wrappers_release_native_nodes() {
-        let store = crate::ui::UiStore::new();
-        let host_store = store.clone();
-        let runtime = Runtime::new_with_host(move |context| {
-            crate::ui::install(context, host_store)?;
-            context.globals().set(
-                "__test_collect_garbage",
-                Function::new(context.clone(), |context: Ctx<'_>| context.run_gc())?,
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-        runtime
-            .eval::<()>(
-                r##"
-                (() => {
-                  for (let index = 0; index < 128; index += 1) {
-                    const node = document.createElement("div");
-                    document.body.appendChild(node);
-                    node.remove();
-                  }
-                })();
-                "##,
-            )
-            .await
-            .unwrap();
-        runtime
-            .eval::<()>("__test_collect_garbage()")
-            .await
-            .unwrap();
-
-        let snapshot = store.snapshot();
-        assert_eq!(
-            snapshot.nodes.len(),
-            1,
-            "only the body should remain after unreachable detached wrappers are collected"
-        );
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
