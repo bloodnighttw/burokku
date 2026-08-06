@@ -2,7 +2,7 @@ import { createSignal, onCleanup } from "solid-js";
 import { render } from "@burokku/solid";
 
 function Demo() {
-  const [remaining, setRemaining] = createSignal(5);
+  const [remaining, setRemaining] = createSignal(100);
   const timer = setInterval(() => {
     setRemaining(current => {
       if (current <= 1) {

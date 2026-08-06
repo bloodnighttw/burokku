@@ -140,74 +140,56 @@ export interface HostProps<Style extends BurokkuStyle = BurokkuStyle> {
 }
 
 export interface HostRoot {
-  readonly kind: "root";
-  readonly autoCommit: boolean;
+  readonly type: "app";
   readonly children: HostNode[];
-  commitQueued: boolean;
 }
 
 export interface HostElement<Name extends ElementName = ElementName> {
-  readonly kind: "element";
   readonly type: Name;
-  parent: HostParent | null;
   readonly children: HostNode[];
   style?: ElementStyleMap[Name];
 }
 
 export interface HostText {
-  readonly kind: "text";
-  parent: HostParent | null;
+  readonly type: "string";
   value: string;
 }
 
 export type HostNode = HostElement | HostText;
 export type HostParent = HostRoot | HostElement;
 
-export interface SerializedAppNode {
-  type: "app";
-  children: SerializedHostNode[];
+interface HostRootMetadata {
+  autoCommit: boolean;
+  commitQueued: boolean;
 }
 
-export interface SerializedElementNode {
-  type: ElementName;
-  style?: BurokkuStyle;
-  children: SerializedHostNode[];
-}
-
-export interface SerializedTextNode {
-  type: "string";
-  value: string;
-}
-
-export type SerializedHostNode = SerializedElementNode | SerializedTextNode;
+const hostParents = new WeakMap<HostNode, HostParent>();
+const hostRootMetadata = new WeakMap<HostRoot, HostRootMetadata>();
 
 declare global {
   // Installed by the native Burokku host before an application bundle runs.
-  var __burokku_render: ((serializedTree: string) => void) | undefined;
+  var __burokku_render: ((tree: HostRoot) => void) | undefined;
 }
 
 export function createHostRoot(autoCommit = false): HostRoot {
-  return {
-    kind: "root",
-    autoCommit,
+  const root: HostRoot = {
+    type: "app",
     children: [],
-    commitQueued: false,
   };
+  hostRootMetadata.set(root, { autoCommit, commitQueued: false });
+  return root;
 }
 
 export function createHostElement<Name extends ElementName>(name: Name): HostElement<Name> {
   return {
-    kind: "element",
     type: name,
-    parent: null,
     children: [],
   };
 }
 
 export function createHostText(value: unknown): HostText {
   return {
-    kind: "text",
-    parent: null,
+    type: "string",
     value: String(value),
   };
 }
@@ -225,19 +207,20 @@ export function insertHostNode(
   anchor: HostNode | null = null,
 ): void {
   if (anchor === node) return;
-  if (anchor !== null && anchor.parent !== parent) {
+  if (anchor !== null && parentFor(anchor) !== parent) {
     throw new Error("The host insertion anchor is not a child of the parent");
   }
   if (!acceptsChild(parent, node)) {
     throw new Error(`A ${describeParent(parent)} cannot contain ${describeNode(node)}`);
   }
 
-  for (let ancestor: HostParent | null = parent; ancestor?.kind === "element"; ) {
+  let ancestor: HostParent | null = parent;
+  while (ancestor !== null && ancestor.type !== "app") {
     if (ancestor === node) throw new Error("A host node cannot contain itself");
-    ancestor = ancestor.parent;
+    ancestor = parentFor(ancestor);
   }
 
-  const previousParent = node.parent;
+  const previousParent = parentFor(node);
   const previousRoot = previousParent === null ? null : rootForParent(previousParent);
   let insertionIndex = anchor === null ? parent.children.length : parent.children.indexOf(anchor);
 
@@ -250,7 +233,7 @@ export function insertHostNode(
   }
 
   parent.children.splice(insertionIndex, 0, node);
-  node.parent = parent;
+  hostParents.set(node, parent);
 
   const nextRoot = rootForParent(parent);
   queueRootCommit(previousRoot);
@@ -259,18 +242,18 @@ export function insertHostNode(
 
 export function removeHostNode(parent: HostParent, node: HostNode): void {
   const index = parent.children.indexOf(node);
-  if (index < 0 || node.parent !== parent) {
+  if (index < 0 || parentFor(node) !== parent) {
     throw new Error("The host node to remove is not a child of the parent");
   }
 
   const root = rootForParent(parent);
   parent.children.splice(index, 1);
-  node.parent = null;
+  hostParents.delete(node);
   queueRootCommit(root);
 }
 
 export function getHostParentNode(node: HostNode): HostParent | undefined {
-  return node.parent ?? undefined;
+  return hostParents.get(node);
 }
 
 export function getHostFirstChild(parent: HostParent): HostNode | undefined {
@@ -278,7 +261,7 @@ export function getHostFirstChild(parent: HostParent): HostNode | undefined {
 }
 
 export function getHostNextSibling(node: HostNode): HostNode | undefined {
-  const parent = node.parent;
+  const parent = parentFor(node);
   if (parent === null) return undefined;
   const index = parent.children.indexOf(node);
   return index < 0 ? undefined : parent.children[index + 1];
@@ -293,7 +276,7 @@ export function setHostProperty(
   if (name === "children" || name === "ref" || name === "key") return;
   if (name !== "style") throw new Error(`Unsupported Burokku property '${name}'`);
 
-  const next = cloneStyle(value);
+  const next = readStyle(value);
   if (stylesEqual(element.style, next)) return;
   element.style = next;
   queueConnectedCommit(element);
@@ -314,43 +297,21 @@ export function updateHostProperties(
   }
 }
 
-export function serializeHostRoot(root: HostRoot): SerializedAppNode {
-  return {
-    type: "app",
-    children: root.children.map(serializeHostNode),
-  };
-}
-
 export function commitHostRoot(root: HostRoot): void {
-  root.commitQueued = false;
+  metadataForRoot(root).commitQueued = false;
   const render = globalThis.__burokku_render;
   if (typeof render !== "function") {
     throw new Error("The native __burokku_render hook is not installed");
   }
-  render(JSON.stringify(serializeHostRoot(root)));
+  render(root);
 }
 
-function serializeHostNode(node: HostNode): SerializedHostNode {
-  if (node.kind === "text") {
-    return { type: "string", value: node.value };
-  }
-
-  const children = node.children.map(serializeHostNode);
-  if (node.style === undefined || Object.keys(node.style).length === 0) {
-    return { type: node.type, children };
-  }
-  return { type: node.type, style: node.style, children };
-}
-
-function cloneStyle(value: unknown): BurokkuStyle | undefined {
+function readStyle(value: unknown): BurokkuStyle | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("The style property must be an object");
   }
-
-  const style = Object.fromEntries(
-    Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== null),
-  ) as BurokkuStyle;
+  const style = value as BurokkuStyle;
   return Object.keys(style).length === 0 ? undefined : style;
 }
 
@@ -371,37 +332,50 @@ function stylesEqual(previous: BurokkuStyle | undefined, next: BurokkuStyle | un
 }
 
 function acceptsChild(parent: HostParent, child: HostNode): boolean {
-  if (parent.kind === "root") {
-    return child.kind === "element" && child.type === "window";
+  if (parent.type === "app") {
+    return child.type === "window";
   }
   if (parent.type === "text") {
-    return child.kind === "text" || (child.kind === "element" && child.type === "text");
+    return child.type === "string" || child.type === "text";
   }
-  return child.kind === "element" && child.type !== "window";
+  return child.type !== "string" && child.type !== "window";
 }
 
 function describeParent(parent: HostParent): string {
-  return parent.kind === "root" ? "app" : parent.type;
+  return parent.type;
 }
 
 function describeNode(node: HostNode): string {
-  return node.kind === "text" ? "string" : node.type;
+  return node.type;
 }
 
 function rootForParent(parent: HostParent): HostRoot | null {
   let current: HostParent | null = parent;
-  while (current?.kind === "element") current = current.parent;
+  while (current !== null && current.type !== "app") current = parentFor(current);
   return current;
 }
 
 function queueConnectedCommit(node: HostNode): void {
-  if (node.parent !== null) queueRootCommit(rootForParent(node.parent));
+  const parent = parentFor(node);
+  if (parent !== null) queueRootCommit(rootForParent(parent));
 }
 
 function queueRootCommit(root: HostRoot | null): void {
-  if (root === null || !root.autoCommit || root.commitQueued) return;
-  root.commitQueued = true;
+  if (root === null) return;
+  const metadata = metadataForRoot(root);
+  if (!metadata.autoCommit || metadata.commitQueued) return;
+  metadata.commitQueued = true;
   void Promise.resolve().then(() => {
-    if (root.commitQueued) commitHostRoot(root);
+    if (metadata.commitQueued) commitHostRoot(root);
   });
+}
+
+function parentFor(node: HostNode): HostParent | null {
+  return hostParents.get(node) ?? null;
+}
+
+function metadataForRoot(root: HostRoot): HostRootMetadata {
+  const metadata = hostRootMetadata.get(root);
+  if (metadata === undefined) throw new Error("Unknown Burokku host root");
+  return metadata;
 }

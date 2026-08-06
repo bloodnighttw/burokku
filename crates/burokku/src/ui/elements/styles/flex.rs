@@ -1,6 +1,5 @@
 use taffy::{
-    geometry::Size, AlignContent, AlignItems, AlignSelf, Dimension, FlexDirection, FlexWrap,
-    JustifyContent, LengthPercentage,
+    geometry::Size, AlignContent, AlignItems, AlignSelf, FlexDirection, FlexWrap, JustifyContent,
 };
 
 use super::shared::{
@@ -15,13 +14,13 @@ pub struct FlexStyle {
     // Container properties
     pub direction: FlexDirection,
     pub wrap: FlexWrap,
-    pub gap: Size<LengthPercentage>,
+    pub gap: Size<f32>,
     pub align_content: Option<AlignContent>,
     pub align_items: Option<AlignItems>,
     pub justify_content: Option<JustifyContent>,
 
     // Item properties
-    pub basis: Dimension,
+    pub basis: FlexBasis,
     pub grow: f32,
     pub shrink: f32,
     pub align_self: Option<AlignSelf>,
@@ -30,6 +29,18 @@ pub struct FlexStyle {
     pub background: Background,
     pub border: Option<Border>,
     pub corner_radius: CornerRadius,
+}
+
+/// The supported native flex-basis values.
+///
+/// This deliberately avoids storing Taffy's pointer-tagged `Dimension` in the
+/// element tree, keeping [`FlexStyle`] safe to publish between the JavaScript
+/// and window threads.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum FlexBasis {
+    #[default]
+    Auto,
+    Length(f32),
 }
 
 impl_background_style!(FlexStyle);
@@ -42,13 +53,13 @@ impl Default for FlexStyle {
             direction: FlexDirection::Row,
             wrap: FlexWrap::NoWrap,
             gap: Size {
-                width: LengthPercentage::length(0.0),
-                height: LengthPercentage::length(0.0),
+                width: 0.0,
+                height: 0.0,
             },
             align_content: None,
             align_items: None,
             justify_content: None,
-            basis: Dimension::auto(),
+            basis: FlexBasis::Auto,
             grow: 0.0,
             shrink: 1.0,
             align_self: None,
@@ -70,11 +81,12 @@ mod tests {
 
         assert_eq!(flex.direction, taffy.flex_direction);
         assert_eq!(flex.wrap, taffy.flex_wrap);
-        assert_eq!(flex.gap, taffy.gap);
+        assert_eq!(flex.gap.width, 0.0);
+        assert_eq!(flex.gap.height, 0.0);
         assert_eq!(flex.align_content, taffy.align_content);
         assert_eq!(flex.align_items, taffy.align_items);
         assert_eq!(flex.justify_content, taffy.justify_content);
-        assert_eq!(flex.basis, taffy.flex_basis);
+        assert_eq!(flex.basis, FlexBasis::Auto);
         assert_eq!(flex.grow, taffy.flex_grow);
         assert_eq!(flex.shrink, taffy.flex_shrink);
         assert_eq!(flex.align_self, taffy.align_self);

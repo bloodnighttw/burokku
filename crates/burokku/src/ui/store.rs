@@ -2,6 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
+use super::Elements;
+
 #[derive(Clone)]
 pub struct UiStore {
     inner: Arc<UiStoreInner>,
@@ -13,7 +15,7 @@ struct UiStoreInner {
 }
 
 struct UiState {
-    serialized: Arc<String>,
+    tree: Arc<Elements>,
     version: u64,
 }
 
@@ -22,7 +24,9 @@ impl UiStore {
         Self {
             inner: Arc::new(UiStoreInner {
                 state: ArcSwap::from_pointee(UiState {
-                    serialized: Arc::new(r#"{"type":"app","children":[]}"#.into()),
+                    tree: Arc::new(Elements::App {
+                        children: Vec::new(),
+                    }),
                     version: 0,
                 }),
                 writer: Mutex::new(()),
@@ -30,25 +34,21 @@ impl UiStore {
         }
     }
 
-    pub fn snapshot(&self) -> Arc<String> {
-        Arc::clone(&self.inner.state.load().serialized)
+    pub fn snapshot(&self) -> Arc<Elements> {
+        Arc::clone(&self.inner.state.load().tree)
     }
 
-    pub fn snapshot_with_version(&self) -> (u64, Arc<String>) {
+    pub fn snapshot_with_version(&self) -> (u64, Arc<Elements>) {
         let state = self.inner.state.load();
-        (state.version, Arc::clone(&state.serialized))
+        (state.version, Arc::clone(&state.tree))
     }
 
-    pub fn snapshot_if_changed(&self, version: u64) -> Option<(u64, Arc<String>)> {
+    pub fn snapshot_if_changed(&self, version: u64) -> Option<(u64, Arc<Elements>)> {
         let state = self.inner.state.load();
-        (state.version != version).then(|| (state.version, Arc::clone(&state.serialized)))
+        (state.version != version).then(|| (state.version, Arc::clone(&state.tree)))
     }
 
-    pub fn version(&self) -> u64 {
-        self.inner.state.load().version
-    }
-
-    pub fn replace(&self, serialized: String) {
+    pub fn replace(&self, tree: Elements) {
         let _writer = self
             .inner
             .writer
@@ -56,7 +56,7 @@ impl UiStore {
             .expect("the UI tree writer lock is not poisoned");
         let previous = self.inner.state.load_full();
         self.inner.state.store(Arc::new(UiState {
-            serialized: Arc::new(serialized),
+            tree: Arc::new(tree),
             version: previous.version.wrapping_add(1),
         }));
     }
@@ -77,11 +77,26 @@ mod tests {
         let store = UiStore::new();
         let before = store.snapshot();
 
-        store.replace(r#"{"type":"app","children":[{"type":"window"}]}"#.into());
+        store.replace(Elements::App {
+            children: vec![Elements::Window {
+                children: Vec::new(),
+            }],
+        });
 
         let (version, after) = store.snapshot_with_version();
         assert_eq!(version, 1);
         assert!(!Arc::ptr_eq(&before, &after));
+        assert!(matches!(
+            after.as_ref(),
+            Elements::App { children } if matches!(children.as_slice(), [Elements::Window { .. }])
+        ));
         assert!(store.snapshot_if_changed(version).is_none());
+    }
+
+    #[test]
+    fn native_element_tree_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Elements>();
+        assert_send_sync::<UiStore>();
     }
 }

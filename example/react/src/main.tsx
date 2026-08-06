@@ -61,7 +61,7 @@ function GridDemo() {
 }
 
 function App() {
-  const [remaining, setRemaining] = useState(10);
+  const [remaining, setRemaining] = useState(100);
 
   useEffect(() => {
     const interval = setInterval(() => {

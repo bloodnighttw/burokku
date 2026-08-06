@@ -26,11 +26,11 @@ test:
 
 react:
     pnpm --filter @burokku/example-react build
-    cargo run --release -p burokku -- example/react/dist/app.js
+    cargo run -p burokku -- example/react/dist/app.js
 
 solid:
     pnpm --filter @burokku/example-solid build
-    cargo run --release -p burokku -- example/solid/dist/app.js
+    cargo run -p burokku -- example/solid/dist/app.js
 
 _build-profile:
     env CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release -p burokku

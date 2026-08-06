@@ -33,36 +33,38 @@ const renderer = createRenderer<SolidHostNode>({
     return createHostText(value);
   },
   replaceText(textNode, value) {
-    if (textNode.kind !== "text") throw new TypeError("expected a host text node");
+    if (textNode.type !== "string") throw new TypeError("expected a host text node");
     setHostText(textNode, value);
   },
   setProperty(node, name, value, previous) {
-    if (node.kind !== "element") throw new TypeError("expected a host element");
+    if (node.type === "app" || node.type === "string") {
+      throw new TypeError("expected a host element");
+    }
     setHostProperty(node, name, value, previous);
   },
   insertNode(parent, node, anchor) {
-    if (parent.kind === "text" || node.kind === "root" || anchor?.kind === "root") {
+    if (parent.type === "string" || node.type === "app" || anchor?.type === "app") {
       throw new TypeError("invalid host tree insertion");
     }
     insertHostNode(parent, node, anchor);
   },
   isTextNode(node) {
-    return node.kind === "text";
+    return node.type === "string";
   },
   removeNode(parent, node) {
-    if (parent.kind === "text" || node.kind === "root") {
+    if (parent.type === "string" || node.type === "app") {
       throw new TypeError("invalid host tree removal");
     }
     removeHostNode(parent, node);
   },
   getParentNode(node) {
-    return node.kind === "root" ? undefined : getHostParentNode(node);
+    return node.type === "app" ? undefined : getHostParentNode(node);
   },
   getFirstChild(node) {
-    return node.kind === "text" ? undefined : getHostFirstChild(node);
+    return node.type === "string" ? undefined : getHostFirstChild(node);
   },
   getNextSibling(node) {
-    return node.kind === "root" ? undefined : getHostNextSibling(node);
+    return node.type === "app" ? undefined : getHostNextSibling(node);
   },
 });
 

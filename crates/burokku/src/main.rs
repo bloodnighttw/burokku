@@ -9,7 +9,7 @@ mod ui;
 mod window;
 
 const DEFAULT_SCRIPT: &str = r##"
-__burokku_render(JSON.stringify({
+__burokku_render({
   type: "app",
   children: [{
     type: "window",
@@ -34,7 +34,7 @@ __burokku_render(JSON.stringify({
       }]
     }]
   }]
-}));
+});
 "##;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -74,8 +74,8 @@ async fn check_ui(store: ui::UiStore, source: String) -> Result<(), Box<dyn Erro
     runtime.eval::<()>(source).await?;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let snapshot = ui::Elements::from_json(&store.snapshot())?;
-    let ui::Elements::App { children } = &snapshot else {
+    let snapshot = store.snapshot();
+    let ui::Elements::App { children } = snapshot.as_ref() else {
         return Err("script did not render an app root".into());
     };
     if !children

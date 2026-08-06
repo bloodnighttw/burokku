@@ -85,7 +85,7 @@ cargo build --workspace
 cargo run -p burokku
 ```
 
-The default script draws a small DOM example. Pass a compiled JavaScript file as
+The default script draws a small element-tree example. Pass a compiled JavaScript file as
 the first argument to run it instead:
 
 ```sh
@@ -94,11 +94,13 @@ cargo run -p burokku -- ./script.js
 
 ## Element UI
 
-React and Solid build a small semantic host tree made of `window`, `div`,
-`flex`, `grid`, and `text`. Each framework publishes the complete app tree to
-the native host after a commit. Rust parses that tree into typed `Elements`,
-measures rich text with `TextSystem`, computes layout with Taffy, and converts
-the result into `render::Canvas` drawing commands.
+React and Solid maintain one semantic host tree made of `window`, `div`,
+`flex`, `grid`, and `text`. Each framework passes that same tree object to the
+native host after a commit. Rust constructs the final typed `Elements` tree
+directly from the QuickJS value and stores that native tree for rendering; no
+JSON or intermediate wire tree is produced. Rich text is measured with
+`TextSystem`, layout is computed with Taffy, and the result becomes
+`render::Canvas` drawing commands.
 
 React uses the custom reconciler in `@burokku/react`:
 

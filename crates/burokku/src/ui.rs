@@ -27,7 +27,7 @@ mod tests {
         runtime
             .eval::<()>(
                 r##"
-                __burokku_render(JSON.stringify({
+                __burokku_render({
                   type: "app",
                   children: [{
                     type: "window",
@@ -37,14 +37,14 @@ mod tests {
                       children: [{ type: "string", value: "hello" }]
                     }]
                   }]
-                }));
+                });
                 "##,
             )
             .await
             .unwrap();
 
-        let snapshot = Elements::from_json(&store.snapshot()).unwrap();
-        let Elements::App { children } = &snapshot else {
+        let snapshot = store.snapshot();
+        let Elements::App { children } = snapshot.as_ref() else {
             panic!("the host root must be an app");
         };
         assert!(matches!(children.as_slice(), [Elements::Window { .. }]));
@@ -60,7 +60,7 @@ mod tests {
             .unwrap();
 
         let result = runtime
-            .eval::<()>(r#"__burokku_render('{\"type\":\"unknown\"}')"#)
+            .eval::<()>(r#"__burokku_render({ type: 'unknown' })"#)
             .await;
 
         assert!(result.is_err());

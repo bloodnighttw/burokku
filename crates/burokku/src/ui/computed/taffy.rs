@@ -10,12 +10,16 @@
 use taffy::{
     compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
     compute_hidden_layout, compute_leaf_layout, compute_root_layout, round_layout, AvailableSpace,
-    BlockContext, Cache, CacheTree, Display, Layout, LayoutBlockContainer, LayoutFlexboxContainer,
-    LayoutGridContainer, LayoutInput, LayoutOutput, LayoutPartialTree, NodeId, RoundTree, RunMode,
-    Size, Style, TraversePartialTree, TraverseTree,
+    BlockContext, Cache, CacheTree, Dimension, Display, Layout, LayoutBlockContainer,
+    LayoutFlexboxContainer, LayoutGridContainer, LayoutInput, LayoutOutput, LayoutPartialTree,
+    LengthPercentage, NodeId, RoundTree, RunMode, Size, Style, TraversePartialTree, TraverseTree,
 };
 
-use crate::ui::elements::{accepts_child, Elements};
+use crate::ui::elements::{
+    accepts_child,
+    styles::{flex::FlexBasis, grid::GridStyle},
+    Elements,
+};
 
 /// Supplies intrinsic sizes for leaf elements.
 ///
@@ -279,42 +283,64 @@ fn style_for(element: &Elements) -> Style<String> {
             display: Display::Flex,
             flex_direction: style.direction,
             flex_wrap: style.wrap,
-            gap: style.gap,
+            gap: Size {
+                width: LengthPercentage::length(style.gap.width),
+                height: LengthPercentage::length(style.gap.height),
+            },
             align_content: style.align_content,
             align_items: style.align_items,
             justify_content: style.justify_content,
-            flex_basis: style.basis,
+            flex_basis: match style.basis {
+                FlexBasis::Auto => Dimension::auto(),
+                FlexBasis::Length(value) => Dimension::length(value),
+            },
             flex_grow: style.grow,
             flex_shrink: style.shrink,
             align_self: style.align_self,
             ..Style::default()
         },
-        Elements::Grid { style, .. } => Style {
-            display: Display::Grid,
-            grid_template_rows: style.template_rows.clone(),
-            grid_template_columns: style.template_columns.clone(),
-            grid_template_areas: style.template_areas.clone(),
-            grid_template_row_names: style.template_row_names.clone(),
-            grid_template_column_names: style.template_column_names.clone(),
-            grid_auto_rows: style.auto_rows.clone(),
-            grid_auto_columns: style.auto_columns.clone(),
-            grid_auto_flow: style.auto_flow,
-            gap: style.gap,
-            align_content: style.align_content,
-            justify_content: style.justify_content,
-            align_items: style.align_items,
-            justify_items: style.justify_items,
-            grid_row: style.row.clone(),
-            grid_column: style.column.clone(),
-            align_self: style.align_self,
-            justify_self: style.justify_self,
-            ..Style::default()
-        },
+        Elements::Grid { style, .. } => style_for_grid(style),
         Elements::App { .. }
         | Elements::Window { .. }
         | Elements::Div { .. }
         | Elements::Text { .. }
         | Elements::_String { .. } => Style::default(),
+    }
+}
+
+fn style_for_grid(style: &GridStyle) -> Style<String> {
+    let template_rows = style.template_rows.to_taffy();
+    let template_columns = style.template_columns.to_taffy();
+    Style {
+        display: Display::Grid,
+        grid_template_rows: template_rows.tracks,
+        grid_template_columns: template_columns.tracks,
+        grid_template_row_names: template_rows.line_names,
+        grid_template_column_names: template_columns.line_names,
+        grid_auto_rows: style
+            .auto_rows
+            .iter()
+            .map(|track| track.to_taffy())
+            .collect(),
+        grid_auto_columns: style
+            .auto_columns
+            .iter()
+            .map(|track| track.to_taffy())
+            .collect(),
+        grid_auto_flow: style.auto_flow,
+        gap: Size {
+            width: LengthPercentage::length(style.gap.width),
+            height: LengthPercentage::length(style.gap.height),
+        },
+        align_content: style.align_content,
+        justify_content: style.justify_content,
+        align_items: style.align_items,
+        justify_items: style.justify_items,
+        grid_row: style.row.clone(),
+        grid_column: style.column.clone(),
+        align_self: style.align_self,
+        justify_self: style.justify_self,
+        ..Style::default()
     }
 }
 
@@ -471,10 +497,14 @@ impl<Measure> RoundTree for LayoutTree<'_, Measure> {
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
-    use taffy::{geometry::Point, prelude::TaffyMaxContent, style_helpers::length, FlexDirection};
+    use taffy::{geometry::Point, prelude::TaffyMaxContent, FlexDirection};
 
     use super::*;
-    use crate::ui::elements::styles::{flex::FlexStyle, grid::GridStyle, text::TextStyle};
+    use crate::ui::elements::styles::{
+        flex::FlexStyle,
+        grid::{GridStyle, GridTemplate},
+        text::TextStyle,
+    };
 
     fn text(value: &str) -> Elements {
         Elements::Text {
@@ -556,7 +586,9 @@ mod tests {
     fn maps_grid_tracks_into_taffy_style() {
         let root = Elements::Grid {
             style: Box::new(GridStyle {
-                template_columns: vec![length(20.0_f32), length(30.0_f32)],
+                template_columns: GridTemplate::from_taffy(
+                    "20px 30px".parse().expect("valid test grid template"),
+                ),
                 ..GridStyle::default()
             }),
             children: vec![text("one"), text("two")],

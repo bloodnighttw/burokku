@@ -78,20 +78,14 @@ impl GPU {
 }
 
 fn build_canvas(
-    serialized: &str,
+    root: &ui::Elements,
     size: PhysicalSize<u32>,
     scale_factor: f64,
     text_system: &mut TextSystem,
 ) -> Canvas {
     let scale_factor = (scale_factor as f32).max(f32::EPSILON);
-    let root = ui::Elements::from_json(serialized).unwrap_or_else(|error| {
-        eprintln!("failed to rebuild the UI element tree: {error}");
-        ui::Elements::App {
-            children: Vec::new(),
-        }
-    });
     ui::build_canvas(
-        &root,
+        root,
         size.width as f32 / scale_factor,
         size.height as f32 / scale_factor,
         scale_factor,

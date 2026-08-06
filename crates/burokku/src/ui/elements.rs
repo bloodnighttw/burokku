@@ -1,11 +1,10 @@
 use self::styles::{div::DivStyle, flex::FlexStyle, grid::GridStyle, text::TextStyle};
 
+mod from_js;
 mod iter;
-mod wire;
 
 pub(crate) use iter::accepts_child;
 pub use iter::ElementsIter;
-pub use wire::ElementJsonError;
 pub mod styles;
 
 // represent the layout tree of window app
@@ -65,12 +64,6 @@ pub enum Elements {
 }
 
 impl Elements {
-    /// Parses an element tree from the JSON wire format used by the JavaScript
-    /// renderers.
-    pub fn from_json(json: &str) -> Result<Self, ElementJsonError> {
-        wire::parse(json)
-    }
-
     /// Iterates over this element and its valid descendants in tree order.
     pub fn iter(&self) -> ElementsIter<'_> {
         ElementsIter::new(self)
