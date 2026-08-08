@@ -9,5 +9,3 @@ pub use timers::TimersPlugin;
 pub use window_events::{
     InputState, ModifiersState, MouseButton, WindowEventMessage, WindowEventsPlugin,
 };
-
-pub(crate) use window_events::enqueue;

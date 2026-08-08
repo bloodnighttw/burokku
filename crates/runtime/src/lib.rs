@@ -1,16 +1,19 @@
 //! An asynchronous JavaScript runtime backed by rquickjs and Tokio.
 
+mod bridge;
+mod dual_runtime;
 mod event_loop;
 mod plugin;
 pub mod plugins;
 mod runtime;
 
+pub use bridge::{bridge_channel, BridgeEndpoint};
+pub use dual_runtime::{DualRuntime, DualRuntimeBuilder, DualRuntimeDriver};
 pub use event_loop::MacrotaskQueue;
-pub use plugin::{Plugin, RuntimeBuilder};
-pub use plugins::{InputState, ModifiersState, MouseButton, WindowEventMessage};
+pub use plugin::{Plugin, RuntimeBuilder, RuntimeRole};
 pub use rquickjs;
 pub use rquickjs::Error;
-pub use runtime::Runtime;
+pub use runtime::{Runtime, RuntimeDriver};
 
 /// The result type returned by this crate.
 pub type Result<T> = rquickjs::Result<T>;

@@ -6,7 +6,10 @@
 
 use crate::Result;
 use rquickjs::{AsyncContext, Ctx, JsLifetime};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
 
 trait Macrotask: Send {
     fn run(self: Box<Self>, context: &Ctx<'_>) -> Result<()>;
@@ -21,7 +24,10 @@ where
     }
 }
 
-type MacrotaskMessage = Box<dyn Macrotask>;
+enum MacrotaskMessage {
+    Run(Box<dyn Macrotask>),
+    Shutdown(Option<oneshot::Sender<()>>),
+}
 
 /// A cloneable handle to the runtime's macrotask queue.
 ///
@@ -29,7 +35,7 @@ type MacrotaskMessage = Box<dyn Macrotask>;
 /// callbacks or async work. A queued callback is always invoked with the
 /// runtime's QuickJS context, followed by a native QuickJS microtask
 /// checkpoint.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MacrotaskQueue {
     sender: UnboundedSender<MacrotaskMessage>,
 }
@@ -54,13 +60,28 @@ impl MacrotaskQueue {
         F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
     {
         self.sender
-            .send(Box::new(task))
+            .send(MacrotaskMessage::Run(Box::new(task)))
             .map_err(|_| rquickjs::Error::Unknown)
+    }
+
+    pub(crate) fn request_shutdown(&self) -> Result<oneshot::Receiver<()>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(MacrotaskMessage::Shutdown(Some(sender)))
+            .map_err(|_| rquickjs::Error::Unknown)?;
+        Ok(receiver)
+    }
+
+    pub(crate) fn request_shutdown_without_waiting(&self) {
+        let _ = self.sender.send(MacrotaskMessage::Shutdown(None));
     }
 }
 
-pub(crate) async fn install(context: &AsyncContext) -> Result<MacrotaskQueue> {
+pub(crate) async fn install(
+    context: &AsyncContext,
+) -> Result<(MacrotaskQueue, oneshot::Receiver<()>)> {
     let (sender, receiver) = mpsc::unbounded_channel();
+    let (stopped_sender, stopped_receiver) = oneshot::channel();
     let queue = MacrotaskQueue { sender };
 
     context
@@ -70,22 +91,40 @@ pub(crate) async fn install(context: &AsyncContext) -> Result<MacrotaskQueue> {
                 context
                     .store_userdata(queue)
                     .map_err(|_| rquickjs::Error::Unknown)?;
-                context.spawn(run(context.clone(), receiver));
+                context.spawn(run(context.clone(), receiver, stopped_sender));
                 Ok(())
             }
         })
         .await?;
 
-    Ok(queue)
+    Ok((queue, stopped_receiver))
 }
 
-async fn run<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<MacrotaskMessage>) {
-    while let Some(task) = tasks.recv().await {
-        let _ = task.run(&context);
+async fn run<'js>(
+    context: Ctx<'js>,
+    mut tasks: UnboundedReceiver<MacrotaskMessage>,
+    stopped: oneshot::Sender<()>,
+) {
+    while let Some(message) = tasks.recv().await {
+        let task = match message {
+            MacrotaskMessage::Run(task) => task,
+            MacrotaskMessage::Shutdown(acknowledge) => {
+                if let Some(acknowledge) = acknowledge {
+                    let _ = acknowledge.send(());
+                }
+                break;
+            }
+        };
+
+        if let Err(error) = task.run(&context) {
+            eprintln!("JavaScript macrotask failed: {error}");
+        }
 
         // Promises use QuickJS's own job queue. Draining it here establishes
         // the JavaScript rule that all ready microtasks run before the next
         // macrotask.
         while context.execute_pending_job() {}
     }
+
+    let _ = stopped.send(());
 }

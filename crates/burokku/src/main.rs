@@ -63,7 +63,7 @@ async fn run_javascript(source: String) -> Result<(), Box<dyn Error + Send + Syn
     let runtime = Runtime::builder()
         .plugin(ConsolePlugin)
         .plugin(TimersPlugin)
-        .plugin(WindowEventsPlugin)
+        .plugin(WindowEventsPlugin::default())
         .build()
         .await?;
     runtime.eval::<()>(source).await?;

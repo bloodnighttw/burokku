@@ -1,71 +1,124 @@
-use crate::{event_loop, plugins, MacrotaskQueue, Result, RuntimeBuilder, WindowEventMessage};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, FromJs, Promise, ThrowResultExt};
-use tokio::task::JoinHandle;
+use crate::{event_loop, MacrotaskQueue, Result, RuntimeBuilder, RuntimeRole};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, FromJs, Promise, ThrowResultExt};
+use std::{future::Future, pin::Pin};
+use tokio::{sync::oneshot, task::JoinHandle};
 
-/// A JavaScript execution context that integrates QuickJS with Tokio.
+/// A thread-safe handle to one isolated JavaScript runtime.
 ///
-/// Every runtime has a generic macrotask queue. QuickJS's own job queue is
-/// drained as the microtask checkpoint after each macrotask. Host APIs are
-/// supplied by composable [`crate::Plugin`] implementations.
+/// All JavaScript entry points are submitted to the isolate's macrotask queue.
+/// Consequently, JavaScript executes wherever the associated
+/// [`RuntimeDriver`] is polled rather than on the caller's thread.
 pub struct Runtime {
-    context: AsyncContext,
+    role: RuntimeRole,
     macrotasks: MacrotaskQueue,
-    _driver: JoinHandle<()>,
+    spawned_driver: Option<JoinHandle<()>>,
+    shutdown_requested: bool,
+}
+
+/// Drives the futures, jobs, and macrotasks belonging to one QuickJS isolate.
+///
+/// A driver should be polled on exactly one assigned thread for its entire
+/// lifetime. Dropping the owning [`Runtime`], or explicitly shutting it down,
+/// completes the driver.
+pub struct RuntimeDriver {
+    context: Option<AsyncContext>,
+    quickjs: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    stopped: oneshot::Receiver<()>,
+}
+
+impl RuntimeDriver {
+    /// Run this isolate until its task queue is shut down.
+    pub async fn run(mut self) {
+        tokio::select! {
+            _ = &mut self.quickjs => {}
+            _ = &mut self.stopped => {}
+        }
+
+        // The context is deliberately owned by the driver so callers cannot
+        // execute QuickJS directly from a different thread.
+        self.context.take();
+    }
 }
 
 impl Runtime {
-    /// Start configuring a runtime without host plugins.
+    /// Start configuring a standalone runtime without host plugins.
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::new()
     }
 
-    /// Create a runtime without host plugins.
+    /// Create and automatically drive a standalone runtime without plugins.
     ///
-    /// The runtime always includes macrotask scheduling and QuickJS's native
-    /// microtask queue. Host APIs must be added explicitly with
-    /// [`Runtime::builder`].
-    ///
-    /// This must be called from inside a running Tokio runtime.
+    /// This must be called from inside a running Tokio runtime. Use
+    /// [`RuntimeBuilder::build_driven`] when the isolate must remain pinned to
+    /// a particular thread.
     pub async fn new() -> Result<Self> {
         Self::builder().build().await
     }
 
-    /// Create a clean runtime and install one application-specific host.
-    ///
-    /// New integrations should generally implement [`crate::Plugin`] and use
-    /// [`Runtime::builder`]. This method remains for source compatibility with
-    /// small, one-off installers.
+    /// Create an automatically driven runtime and install one small host.
     pub async fn new_with_host<F>(installer: F) -> Result<Self>
     where
-        F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + Send + 'static,
     {
         Self::build(RuntimeBuilder::new(), installer).await
     }
 
     pub(crate) async fn build<F>(builder: RuntimeBuilder, installer: F) -> Result<Self>
     where
-        F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + Send + 'static,
+    {
+        let (mut runtime, driver) = Self::build_driven(builder, installer).await?;
+        runtime.spawned_driver = Some(tokio::spawn(driver.run()));
+        Ok(runtime)
+    }
+
+    pub(crate) async fn build_driven<F>(
+        builder: RuntimeBuilder,
+        installer: F,
+    ) -> Result<(Self, RuntimeDriver)>
+    where
+        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + Send + 'static,
     {
         let quickjs = AsyncRuntime::new()?;
         let context = AsyncContext::full(&quickjs).await?;
+        let role = builder.role;
 
-        let macrotasks = event_loop::install(&context).await?;
         context
             .with(move |context| {
-                for plugin in builder.plugins {
+                context
+                    .store_userdata(role)
+                    .map_err(|_| rquickjs::Error::Unknown)
+            })
+            .await?;
+
+        let (macrotasks, stopped) = event_loop::install(&context).await?;
+        context
+            .with(move |context| {
+                for plugin in &builder.plugins {
                     plugin.install(&context)?;
                 }
                 installer(&context)
             })
             .await?;
 
-        let driver = tokio::spawn(context.runtime().drive());
-
-        Ok(Self {
-            context,
+        let driver = RuntimeDriver {
+            context: Some(context),
+            quickjs: Box::pin(quickjs.drive()),
+            stopped,
+        };
+        let runtime = Self {
+            role,
             macrotasks,
-            _driver: driver,
-        })
+            spawned_driver: None,
+            shutdown_requested: false,
+        };
+
+        Ok((runtime, driver))
+    }
+
+    /// The responsibility assigned to this isolate.
+    pub fn role(&self) -> RuntimeRole {
+        self.role
     }
 
     /// Clone a handle that can enqueue native macrotasks in this runtime.
@@ -73,59 +126,98 @@ impl Runtime {
         self.macrotasks.clone()
     }
 
-    /// Evaluate a synchronous JavaScript expression or script.
+    /// Evaluate a synchronous JavaScript expression or script as a macrotask.
     pub async fn eval<T>(&self, source: impl Into<Vec<u8>>) -> Result<T>
     where
-        for<'js> T: FromJs<'js> + Send,
+        for<'js> T: FromJs<'js> + Send + 'static,
     {
         let source = source.into();
-        self.context
-            .with(move |context| {
-                context
-                    .eval(source)
-                    .catch(&context)
-                    .map_err(|error| {
-                        eprintln!("JavaScript evaluation failed: {error}");
-                        error
-                    })
-                    .throw(&context)
-            })
-            .await
+        let (sender, receiver) = oneshot::channel();
+
+        self.macrotasks.enqueue(move |context| {
+            let result = context
+                .eval(source)
+                .catch(context)
+                .map_err(|error| {
+                    eprintln!("JavaScript evaluation failed: {error}");
+                    error
+                })
+                .throw(context);
+            let _ = sender.send(result);
+            Ok(())
+        })?;
+
+        receiver.await.map_err(|_| rquickjs::Error::Unknown)?
     }
 
-    /// Enqueue native window events through [`crate::plugins::WindowEventsPlugin`].
-    pub async fn enqueue_window_events(&self, events: &[WindowEventMessage]) -> Result<()> {
-        self.context
-            .with(move |context| plugins::enqueue(&context, events))
-            .await
-    }
-
-    /// Evaluate a JavaScript expression that returns a promise.
-    ///
-    /// Promise reactions are microtasks owned and executed by QuickJS itself.
+    /// Evaluate JavaScript that returns a promise as a macrotask.
     pub async fn eval_promise<T>(&self, source: impl Into<Vec<u8>>) -> Result<T>
     where
         for<'js> T: FromJs<'js> + Send + 'static,
     {
         let source = source.into();
-        rquickjs::async_with!(self.context => |context| {
-            let promise: Promise = context.eval(source)?;
-            promise.into_future::<T>().await
-        })
-        .await
+        let (sender, receiver) = oneshot::channel();
+
+        self.macrotasks.enqueue(move |context| {
+            let promise: Promise = match context.eval(source) {
+                Ok(promise) => promise,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return Ok(());
+                }
+            };
+
+            context.spawn(async move {
+                let _ = sender.send(promise.into_future::<T>().await);
+            });
+            Ok(())
+        })?;
+
+        receiver.await.map_err(|_| rquickjs::Error::Unknown)?
+    }
+
+    /// Stop accepting tasks and wait for an automatically spawned driver.
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.shutdown_requested = true;
+        let stopped = self.macrotasks.request_shutdown()?;
+        stopped.await.map_err(|_| rquickjs::Error::Unknown)?;
+
+        if let Some(driver) = self.spawned_driver.take() {
+            driver.await.map_err(|_| rquickjs::Error::Unknown)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        if !self.shutdown_requested {
+            self.macrotasks.request_shutdown_without_waiting();
+        }
     }
 }
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Runtime").finish_non_exhaustive()
+        formatter
+            .debug_struct("Runtime")
+            .field("role", &self.role)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RuntimeDriver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeDriver")
+            .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Runtime;
-    use crate::{InputState, MacrotaskQueue, ModifiersState, WindowEventMessage};
+    use crate::{MacrotaskQueue, RuntimeRole};
     use rquickjs::{prelude::Func, Ctx};
 
     #[tokio::test(flavor = "current_thread")]
@@ -189,83 +281,34 @@ mod tests {
             .eval_promise("Promise.resolve().then(() => 42)")
             .await
             .unwrap();
+
         assert_eq!(value, 42);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn dispatches_native_events_as_macrotasks() {
+    async fn plugins_can_read_the_runtime_role() {
+        fn install_role(context: &Ctx<'_>) -> crate::Result<()> {
+            let role = RuntimeRole::from_context(context).unwrap();
+            context.globals().set("isMain", role == RuntimeRole::Main)
+        }
+
         let runtime = Runtime::builder()
-            .plugin(crate::plugins::WindowEventsPlugin)
+            .role(RuntimeRole::Main)
+            .plugin(install_role)
             .build()
             .await
             .unwrap();
-        runtime
-            .eval::<()>(
-                r#"
-                globalThis.__events = [];
-                globalThis.__burokku_dispatch_event = event => __events.push(event.type);
-                "#,
-            )
-            .await
-            .unwrap();
 
-        runtime
-            .enqueue_window_events(&[
-                WindowEventMessage::Resized {
-                    width: 800,
-                    height: 600,
-                },
-                WindowEventMessage::CloseRequested,
-            ])
-            .await
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let events: Vec<String> = runtime.eval("__events").await.unwrap();
-        assert_eq!(events, ["resized", "close-requested"]);
+        assert!(runtime.eval::<bool>("isMain").await.unwrap());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn includes_native_input_event_data() {
-        let runtime = Runtime::builder()
-            .plugin(crate::plugins::WindowEventsPlugin)
-            .build()
-            .await
-            .unwrap();
-        runtime
-            .eval::<()>(
-                r#"
-                globalThis.__events = [];
-                globalThis.__burokku_dispatch_event = event => __events.push(event);
-                "#,
-            )
-            .await
-            .unwrap();
+    async fn explicitly_driven_runtime_executes_queued_work() {
+        let (runtime, driver) = Runtime::builder().build_driven().await.unwrap();
+        let driver = tokio::spawn(driver.run());
 
-        runtime
-            .enqueue_window_events(&[
-                WindowEventMessage::CursorMoved { x: 12.5, y: 24.0 },
-                WindowEventMessage::KeyboardInput {
-                    key_code: 0,
-                    text: Some("a".into()),
-                    state: InputState::Pressed,
-                    repeat: false,
-                    modifiers: ModifiersState {
-                        shift: true,
-                        ..ModifiersState::default()
-                    },
-                },
-            ])
-            .await
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let json: String = runtime.eval("JSON.stringify(__events)").await.unwrap();
-        assert_eq!(
-            json,
-            r#"[{"type":"cursor-moved","x":12.5,"y":24},{"type":"keyboard-input","keyCode":0,"text":"a","pressed":true,"repeat":false,"shiftKey":true,"ctrlKey":false,"altKey":false,"metaKey":false,"capsLock":false}]"#
-        );
+        assert_eq!(runtime.eval::<i32>("6 * 7").await.unwrap(), 42);
+        runtime.shutdown().await.unwrap();
+        driver.await.unwrap();
     }
 }

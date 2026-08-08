@@ -1,5 +1,6 @@
 use crate::{MacrotaskQueue, Plugin, Result};
-use rquickjs::{Ctx, Function, JsLifetime, Object};
+use rquickjs::{Ctx, Function, Object};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputState {
@@ -61,36 +62,45 @@ pub enum WindowEventMessage {
     },
 }
 
-#[derive(Clone, Copy)]
-struct WindowEventsInstalled;
-
-unsafe impl<'js> JsLifetime<'js> for WindowEventsInstalled {
-    type Changed<'to> = WindowEventsInstalled;
-}
-
 /// Enables native window events to be enqueued as JavaScript macrotasks.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WindowEventsPlugin;
+///
+/// Clone the plugin before installing it to retain a host-side event handle:
+///
+/// ```
+/// use runtime::{plugins::WindowEventsPlugin, Runtime};
+///
+/// # async fn example() -> runtime::Result<()> {
+/// let window_events = WindowEventsPlugin::default();
+/// let runtime = Runtime::builder()
+///     .plugin(window_events.clone())
+///     .build()
+///     .await?;
+/// # drop(runtime);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct WindowEventsPlugin {
+    queue: Arc<OnceLock<MacrotaskQueue>>,
+}
 
 impl Plugin for WindowEventsPlugin {
     fn install<'js>(&self, context: &Ctx<'js>) -> Result<()> {
-        context
-            .store_userdata(WindowEventsInstalled)
-            .map_err(|_| rquickjs::Error::Unknown)?;
-        Ok(())
+        self.queue
+            .set(MacrotaskQueue::from_context(context)?)
+            .map_err(|_| rquickjs::Error::Unknown)
     }
 }
 
-pub(crate) fn enqueue(context: &Ctx<'_>, events: &[WindowEventMessage]) -> Result<()> {
-    if context.userdata::<WindowEventsInstalled>().is_none() {
-        return Err(rquickjs::Error::Unknown);
+impl WindowEventsPlugin {
+    /// Enqueue native window events into the runtime where this plugin was installed.
+    pub fn enqueue(&self, events: &[WindowEventMessage]) -> Result<()> {
+        let queue = self.queue.get().ok_or(rquickjs::Error::Unknown)?;
+        for event in events.iter().cloned() {
+            queue.enqueue(move |context| dispatch(context, event))?;
+        }
+        Ok(())
     }
-
-    let queue = MacrotaskQueue::from_context(context)?;
-    for event in events.iter().cloned() {
-        queue.enqueue(move |context| dispatch(context, event))?;
-    }
-    Ok(())
 }
 
 fn dispatch(context: &Ctx<'_>, event: WindowEventMessage) -> Result<()> {
@@ -184,5 +194,41 @@ fn mouse_button_code(button: MouseButton) -> u16 {
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
         MouseButton::Other(button) => button,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Runtime;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cloned_plugin_is_a_host_side_event_handle() {
+        let window_events = WindowEventsPlugin::default();
+        let runtime = Runtime::builder()
+            .plugin(window_events.clone())
+            .build()
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>(
+                "globalThis.events = []; \
+                 globalThis.__burokku_dispatch_event = event => events.push(event.type)",
+            )
+            .await
+            .unwrap();
+
+        window_events
+            .enqueue(&[
+                WindowEventMessage::Resized {
+                    width: 800,
+                    height: 600,
+                },
+                WindowEventMessage::CloseRequested,
+            ])
+            .unwrap();
+
+        let event_types: Vec<String> = runtime.eval("events").await.unwrap();
+        assert_eq!(event_types, ["resized", "close-requested"]);
     }
 }
