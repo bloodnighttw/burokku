@@ -1,8 +1,16 @@
-use runtime::Runtime;
+use runtime::{plugins::TimersPlugin, Runtime};
+
+async fn runtime_with_timers() -> Runtime {
+    Runtime::builder()
+        .plugin(TimersPlugin)
+        .build()
+        .await
+        .unwrap()
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn runs_javascript_event_loop_script() {
-    let runtime = Runtime::new().await.unwrap();
+    let runtime = runtime_with_timers().await;
     let source = include_str!("scripts/event_loop.js");
     let value: String = runtime.eval_promise(source).await.unwrap();
 
@@ -11,7 +19,7 @@ async fn runs_javascript_event_loop_script() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn set_interval_repeats_as_macrotasks() {
-    let runtime = Runtime::new().await.unwrap();
+    let runtime = runtime_with_timers().await;
     let source = include_str!("scripts/set_interval.js");
     let value: String = runtime.eval_promise(source).await.unwrap();
 
@@ -20,7 +28,7 @@ async fn set_interval_repeats_as_macrotasks() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn clear_timer_functions_cancel_callbacks() {
-    let runtime = Runtime::new().await.unwrap();
+    let runtime = runtime_with_timers().await;
     let value: i32 = runtime
         .eval_promise(
             r#"new Promise(resolve => {

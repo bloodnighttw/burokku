@@ -2,7 +2,10 @@
 
 use std::error::Error;
 
-use runtime::Runtime;
+use runtime::{
+    plugins::{ConsolePlugin, TimersPlugin, WindowEventsPlugin},
+    Runtime,
+};
 
 mod ui;
 
@@ -57,7 +60,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_javascript(source: String) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let runtime = Runtime::new().await?;
+    let runtime = Runtime::builder()
+        .plugin(ConsolePlugin)
+        .plugin(TimersPlugin)
+        .plugin(WindowEventsPlugin)
+        .build()
+        .await?;
     runtime.eval::<()>(source).await?;
 
     Ok(())

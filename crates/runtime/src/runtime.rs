@@ -14,19 +14,23 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Start configuring a runtime with its standard plugins.
+    /// Start configuring a runtime without host plugins.
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::new()
     }
 
-    /// Create a runtime with console, timer, and window-event plugins.
+    /// Create a runtime without host plugins.
+    ///
+    /// The runtime always includes macrotask scheduling and QuickJS's native
+    /// microtask queue. Host APIs must be added explicitly with
+    /// [`Runtime::builder`].
     ///
     /// This must be called from inside a running Tokio runtime.
     pub async fn new() -> Result<Self> {
         Self::builder().build().await
     }
 
-    /// Create a standard runtime and install one application-specific host.
+    /// Create a clean runtime and install one application-specific host.
     ///
     /// New integrations should generally implement [`crate::Plugin`] and use
     /// [`Runtime::builder`]. This method remains for source compatibility with
@@ -173,8 +177,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bare_runtime_keeps_its_event_loop_but_has_no_plugins() {
-        let runtime = crate::RuntimeBuilder::bare().build().await.unwrap();
+    async fn runtime_keeps_its_event_loop_but_has_no_implicit_plugins() {
+        let runtime = Runtime::new().await.unwrap();
 
         let globals: Vec<bool> = runtime
             .eval("[typeof console !== 'undefined', typeof setTimeout !== 'undefined']")
@@ -190,7 +194,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dispatches_native_events_as_macrotasks() {
-        let runtime = Runtime::new().await.unwrap();
+        let runtime = Runtime::builder()
+            .plugin(crate::plugins::WindowEventsPlugin)
+            .build()
+            .await
+            .unwrap();
         runtime
             .eval::<()>(
                 r#"
@@ -220,7 +228,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn includes_native_input_event_data() {
-        let runtime = Runtime::new().await.unwrap();
+        let runtime = Runtime::builder()
+            .plugin(crate::plugins::WindowEventsPlugin)
+            .build()
+            .await
+            .unwrap();
         runtime
             .eval::<()>(
                 r#"
