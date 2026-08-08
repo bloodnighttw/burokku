@@ -1,6 +1,6 @@
 //! Plugin declarations and runtime construction.
 
-use crate::{plugins, Result, Runtime};
+use crate::{Result, Runtime};
 use rquickjs::Ctx;
 
 /// A host integration installed into each runtime context.
@@ -50,22 +50,11 @@ pub struct RuntimeBuilder {
 }
 
 impl RuntimeBuilder {
-    /// Create a builder containing all standard runtime plugins.
-    pub fn new() -> Self {
-        Self {
-            plugins: vec![
-                Box::new(plugins::ConsolePlugin),
-                Box::new(plugins::TimersPlugin),
-                Box::new(plugins::WindowEventsPlugin),
-            ],
-        }
-    }
-
-    /// Create a builder without any plugins.
+    /// Create a builder without plugins.
     ///
-    /// The macrotask queue and QuickJS microtask handling are runtime features,
-    /// so they remain available in a bare runtime.
-    pub fn bare() -> Self {
+    /// Macrotask scheduling and QuickJS microtasks are runtime features. Host
+    /// APIs such as console, timers, and window events must be added explicitly.
+    pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
         }
