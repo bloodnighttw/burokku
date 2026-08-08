@@ -90,6 +90,9 @@ impl Runtime {
 
         context
             .with(move |context| {
+                // Host globals are opt-in plugins. Keep QuickJS's underlying
+                // JSON support, but expose its public global through JsonPlugin.
+                context.globals().remove("JSON")?;
                 context
                     .store_userdata(role)
                     .map_err(|_| rquickjs::Error::Unknown)
@@ -297,10 +300,14 @@ mod tests {
         let runtime = Runtime::new().await.unwrap();
 
         let globals: Vec<bool> = runtime
-            .eval("[typeof console !== 'undefined', typeof setTimeout !== 'undefined']")
+            .eval(
+                "[typeof console !== 'undefined', \
+                 typeof setTimeout !== 'undefined', \
+                 typeof JSON !== 'undefined']",
+            )
             .await
             .unwrap();
-        assert_eq!(globals, [false, false]);
+        assert_eq!(globals, [false, false, false]);
         let value: i32 = runtime
             .eval_promise("Promise.resolve().then(() => 42)")
             .await
