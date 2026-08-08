@@ -1,4 +1,7 @@
-use crate::{event_loop, MacrotaskQueue, Result, RuntimeBuilder, RuntimeRole};
+use crate::{
+    event_loop::{self, RuntimeControl},
+    MacrotaskQueue, Result, RuntimeBuilder, RuntimeRole,
+};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, FromJs, Promise, ThrowResultExt};
 use std::{future::Future, pin::Pin};
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -11,6 +14,7 @@ use tokio::{sync::oneshot, task::JoinHandle};
 pub struct Runtime {
     role: RuntimeRole,
     macrotasks: MacrotaskQueue,
+    control: RuntimeControl,
     spawned_driver: Option<JoinHandle<()>>,
     shutdown_requested: bool,
 }
@@ -82,6 +86,7 @@ impl Runtime {
         let quickjs = AsyncRuntime::new()?;
         let context = AsyncContext::full(&quickjs).await?;
         let role = builder.role;
+        let macrotask_capacity = builder.macrotask_capacity;
 
         context
             .with(move |context| {
@@ -91,7 +96,8 @@ impl Runtime {
             })
             .await?;
 
-        let (macrotasks, stopped) = event_loop::install(&context).await?;
+        let (macrotasks, control, stopped) =
+            event_loop::install(&context, macrotask_capacity).await?;
         context
             .with(move |context| {
                 for plugin in &builder.plugins {
@@ -109,6 +115,7 @@ impl Runtime {
         let runtime = Self {
             role,
             macrotasks,
+            control,
             spawned_driver: None,
             shutdown_requested: false,
         };
@@ -134,18 +141,21 @@ impl Runtime {
         let source = source.into();
         let (sender, receiver) = oneshot::channel();
 
-        self.macrotasks.enqueue(move |context| {
-            let result = context
-                .eval(source)
-                .catch(context)
-                .map_err(|error| {
-                    eprintln!("JavaScript evaluation failed: {error}");
-                    error
-                })
-                .throw(context);
-            let _ = sender.send(result);
-            Ok(())
-        })?;
+        self.macrotasks
+            .enqueue(move |context| {
+                let result = context
+                    .eval(source)
+                    .catch(context)
+                    .map_err(|error| {
+                        eprintln!("JavaScript evaluation failed: {error}");
+                        error
+                    })
+                    .throw(context);
+                let _ = sender.send(result);
+                Ok(())
+            })
+            .await
+            .map_err(|_| rquickjs::Error::Unknown)?;
 
         receiver.await.map_err(|_| rquickjs::Error::Unknown)?
     }
@@ -158,20 +168,23 @@ impl Runtime {
         let source = source.into();
         let (sender, receiver) = oneshot::channel();
 
-        self.macrotasks.enqueue(move |context| {
-            let promise: Promise = match context.eval(source) {
-                Ok(promise) => promise,
-                Err(error) => {
-                    let _ = sender.send(Err(error));
-                    return Ok(());
-                }
-            };
+        self.macrotasks
+            .enqueue(move |context| {
+                let promise: Promise = match context.eval(source) {
+                    Ok(promise) => promise,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return Ok(());
+                    }
+                };
 
-            context.spawn(async move {
-                let _ = sender.send(promise.into_future::<T>().await);
-            });
-            Ok(())
-        })?;
+                context.spawn(async move {
+                    let _ = sender.send(promise.into_future::<T>().await);
+                });
+                Ok(())
+            })
+            .await
+            .map_err(|_| rquickjs::Error::Unknown)?;
 
         receiver.await.map_err(|_| rquickjs::Error::Unknown)?
     }
@@ -179,7 +192,10 @@ impl Runtime {
     /// Stop accepting tasks and wait for an automatically spawned driver.
     pub async fn shutdown(mut self) -> Result<()> {
         self.shutdown_requested = true;
-        let stopped = self.macrotasks.request_shutdown()?;
+        let stopped = self
+            .control
+            .request_shutdown()
+            .map_err(|_| rquickjs::Error::Unknown)?;
         stopped.await.map_err(|_| rquickjs::Error::Unknown)?;
 
         if let Some(driver) = self.spawned_driver.take() {
@@ -192,7 +208,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         if !self.shutdown_requested {
-            self.macrotasks.request_shutdown_without_waiting();
+            self.control.request_shutdown_without_waiting();
         }
     }
 }
@@ -217,8 +233,12 @@ impl std::fmt::Debug for RuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::Runtime;
-    use crate::{MacrotaskQueue, RuntimeRole};
+    use crate::{MacrotaskQueue, MacrotaskQueueError, RuntimeRole};
     use rquickjs::{prelude::Func, Ctx};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluates_javascript() {
@@ -245,13 +265,17 @@ mod tests {
             context.globals().set("answer", Func::from(|| 42))?;
 
             let queue = MacrotaskQueue::from_context(context)?;
-            queue.enqueue(|context| {
-                context.eval::<(), _>(
-                    "globalThis.__order = ['macrotask-1']; \
+            queue
+                .try_enqueue(|context| {
+                    context.eval::<(), _>(
+                        "globalThis.__order = ['macrotask-1']; \
                      Promise.resolve().then(() => __order.push('microtask'))",
-                )
-            })?;
-            queue.enqueue(|context| context.eval::<(), _>("__order.push('macrotask-2')"))
+                    )
+                })
+                .map_err(|_| rquickjs::Error::Unknown)?;
+            queue
+                .try_enqueue(|context| context.eval::<(), _>("__order.push('macrotask-2')"))
+                .map_err(|_| rquickjs::Error::Unknown)
         }
 
         let runtime = Runtime::builder()
@@ -310,5 +334,52 @@ mod tests {
         assert_eq!(runtime.eval::<i32>("6 * 7").await.unwrap(), 42);
         runtime.shutdown().await.unwrap();
         driver.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bounded_queue_reports_backpressure_to_synchronous_producers() {
+        let (runtime, driver) = Runtime::builder()
+            .macrotask_capacity(1)
+            .build_driven()
+            .await
+            .unwrap();
+        let queue = runtime.macrotask_queue();
+
+        queue.try_enqueue(|_| Ok(())).unwrap();
+        assert_eq!(queue.capacity(), 0);
+        assert_eq!(
+            queue.try_enqueue(|_| Ok(())),
+            Err(MacrotaskQueueError::Full)
+        );
+
+        let driver = tokio::spawn(driver.run());
+        runtime.shutdown().await.unwrap();
+        driver.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_bypasses_queued_macrotasks() {
+        let (runtime, driver) = Runtime::builder()
+            .macrotask_capacity(1)
+            .build_driven()
+            .await
+            .unwrap();
+        let executed = Arc::new(AtomicBool::new(false));
+
+        runtime
+            .macrotask_queue()
+            .try_enqueue({
+                let executed = executed.clone();
+                move |_| {
+                    executed.store(true, Ordering::Release);
+                    Ok(())
+                }
+            })
+            .unwrap();
+        let acknowledged = runtime.control.request_shutdown().unwrap();
+
+        let ((), acknowledged) = tokio::join!(driver.run(), acknowledged);
+        acknowledged.unwrap();
+        assert!(!executed.load(Ordering::Acquire));
     }
 }

@@ -111,6 +111,7 @@ fn schedule_timer<'js>(
             let cancelled = state.cancelled.clone();
             if queue
                 .enqueue(move |context| run_timer(context, id, repeats, &cancelled))
+                .await
                 .is_err()
                 || !repeats
             {
