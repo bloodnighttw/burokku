@@ -1,5 +1,6 @@
-use crate::{MacrotaskQueue, MacrotaskQueueError, Plugin, Result};
-use rquickjs::{Ctx, Function, Object};
+use crate::{serializer, MacrotaskQueue, MacrotaskQueueError, Plugin, Result};
+use rquickjs::{Ctx, Function};
+use serde::Serialize;
 use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,82 +123,129 @@ fn dispatch(context: &Ctx<'_>, event: WindowEventMessage) -> Result<()> {
     else {
         return Ok(());
     };
-    let js_event = Object::new(context.clone())?;
-
-    match event {
-        WindowEventMessage::CloseRequested => js_event.set("type", "close-requested")?,
-        WindowEventMessage::Resized { width, height } => {
-            js_event.set("type", "resized")?;
-            js_event.set("width", width)?;
-            js_event.set("height", height)?;
-        }
-        WindowEventMessage::ScaleFactorChanged {
-            scale_factor,
-            width,
-            height,
-        } => {
-            js_event.set("type", "scale-factor-changed")?;
-            js_event.set("scaleFactor", scale_factor)?;
-            js_event.set("width", width)?;
-            js_event.set("height", height)?;
-        }
-        WindowEventMessage::Focused(focused) => {
-            js_event.set("type", "focused")?;
-            js_event.set("focused", focused)?;
-        }
-        WindowEventMessage::Occluded(occluded) => {
-            js_event.set("type", "occluded")?;
-            js_event.set("occluded", occluded)?;
-        }
-        WindowEventMessage::KeyboardInput {
-            key_code,
-            text,
-            state,
-            repeat,
-            modifiers,
-        } => {
-            js_event.set("type", "keyboard-input")?;
-            js_event.set("keyCode", key_code)?;
-            js_event.set("text", text)?;
-            js_event.set("pressed", state == InputState::Pressed)?;
-            js_event.set("repeat", repeat)?;
-            set_modifiers(&js_event, modifiers)?;
-        }
-        WindowEventMessage::ModifiersChanged(modifiers) => {
-            js_event.set("type", "modifiers-changed")?;
-            set_modifiers(&js_event, modifiers)?;
-        }
-        WindowEventMessage::CursorMoved { x, y } => {
-            js_event.set("type", "cursor-moved")?;
-            js_event.set("x", x)?;
-            js_event.set("y", y)?;
-        }
-        WindowEventMessage::MouseInput { state, button } => {
-            js_event.set("type", "mouse-input")?;
-            js_event.set("pressed", state == InputState::Pressed)?;
-            js_event.set("button", mouse_button_code(button))?;
-        }
-        WindowEventMessage::MouseWheel {
-            delta_x,
-            delta_y,
-            precise,
-        } => {
-            js_event.set("type", "mouse-wheel")?;
-            js_event.set("deltaX", delta_x)?;
-            js_event.set("deltaY", delta_y)?;
-            js_event.set("precise", precise)?;
-        }
-    }
+    let js_event = serializer::to_object(context, &SerializableWindowEvent::from(&event))
+        .map_err(serializer::Error::into_quickjs)?;
 
     dispatch.call::<_, ()>((js_event,))
 }
 
-fn set_modifiers(event: &Object<'_>, modifiers: ModifiersState) -> Result<()> {
-    event.set("shiftKey", modifiers.shift)?;
-    event.set("ctrlKey", modifiers.control)?;
-    event.set("altKey", modifiers.alt)?;
-    event.set("metaKey", modifiers.command)?;
-    event.set("capsLock", modifiers.caps_lock)
+#[derive(Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+enum SerializableWindowEvent<'a> {
+    CloseRequested,
+    Resized {
+        width: u32,
+        height: u32,
+    },
+    ScaleFactorChanged {
+        scale_factor: f64,
+        width: u32,
+        height: u32,
+    },
+    Focused {
+        focused: bool,
+    },
+    Occluded {
+        occluded: bool,
+    },
+    KeyboardInput {
+        key_code: u16,
+        text: Option<&'a str>,
+        pressed: bool,
+        repeat: bool,
+        shift_key: bool,
+        ctrl_key: bool,
+        alt_key: bool,
+        meta_key: bool,
+        caps_lock: bool,
+    },
+    ModifiersChanged {
+        shift_key: bool,
+        ctrl_key: bool,
+        alt_key: bool,
+        meta_key: bool,
+        caps_lock: bool,
+    },
+    CursorMoved {
+        x: f64,
+        y: f64,
+    },
+    MouseInput {
+        pressed: bool,
+        button: u16,
+    },
+    MouseWheel {
+        delta_x: f64,
+        delta_y: f64,
+        precise: bool,
+    },
+}
+
+impl<'a> From<&'a WindowEventMessage> for SerializableWindowEvent<'a> {
+    fn from(event: &'a WindowEventMessage) -> Self {
+        match event {
+            WindowEventMessage::CloseRequested => Self::CloseRequested,
+            WindowEventMessage::Resized { width, height } => Self::Resized {
+                width: *width,
+                height: *height,
+            },
+            WindowEventMessage::ScaleFactorChanged {
+                scale_factor,
+                width,
+                height,
+            } => Self::ScaleFactorChanged {
+                scale_factor: *scale_factor,
+                width: *width,
+                height: *height,
+            },
+            WindowEventMessage::Focused(focused) => Self::Focused { focused: *focused },
+            WindowEventMessage::Occluded(occluded) => Self::Occluded {
+                occluded: *occluded,
+            },
+            WindowEventMessage::KeyboardInput {
+                key_code,
+                text,
+                state,
+                repeat,
+                modifiers,
+            } => Self::KeyboardInput {
+                key_code: *key_code,
+                text: text.as_deref(),
+                pressed: *state == InputState::Pressed,
+                repeat: *repeat,
+                shift_key: modifiers.shift,
+                ctrl_key: modifiers.control,
+                alt_key: modifiers.alt,
+                meta_key: modifiers.command,
+                caps_lock: modifiers.caps_lock,
+            },
+            WindowEventMessage::ModifiersChanged(modifiers) => Self::ModifiersChanged {
+                shift_key: modifiers.shift,
+                ctrl_key: modifiers.control,
+                alt_key: modifiers.alt,
+                meta_key: modifiers.command,
+                caps_lock: modifiers.caps_lock,
+            },
+            WindowEventMessage::CursorMoved { x, y } => Self::CursorMoved { x: *x, y: *y },
+            WindowEventMessage::MouseInput { state, button } => Self::MouseInput {
+                pressed: *state == InputState::Pressed,
+                button: mouse_button_code(*button),
+            },
+            WindowEventMessage::MouseWheel {
+                delta_x,
+                delta_y,
+                precise,
+            } => Self::MouseWheel {
+                delta_x: *delta_x,
+                delta_y: *delta_y,
+                precise: *precise,
+            },
+        }
+    }
 }
 
 fn mouse_button_code(button: MouseButton) -> u16 {
@@ -244,5 +292,55 @@ mod tests {
 
         let event_types: Vec<String> = runtime.eval("events").await.unwrap();
         assert_eq!(event_types, ["resized", "close-requested"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serializes_window_event_fields_to_the_existing_js_shape() {
+        let window_events = WindowEventsPlugin::default();
+        let runtime = Runtime::builder()
+            .plugin(window_events.clone())
+            .build()
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>(
+                "globalThis.__burokku_dispatch_event = event => globalThis.lastEvent = event",
+            )
+            .await
+            .unwrap();
+
+        window_events
+            .enqueue(WindowEventMessage::KeyboardInput {
+                key_code: 42,
+                text: None,
+                state: InputState::Pressed,
+                repeat: true,
+                modifiers: ModifiersState {
+                    shift: true,
+                    control: false,
+                    alt: true,
+                    command: false,
+                    caps_lock: true,
+                },
+            })
+            .await
+            .unwrap();
+
+        let has_expected_shape: bool = runtime
+            .eval(
+                "lastEvent.type === 'keyboard-input' && \
+                 lastEvent.keyCode === 42 && \
+                 lastEvent.text === undefined && \
+                 lastEvent.pressed === true && \
+                 lastEvent.repeat === true && \
+                 lastEvent.shiftKey === true && \
+                 lastEvent.ctrlKey === false && \
+                 lastEvent.altKey === true && \
+                 lastEvent.metaKey === false && \
+                 lastEvent.capsLock === true",
+            )
+            .await
+            .unwrap();
+        assert!(has_expected_shape);
     }
 }
