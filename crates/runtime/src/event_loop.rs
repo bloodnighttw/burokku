@@ -7,9 +7,12 @@
 use crate::Result;
 use rquickjs::{AsyncContext, Ctx, JsLifetime};
 use tokio::sync::{
-    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    mpsc::{self, Receiver, Sender},
     oneshot,
 };
+
+/// Default number of JavaScript macrotasks that may wait for an isolate.
+pub const DEFAULT_MACROTASK_CAPACITY: usize = 1024;
 
 trait Macrotask: Send {
     fn run(self: Box<Self>, context: &Ctx<'_>) -> Result<()>;
@@ -24,9 +27,55 @@ where
     }
 }
 
-enum MacrotaskMessage {
-    Run(Box<dyn Macrotask>),
-    Shutdown(Option<oneshot::Sender<()>>),
+type MacrotaskMessage = Box<dyn Macrotask>;
+
+struct ShutdownRequest {
+    acknowledge: Option<oneshot::Sender<()>>,
+}
+
+/// Failure to submit a macrotask to an isolate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MacrotaskQueueError {
+    /// The bounded queue has no remaining capacity.
+    Full,
+    /// The runtime has stopped accepting tasks.
+    Closed,
+}
+
+impl std::fmt::Display for MacrotaskQueueError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => formatter.write_str("the JavaScript macrotask queue is full"),
+            Self::Closed => formatter.write_str("the JavaScript macrotask queue is closed"),
+        }
+    }
+}
+
+impl std::error::Error for MacrotaskQueueError {}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeControl {
+    shutdown: Sender<ShutdownRequest>,
+}
+
+impl RuntimeControl {
+    pub(crate) fn request_shutdown(
+        &self,
+    ) -> std::result::Result<oneshot::Receiver<()>, MacrotaskQueueError> {
+        let (sender, receiver) = oneshot::channel();
+        self.shutdown
+            .try_send(ShutdownRequest {
+                acknowledge: Some(sender),
+            })
+            .map_err(map_try_send_error)?;
+        Ok(receiver)
+    }
+
+    pub(crate) fn request_shutdown_without_waiting(&self) {
+        let _ = self
+            .shutdown
+            .try_send(ShutdownRequest { acknowledge: None });
+    }
 }
 
 /// A cloneable handle to the runtime's macrotask queue.
@@ -37,7 +86,7 @@ enum MacrotaskMessage {
 /// checkpoint.
 #[derive(Clone, Debug)]
 pub struct MacrotaskQueue {
-    sender: UnboundedSender<MacrotaskMessage>,
+    sender: Sender<MacrotaskMessage>,
 }
 
 // The queue contains no JavaScript values and does not depend on `'js`.
@@ -54,35 +103,55 @@ impl MacrotaskQueue {
             .ok_or(rquickjs::Error::Unknown)
     }
 
-    /// Enqueue one JavaScript macrotask.
-    pub fn enqueue<F>(&self, task: F) -> Result<()>
+    /// Enqueue one JavaScript macrotask, waiting for bounded capacity.
+    ///
+    /// Use this from asynchronous producers. Synchronous JavaScript host
+    /// callbacks should use [`Self::try_enqueue`] so the isolate cannot
+    /// deadlock waiting for itself to consume the queue.
+    pub async fn enqueue<F>(&self, task: F) -> std::result::Result<(), MacrotaskQueueError>
     where
         F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
     {
         self.sender
-            .send(MacrotaskMessage::Run(Box::new(task)))
-            .map_err(|_| rquickjs::Error::Unknown)
+            .send(Box::new(task))
+            .await
+            .map_err(|_| MacrotaskQueueError::Closed)
     }
 
-    pub(crate) fn request_shutdown(&self) -> Result<oneshot::Receiver<()>> {
-        let (sender, receiver) = oneshot::channel();
+    /// Attempt to enqueue from a synchronous callback without waiting.
+    pub fn try_enqueue<F>(&self, task: F) -> std::result::Result<(), MacrotaskQueueError>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+    {
         self.sender
-            .send(MacrotaskMessage::Shutdown(Some(sender)))
-            .map_err(|_| rquickjs::Error::Unknown)?;
-        Ok(receiver)
+            .try_send(Box::new(task))
+            .map_err(map_try_send_error)
     }
 
-    pub(crate) fn request_shutdown_without_waiting(&self) {
-        let _ = self.sender.send(MacrotaskMessage::Shutdown(None));
+    /// Remaining task slots currently available to producers.
+    pub fn capacity(&self) -> usize {
+        self.sender.capacity()
+    }
+}
+
+fn map_try_send_error<T>(error: mpsc::error::TrySendError<T>) -> MacrotaskQueueError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => MacrotaskQueueError::Full,
+        mpsc::error::TrySendError::Closed(_) => MacrotaskQueueError::Closed,
     }
 }
 
 pub(crate) async fn install(
     context: &AsyncContext,
-) -> Result<(MacrotaskQueue, oneshot::Receiver<()>)> {
-    let (sender, receiver) = mpsc::unbounded_channel();
+    capacity: usize,
+) -> Result<(MacrotaskQueue, RuntimeControl, oneshot::Receiver<()>)> {
+    let (sender, receiver) = mpsc::channel(capacity);
+    let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
     let (stopped_sender, stopped_receiver) = oneshot::channel();
     let queue = MacrotaskQueue { sender };
+    let control = RuntimeControl {
+        shutdown: shutdown_sender,
+    };
 
     context
         .with({
@@ -91,28 +160,43 @@ pub(crate) async fn install(
                 context
                     .store_userdata(queue)
                     .map_err(|_| rquickjs::Error::Unknown)?;
-                context.spawn(run(context.clone(), receiver, stopped_sender));
+                context.spawn(run(
+                    context.clone(),
+                    receiver,
+                    shutdown_receiver,
+                    stopped_sender,
+                ));
                 Ok(())
             }
         })
         .await?;
 
-    Ok((queue, stopped_receiver))
+    Ok((queue, control, stopped_receiver))
 }
 
 async fn run<'js>(
     context: Ctx<'js>,
-    mut tasks: UnboundedReceiver<MacrotaskMessage>,
+    mut tasks: Receiver<MacrotaskMessage>,
+    mut control: Receiver<ShutdownRequest>,
     stopped: oneshot::Sender<()>,
 ) {
-    while let Some(message) = tasks.recv().await {
-        let task = match message {
-            MacrotaskMessage::Run(task) => task,
-            MacrotaskMessage::Shutdown(acknowledge) => {
-                if let Some(acknowledge) = acknowledge {
+    loop {
+        let task = tokio::select! {
+            biased;
+            request = control.recv() => {
+                if let Some(ShutdownRequest {
+                    acknowledge: Some(acknowledge),
+                }) = request
+                {
                     let _ = acknowledge.send(());
                 }
                 break;
+            }
+            task = tasks.recv() => {
+                let Some(task) = task else {
+                    break;
+                };
+                task
             }
         };
 

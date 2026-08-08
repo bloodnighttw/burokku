@@ -9,7 +9,7 @@ mod runtime;
 
 pub use bridge::{bridge_channel, BridgeEndpoint};
 pub use dual_runtime::{DualRuntime, DualRuntimeBuilder, DualRuntimeDriver};
-pub use event_loop::MacrotaskQueue;
+pub use event_loop::{MacrotaskQueue, MacrotaskQueueError, DEFAULT_MACROTASK_CAPACITY};
 pub use plugin::{Plugin, RuntimeBuilder, RuntimeRole};
 pub use rquickjs;
 pub use rquickjs::Error;

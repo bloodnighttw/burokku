@@ -1,6 +1,6 @@
 //! Plugin declarations and runtime construction.
 
-use crate::{Result, Runtime, RuntimeDriver};
+use crate::{Result, Runtime, RuntimeDriver, DEFAULT_MACROTASK_CAPACITY};
 use rquickjs::{Ctx, JsLifetime};
 
 /// A host integration installed into each runtime context.
@@ -74,6 +74,7 @@ impl RuntimeRole {
 pub struct RuntimeBuilder {
     pub(crate) plugins: Vec<Box<dyn Plugin>>,
     pub(crate) role: RuntimeRole,
+    pub(crate) macrotask_capacity: usize,
 }
 
 impl RuntimeBuilder {
@@ -85,12 +86,23 @@ impl RuntimeBuilder {
         Self {
             plugins: Vec::new(),
             role: RuntimeRole::Standalone,
+            macrotask_capacity: DEFAULT_MACROTASK_CAPACITY,
         }
     }
 
     /// Assign a role to this isolate.
     pub fn role(mut self, role: RuntimeRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// Set the maximum number of macrotasks waiting to run.
+    ///
+    /// The queue is bounded to prevent UI events, timers, or host work from
+    /// growing memory indefinitely while JavaScript is busy.
+    pub fn macrotask_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "macrotask capacity must be non-zero");
+        self.macrotask_capacity = capacity;
         self
     }
 
@@ -136,6 +148,7 @@ impl std::fmt::Debug for RuntimeBuilder {
                     .collect::<Vec<_>>(),
             )
             .field("role", &self.role)
+            .field("macrotask_capacity", &self.macrotask_capacity)
             .finish()
     }
 }

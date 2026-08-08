@@ -46,6 +46,18 @@ impl DualRuntimeBuilder {
         self
     }
 
+    /// Configure bounded macrotask capacity for the main isolate.
+    pub fn main_macrotask_capacity(mut self, capacity: usize) -> Self {
+        self.main = self.main.macrotask_capacity(capacity);
+        self
+    }
+
+    /// Configure bounded macrotask capacity for the background isolate.
+    pub fn background_macrotask_capacity(mut self, capacity: usize) -> Self {
+        self.background = self.background.macrotask_capacity(capacity);
+        self
+    }
+
     /// Build both isolates and start the background driver on a dedicated thread.
     ///
     /// The returned [`DualRuntimeDriver`] must be polled on the UI/main thread.

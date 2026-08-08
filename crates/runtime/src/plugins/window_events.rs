@@ -1,4 +1,4 @@
-use crate::{MacrotaskQueue, Plugin, Result};
+use crate::{MacrotaskQueue, MacrotaskQueueError, Plugin, Result};
 use rquickjs::{Ctx, Function, Object};
 use std::sync::{Arc, OnceLock};
 
@@ -93,13 +93,25 @@ impl Plugin for WindowEventsPlugin {
 }
 
 impl WindowEventsPlugin {
-    /// Enqueue native window events into the runtime where this plugin was installed.
-    pub fn enqueue(&self, events: &[WindowEventMessage]) -> Result<()> {
-        let queue = self.queue.get().ok_or(rquickjs::Error::Unknown)?;
-        for event in events.iter().cloned() {
-            queue.enqueue(move |context| dispatch(context, event))?;
-        }
-        Ok(())
+    /// Enqueue one native window event, waiting for bounded queue capacity.
+    pub async fn enqueue(
+        &self,
+        event: WindowEventMessage,
+    ) -> std::result::Result<(), MacrotaskQueueError> {
+        let queue = self.queue.get().ok_or(MacrotaskQueueError::Closed)?;
+        queue.enqueue(move |context| dispatch(context, event)).await
+    }
+
+    /// Attempt to enqueue one native window event from a synchronous callback.
+    ///
+    /// A [`MacrotaskQueueError::Full`] result lets the window host coalesce or
+    /// drop replaceable events such as cursor movement and resize notifications.
+    pub fn try_enqueue(
+        &self,
+        event: WindowEventMessage,
+    ) -> std::result::Result<(), MacrotaskQueueError> {
+        let queue = self.queue.get().ok_or(MacrotaskQueueError::Closed)?;
+        queue.try_enqueue(move |context| dispatch(context, event))
     }
 }
 
@@ -219,13 +231,15 @@ mod tests {
             .unwrap();
 
         window_events
-            .enqueue(&[
-                WindowEventMessage::Resized {
-                    width: 800,
-                    height: 600,
-                },
-                WindowEventMessage::CloseRequested,
-            ])
+            .enqueue(WindowEventMessage::Resized {
+                width: 800,
+                height: 600,
+            })
+            .await
+            .unwrap();
+        window_events
+            .enqueue(WindowEventMessage::CloseRequested)
+            .await
             .unwrap();
 
         let event_types: Vec<String> = runtime.eval("events").await.unwrap();
