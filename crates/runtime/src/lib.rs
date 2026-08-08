@@ -6,6 +6,7 @@ mod event_loop;
 mod plugin;
 pub mod plugins;
 mod runtime;
+pub mod serializer;
 
 pub use bridge::{bridge_channel, BridgeEndpoint};
 pub use dual_runtime::{DualRuntime, DualRuntimeBuilder, DualRuntimeDriver};
