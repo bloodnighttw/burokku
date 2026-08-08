@@ -1,7 +1,7 @@
 //! Plugin declarations and runtime construction.
 
-use crate::{Result, Runtime};
-use rquickjs::Ctx;
+use crate::{Result, Runtime, RuntimeDriver};
+use rquickjs::{Ctx, JsLifetime};
 
 /// A host integration installed into each runtime context.
 ///
@@ -44,9 +44,36 @@ where
     }
 }
 
+/// Identifies the responsibility of one JavaScript isolate.
+///
+/// A role is stored as QuickJS userdata before plugins are installed, allowing
+/// a plugin to expose different capabilities in different isolates.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RuntimeRole {
+    /// A regular, independently driven JavaScript runtime.
+    #[default]
+    Standalone,
+    /// A latency-sensitive runtime colocated with the UI and rendering loop.
+    Main,
+    /// An off-main-thread runtime for application and business logic.
+    Background,
+}
+
+unsafe impl<'js> JsLifetime<'js> for RuntimeRole {
+    type Changed<'to> = RuntimeRole;
+}
+
+impl RuntimeRole {
+    /// Read the role of the current isolate during plugin installation or use.
+    pub fn from_context(context: &Ctx<'_>) -> Option<Self> {
+        context.userdata::<Self>().map(|role| *role)
+    }
+}
+
 /// Configures and creates a [`Runtime`].
 pub struct RuntimeBuilder {
     pub(crate) plugins: Vec<Box<dyn Plugin>>,
+    pub(crate) role: RuntimeRole,
 }
 
 impl RuntimeBuilder {
@@ -57,7 +84,14 @@ impl RuntimeBuilder {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            role: RuntimeRole::Standalone,
         }
+    }
+
+    /// Assign a role to this isolate.
+    pub fn role(mut self, role: RuntimeRole) -> Self {
+        self.role = role;
+        self
     }
 
     /// Add a plugin to this runtime.
@@ -72,6 +106,14 @@ impl RuntimeBuilder {
     /// Build the configured runtime.
     pub async fn build(self) -> Result<Runtime> {
         Runtime::build(self, |_| Ok(())).await
+    }
+
+    /// Build without spawning the QuickJS driver.
+    ///
+    /// The returned driver must be continuously polled on the thread assigned
+    /// to this isolate before evaluation or host tasks can make progress.
+    pub async fn build_driven(self) -> Result<(Runtime, RuntimeDriver)> {
+        Runtime::build_driven(self, |_| Ok(())).await
     }
 }
 
@@ -93,6 +135,7 @@ impl std::fmt::Debug for RuntimeBuilder {
                     .map(|plugin| plugin.name())
                     .collect::<Vec<_>>(),
             )
+            .field("role", &self.role)
             .finish()
     }
 }
