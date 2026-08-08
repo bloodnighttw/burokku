@@ -3,7 +3,7 @@
 use std::error::Error;
 
 use runtime::{
-    plugins::{ConsolePlugin, TimersPlugin, WindowEventsPlugin},
+    plugins::{ConsolePlugin, JsonPlugin, TimersPlugin, WindowEventsPlugin},
     Runtime,
 };
 
@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn run_javascript(source: String) -> Result<(), Box<dyn Error + Send + Sync>> {
     let runtime = Runtime::builder()
         .plugin(ConsolePlugin)
+        .plugin(JsonPlugin)
         .plugin(TimersPlugin)
         .plugin(WindowEventsPlugin::default())
         .build()
