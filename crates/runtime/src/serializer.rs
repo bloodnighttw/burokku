@@ -1,6 +1,6 @@
 //! Serialize Rust values directly into values owned by a QuickJS context.
 
-use rquickjs::{Array, Ctx, IntoJs, Object, Value};
+use rquickjs::{object::Property, Array, Ctx, IntoJs, Object, Value};
 use serde::ser::{
     self, Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct,
     SerializeStructVariant, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
@@ -57,6 +57,14 @@ impl From<rquickjs::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn define_own_property<'js>(object: &Object<'js>, key: &str, value: Value<'js>) -> Result<()> {
+    object.prop(
+        key,
+        Property::from(value).writable().enumerable().configurable(),
+    )?;
+    Ok(())
+}
 
 /// Serialize a value into the supplied QuickJS context.
 pub fn to_value<'js, T>(context: &Ctx<'js>, value: &T) -> Result<Value<'js>>
@@ -197,7 +205,7 @@ impl<'js> ser::Serializer for Serializer<'js> {
         T: Serialize + ?Sized,
     {
         let object = Object::new(self.context.clone())?;
-        object.set(variant, value.serialize(self)?)?;
+        define_own_property(&object, variant, value.serialize(self)?)?;
         Ok(object.into_value())
     }
 
@@ -364,7 +372,7 @@ impl<'js> SerializeTupleVariant for TupleVariantSerializer<'js> {
 
     fn end(self) -> Result<Self::Ok> {
         let object = Object::new(self.context)?;
-        object.set(self.variant, self.sequence.finish()?)?;
+        define_own_property(&object, self.variant, self.sequence.finish()?)?;
         Ok(object.into_value())
     }
 }
@@ -387,8 +395,7 @@ impl<'js> ObjectSerializer<'js> {
         T: Serialize + ?Sized,
     {
         let value = value.serialize(Serializer::new(self.context.clone()))?;
-        self.object.set(key, value)?;
-        Ok(())
+        define_own_property(&self.object, key, value)
     }
 
     fn finish(self) -> Result<Value<'js>> {
@@ -493,7 +500,7 @@ impl<'js> SerializeStructVariant for StructVariantSerializer<'js> {
 
     fn end(self) -> Result<Self::Ok> {
         let outer = Object::new(self.context)?;
-        outer.set(self.variant, self.object.finish()?)?;
+        define_own_property(&outer, self.variant, self.object.finish()?)?;
         Ok(outer.into_value())
     }
 }
@@ -672,6 +679,12 @@ mod tests {
         label: Option<&'a str>,
     }
 
+    #[derive(Serialize)]
+    struct RenamedProtoField<'a> {
+        #[serde(rename = "__proto__")]
+        proto: &'a str,
+    }
+
     #[test]
     fn serializes_a_struct_directly_to_a_quickjs_object() {
         let runtime = Runtime::new().unwrap();
@@ -692,6 +705,44 @@ mod tests {
             assert_eq!(object.get::<_, Vec<f64>>("position").unwrap(), [12.5, 30.0]);
             let label = object.get::<_, Value>("label").unwrap();
             assert!(label.is_undefined());
+        });
+    }
+
+    #[test]
+    fn serializes_proto_keys_as_own_data_properties() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|context| {
+            let struct_object =
+                to_object(&context, &RenamedProtoField { proto: "struct" }).unwrap();
+            let map_object = to_object(
+                &context,
+                &[("__proto__", "map")]
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                struct_object
+                    .keys::<String>()
+                    .collect::<rquickjs::Result<Vec<_>>>()
+                    .unwrap(),
+                ["__proto__"]
+            );
+            assert_eq!(
+                map_object
+                    .keys::<String>()
+                    .collect::<rquickjs::Result<Vec<_>>>()
+                    .unwrap(),
+                ["__proto__"]
+            );
+            assert_eq!(
+                struct_object.get::<_, String>("__proto__").unwrap(),
+                "struct"
+            );
+            assert_eq!(map_object.get::<_, String>("__proto__").unwrap(), "map");
         });
     }
 }
