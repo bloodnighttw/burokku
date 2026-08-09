@@ -71,6 +71,7 @@ impl DualRuntimeBuilder {
             .name(thread_name)
             .spawn(move || {
                 let executor = match tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
                     .enable_time()
                     .build()
                 {
@@ -256,6 +257,34 @@ mod tests {
             assert_ne!(main_thread, background_thread);
             assert_eq!(background_thread, DEFAULT_BACKGROUND_THREAD_NAME);
 
+            runtime.shutdown().await.unwrap();
+        };
+
+        tokio::join!(driver.run(), exercise);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_runtime_supports_tokio_io() {
+        let (io_sender, io_receiver) = std::sync::mpsc::sync_channel(1);
+        let (runtime, driver) = DualRuntime::builder()
+            .background_plugin(move |_: &Ctx<'_>| {
+                let io_sender = io_sender.clone();
+                tokio::spawn(async move {
+                    let streams = tokio::net::UnixStream::pair();
+                    let _ = io_sender.send(streams.is_ok());
+                });
+                Ok(())
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let exercise = async move {
+            assert_eq!(
+                io_receiver.recv_timeout(std::time::Duration::from_secs(5)),
+                Ok(true)
+            );
             runtime.shutdown().await.unwrap();
         };
 
