@@ -147,3 +147,34 @@ fn run_timer(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{run_timer, TIMER_REGISTRY};
+    use rquickjs::{Context, Function, Object, Runtime};
+    use std::{collections::HashSet, sync::Mutex};
+
+    #[test]
+    fn ignores_cancelled_and_missing_timer_callbacks() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|context| {
+            let timers = Object::new(context.clone()).unwrap();
+            let callback: Function = context
+                .eval(include_str!("scripts/timer_callback.js"))
+                .unwrap();
+            timers.set(1, callback).unwrap();
+            context.globals().set(TIMER_REGISTRY, timers).unwrap();
+
+            let cancelled = Mutex::new(HashSet::from([1]));
+            run_timer(&context, 1, false, &cancelled).unwrap();
+            run_timer(&context, 2, false, &Mutex::new(HashSet::new())).unwrap();
+
+            let timer_was_called: bool = context
+                .eval(include_str!("scripts/timer_was_called.js"))
+                .unwrap();
+            assert!(!timer_was_called);
+        });
+    }
+}

@@ -110,25 +110,15 @@ mod tests {
     async fn parses_and_stringifies_json() {
         let runtime = Runtime::builder().plugin(JsonPlugin).build().await.unwrap();
 
-        let output: String = runtime
-            .eval(
-                r#"
-                const parsed = JSON.parse('{"count":2,"drop":true}', (key, value) => {
-                    if (key === "drop") return undefined;
-                    if (key === "count") return value + 1;
-                    return value;
-                });
-                JSON.stringify(
-                    { parsed, ignored: true },
-                    (key, value) => key === "ignored" ? undefined : value,
-                    2,
-                );
-                "#,
-            )
-            .await
-            .unwrap();
+        let output: Vec<String> = runtime.eval(include_str!("scripts/json.js")).await.unwrap();
 
-        assert_eq!(output, "{\n  \"parsed\": {\n    \"count\": 3\n  }\n}");
+        assert_eq!(
+            output,
+            [
+                "{\n  \"parsed\": {\n    \"count\": 3\n  }\n}",
+                "3:10:false:30",
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -136,14 +126,7 @@ mod tests {
         let runtime = Runtime::builder().plugin(JsonPlugin).build().await.unwrap();
 
         let behavior: Vec<bool> = runtime
-            .eval(
-                r#"[
-                    JSON.parse(42) === 42,
-                    JSON.stringify() === undefined,
-                    JSON.parse.length === 2,
-                    JSON.stringify.length === 3,
-                ]"#,
-            )
+            .eval(include_str!("scripts/json_edge_behavior.js"))
             .await
             .unwrap();
 

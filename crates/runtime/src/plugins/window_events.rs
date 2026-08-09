@@ -271,10 +271,7 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .eval::<()>(
-                "globalThis.events = []; \
-                 globalThis.__burokku_dispatch_event = event => events.push(event.type)",
-            )
+            .eval::<()>(include_str!("scripts/window_event_types_setup.js"))
             .await
             .unwrap();
 
@@ -290,7 +287,10 @@ mod tests {
             .await
             .unwrap();
 
-        let event_types: Vec<String> = runtime.eval("events").await.unwrap();
+        let event_types: Vec<String> = runtime
+            .eval(include_str!("scripts/window_event_types.js"))
+            .await
+            .unwrap();
         assert_eq!(event_types, ["resized", "close-requested"]);
     }
 
@@ -303,9 +303,7 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .eval::<()>(
-                "globalThis.__burokku_dispatch_event = event => globalThis.lastEvent = event",
-            )
+            .eval::<()>(include_str!("scripts/window_event_keyboard_setup.js"))
             .await
             .unwrap();
 
@@ -327,18 +325,95 @@ mod tests {
             .unwrap();
 
         let has_expected_shape: bool = runtime
-            .eval(
-                "lastEvent.type === 'keyboard-input' && \
-                 lastEvent.keyCode === 42 && \
-                 lastEvent.text === undefined && \
-                 lastEvent.pressed === true && \
-                 lastEvent.repeat === true && \
-                 lastEvent.shiftKey === true && \
-                 lastEvent.ctrlKey === false && \
-                 lastEvent.altKey === true && \
-                 lastEvent.metaKey === false && \
-                 lastEvent.capsLock === true",
-            )
+            .eval(include_str!("scripts/window_event_keyboard_shape.js"))
+            .await
+            .unwrap();
+        assert!(has_expected_shape);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serializes_every_window_event_variant_for_javascript() {
+        let uninstalled = WindowEventsPlugin::default();
+        assert_eq!(
+            uninstalled.try_enqueue(WindowEventMessage::CloseRequested),
+            Err(MacrotaskQueueError::Closed)
+        );
+
+        let window_events = WindowEventsPlugin::default();
+        let runtime = Runtime::builder()
+            .plugin(window_events.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Dispatching is intentionally a no-op until JavaScript installs its handler.
+        window_events
+            .enqueue(WindowEventMessage::CloseRequested)
+            .await
+            .unwrap();
+        runtime
+            .eval::<()>(include_str!("scripts/window_events_setup.js"))
+            .await
+            .unwrap();
+
+        let events = [
+            WindowEventMessage::ScaleFactorChanged {
+                scale_factor: 2.0,
+                width: 1600,
+                height: 1200,
+            },
+            WindowEventMessage::Focused(true),
+            WindowEventMessage::Occluded(false),
+            WindowEventMessage::KeyboardInput {
+                key_code: 7,
+                text: Some("x".into()),
+                state: InputState::Released,
+                repeat: false,
+                modifiers: ModifiersState::default(),
+            },
+            WindowEventMessage::ModifiersChanged(ModifiersState {
+                shift: true,
+                control: true,
+                alt: false,
+                command: true,
+                caps_lock: false,
+            }),
+            WindowEventMessage::CursorMoved { x: 12.5, y: 30.0 },
+            WindowEventMessage::MouseInput {
+                state: InputState::Pressed,
+                button: MouseButton::Left,
+            },
+            WindowEventMessage::MouseInput {
+                state: InputState::Pressed,
+                button: MouseButton::Middle,
+            },
+            WindowEventMessage::MouseInput {
+                state: InputState::Released,
+                button: MouseButton::Right,
+            },
+            WindowEventMessage::MouseInput {
+                state: InputState::Pressed,
+                button: MouseButton::Other(8),
+            },
+            WindowEventMessage::MouseWheel {
+                delta_x: -1.5,
+                delta_y: 2.5,
+                precise: true,
+            },
+        ];
+
+        for event in events {
+            window_events.enqueue(event).await.unwrap();
+        }
+        window_events
+            .try_enqueue(WindowEventMessage::Resized {
+                width: 800,
+                height: 600,
+            })
+            .unwrap();
+
+        let has_expected_shape: bool = runtime
+            .eval(include_str!("scripts/window_events_shape.js"))
             .await
             .unwrap();
         assert!(has_expected_shape);
