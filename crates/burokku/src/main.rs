@@ -3,7 +3,7 @@
 use std::error::Error;
 
 use runtime::{
-    plugins::{ConsolePlugin, JsonPlugin, TimersPlugin, WindowEventsPlugin},
+    plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
     Runtime,
 };
 
@@ -64,7 +64,6 @@ async fn run_javascript(source: String) -> Result<(), Box<dyn Error + Send + Syn
         .plugin(ConsolePlugin)
         .plugin(JsonPlugin)
         .plugin(TimersPlugin)
-        .plugin(WindowEventsPlugin::default())
         .build()
         .await?;
     runtime.eval::<()>(source).await?;

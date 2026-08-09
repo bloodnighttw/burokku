@@ -81,7 +81,7 @@ impl RuntimeBuilder {
     /// Create a builder without plugins.
     ///
     /// Macrotask scheduling and QuickJS microtasks are runtime features. Host
-    /// APIs such as console, timers, and window events must be added explicitly.
+    /// APIs such as console and timers must be added explicitly.
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
