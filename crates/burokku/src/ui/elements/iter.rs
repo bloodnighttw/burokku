@@ -36,9 +36,7 @@ impl<'a> Iterator for ElementsIter<'a> {
             root
         } else {
             loop {
-                let Some(ancestor) = self.ancestors.last_mut() else {
-                    return None;
-                };
+                let ancestor = self.ancestors.last_mut()?;
                 let parent = ancestor.parent;
 
                 // Multiple windows are not supported yet, so an App's
