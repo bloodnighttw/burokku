@@ -8,7 +8,7 @@ use serde::{
     },
     Deserialize,
 };
-use std::{error, fmt};
+use std::{error, fmt, str::FromStr};
 
 /// An error produced while deserializing a QuickJS value.
 #[derive(Debug)]
@@ -429,6 +429,117 @@ struct ObjectAccess<'js> {
     value: Option<Value<'js>>,
 }
 
+struct MapKeyDeserializer {
+    key: String,
+}
+
+impl MapKeyDeserializer {
+    fn new(key: String) -> Self {
+        Self { key }
+    }
+
+    fn parse<T>(&self, expected: &'static str) -> Result<T>
+    where
+        T: FromStr,
+        T::Err: fmt::Display,
+    {
+        self.key.parse().map_err(|error| {
+            Error::Message(format!(
+                "object key {:?} cannot be parsed as {expected}: {error}",
+                self.key
+            ))
+        })
+    }
+}
+
+macro_rules! deserialize_map_key {
+    ($method:ident, $visit:ident, $type:ty) => {
+        fn $method<V>(self, visitor: V) -> Result<V::Value>
+        where
+            V: Visitor<'de>,
+        {
+            visitor.$visit(self.parse::<$type>(stringify!($type))?)
+        }
+    };
+}
+
+impl<'de> de::Deserializer<'de> for MapKeyDeserializer {
+    type Error = Error;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_string(self.key)
+    }
+
+    deserialize_map_key!(deserialize_bool, visit_bool, bool);
+    deserialize_map_key!(deserialize_i8, visit_i8, i8);
+    deserialize_map_key!(deserialize_i16, visit_i16, i16);
+    deserialize_map_key!(deserialize_i32, visit_i32, i32);
+    deserialize_map_key!(deserialize_i64, visit_i64, i64);
+    deserialize_map_key!(deserialize_i128, visit_i128, i128);
+    deserialize_map_key!(deserialize_u8, visit_u8, u8);
+    deserialize_map_key!(deserialize_u16, visit_u16, u16);
+    deserialize_map_key!(deserialize_u32, visit_u32, u32);
+    deserialize_map_key!(deserialize_u64, visit_u64, u64);
+    deserialize_map_key!(deserialize_u128, visit_u128, u128);
+    deserialize_map_key!(deserialize_f32, visit_f32, f32);
+    deserialize_map_key!(deserialize_f64, visit_f64, f64);
+    deserialize_map_key!(deserialize_char, visit_char, char);
+
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_string(self.key)
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_string(self.key)
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_some(self)
+    }
+
+    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_enum(StringDeserializer::<Error>::new(self.key))
+    }
+
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_string(visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bytes byte_buf unit unit_struct seq tuple tuple_struct map struct ignored_any
+    }
+}
+
 impl<'js> ObjectAccess<'js> {
     fn new(object: Object<'js>) -> Self {
         Self {
@@ -450,8 +561,7 @@ impl<'de, 'js> MapAccess<'de> for ObjectAccess<'js> {
         };
         let (key, value) = entry?;
         self.value = Some(value);
-        seed.deserialize(StringDeserializer::<Error>::new(key))
-            .map(Some)
+        seed.deserialize(MapKeyDeserializer::new(key)).map(Some)
     }
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
@@ -616,6 +726,51 @@ mod tests {
                 let value = context.eval::<Value, _>(source).unwrap();
                 assert!(from_value::<u8>(value).is_err(), "accepted {source}");
             }
+        });
+    }
+
+    #[test]
+    fn deserializes_numeric_and_boolean_object_keys() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|context| {
+            let numbers = context
+                .eval::<Value, _>("({ 1: 'one', 42: 'forty-two' })")
+                .unwrap();
+            let booleans = context.eval::<Value, _>("({ false: 0, true: 1 })").unwrap();
+
+            assert_eq!(
+                from_value::<BTreeMap<u32, String>>(numbers).unwrap(),
+                [(1, "one".into()), (42, "forty-two".into())].into()
+            );
+            assert_eq!(
+                from_value::<BTreeMap<bool, u8>>(booleans).unwrap(),
+                [(false, 0), (true, 1)].into()
+            );
+        });
+    }
+
+    #[test]
+    fn round_trips_numeric_and_boolean_map_keys() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|context| {
+            let numbers = [(1_u32, "one".to_owned()), (42, "forty-two".to_owned())].into();
+            let booleans = [(false, 0_u8), (true, 1)].into();
+
+            let numbers_value = crate::serializer::to_value(&context, &numbers).unwrap();
+            let booleans_value = crate::serializer::to_value(&context, &booleans).unwrap();
+
+            assert_eq!(
+                from_value::<BTreeMap<u32, String>>(numbers_value).unwrap(),
+                numbers
+            );
+            assert_eq!(
+                from_value::<BTreeMap<bool, u8>>(booleans_value).unwrap(),
+                booleans
+            );
         });
     }
 
