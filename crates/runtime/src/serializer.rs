@@ -1,6 +1,6 @@
 //! Serialize Rust values directly into values owned by a QuickJS context.
 
-use rquickjs::{object::Property, Array, Ctx, IntoJs, Object, Value};
+use rquickjs::{object::Property, Array, Ctx, Function, IntoJs, Object, Value};
 use serde::ser::{
     self, Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct,
     SerializeStructVariant, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
@@ -99,6 +99,11 @@ impl<'js> Serializer<'js> {
     fn convert<T: IntoJs<'js>>(&self, value: T) -> Result<Value<'js>> {
         value.into_js(&self.context).map_err(Error::from)
     }
+
+    fn convert_big_int<T: fmt::Display>(&self, value: T) -> Result<Value<'js>> {
+        let constructor = self.context.globals().get::<_, Function>("BigInt")?;
+        constructor.call((value.to_string(),)).map_err(Error::from)
+    }
 }
 
 macro_rules! serialize_number {
@@ -136,11 +141,11 @@ impl<'js> ser::Serializer for Serializer<'js> {
     serialize_number!(serialize_f64, f64);
 
     fn serialize_i128(self, value: i128) -> Result<Self::Ok> {
-        self.convert(value as f64)
+        self.convert_big_int(value)
     }
 
     fn serialize_u128(self, value: u128) -> Result<Self::Ok> {
-        self.convert(value as f64)
+        self.convert_big_int(value)
     }
 
     fn serialize_char(self, value: char) -> Result<Self::Ok> {
@@ -743,6 +748,36 @@ mod tests {
                 "struct"
             );
             assert_eq!(map_object.get::<_, String>("__proto__").unwrap(), "map");
+        });
+    }
+
+    #[test]
+    fn serializes_i128_as_a_quickjs_bigint_without_losing_precision() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|context| {
+            let value = to_value(&context, &i128::MIN).unwrap();
+            let is_expected: Function = context
+                .eval("value => typeof value === 'bigint' && value === -(1n << 127n)")
+                .unwrap();
+
+            assert!(is_expected.call::<_, bool>((value,)).unwrap());
+        });
+    }
+
+    #[test]
+    fn serializes_u128_as_a_quickjs_bigint_without_losing_precision() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        context.with(|context| {
+            let value = to_value(&context, &u128::MAX).unwrap();
+            let is_expected: Function = context
+                .eval("value => typeof value === 'bigint' && value === (1n << 128n) - 1n")
+                .unwrap();
+
+            assert!(is_expected.call::<_, bool>((value,)).unwrap());
         });
     }
 }
