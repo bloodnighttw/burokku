@@ -1,6 +1,7 @@
 //! An asynchronous JavaScript runtime backed by rquickjs and Tokio.
 
 mod bridge;
+pub mod deserializer;
 mod dual_runtime;
 mod event_loop;
 mod plugin;
