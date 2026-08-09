@@ -1,0 +1,32 @@
+events.length === 12 &&
+    events[0].type === "scale-factor-changed" &&
+    events[0].scaleFactor === 2 &&
+    events[0].width === 1600 &&
+    events[0].height === 1200 &&
+    events[1].type === "focused" &&
+    events[1].focused === true &&
+    events[2].type === "occluded" &&
+    events[2].occluded === false &&
+    events[3].type === "keyboard-input" &&
+    events[3].keyCode === 7 &&
+    events[3].text === "x" &&
+    events[3].pressed === false &&
+    events[3].repeat === false &&
+    events[4].type === "modifiers-changed" &&
+    events[4].shiftKey === true &&
+    events[4].ctrlKey === true &&
+    events[4].altKey === false &&
+    events[4].metaKey === true &&
+    events[4].capsLock === false &&
+    events[5].type === "cursor-moved" &&
+    events[5].x === 12.5 &&
+    events[5].y === 30 &&
+    events.slice(6, 10).map(event => event.button).join(",") === "0,1,2,8" &&
+    events[8].pressed === false &&
+    events[10].type === "mouse-wheel" &&
+    events[10].deltaX === -1.5 &&
+    events[10].deltaY === 2.5 &&
+    events[10].precise === true &&
+    events[11].type === "resized" &&
+    events[11].width === 800 &&
+    events[11].height === 600
