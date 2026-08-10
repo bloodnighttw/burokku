@@ -1,0 +1,3 @@
+() => {
+    globalThis.timerWasCalled = true;
+}

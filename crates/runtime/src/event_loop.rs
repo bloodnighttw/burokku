@@ -1,204 +1,214 @@
-use crate::{
-    host, task::Macrotask, InputState, ModifiersState, MouseButton, Result, WindowEventMessage,
+//! The runtime-owned JavaScript event loop.
+//!
+//! Host integrations enqueue macrotasks here. After every macrotask, the
+//! runtime drains QuickJS's native job queue, which is where promise reactions
+//! and the rest of JavaScript's microtasks live.
+
+use crate::Result;
+use rquickjs::{AsyncContext, Ctx, JsLifetime};
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    oneshot,
 };
-use rquickjs::{AsyncContext, Ctx, Function, JsLifetime, Object};
-use std::{
-    collections::HashSet,
-    sync::{atomic::AtomicU32, Arc, Mutex},
-};
-use tokio::sync::mpsc::{self, UnboundedReceiver};
-use tokio::time::{sleep, Duration};
 
-pub(crate) const TIMER_REGISTRY: &str = "__burokku_timers";
+/// Default number of JavaScript macrotasks that may wait for an isolate.
+pub const DEFAULT_MACROTASK_CAPACITY: usize = 1024;
 
-pub(crate) struct TimerTask {
-    pub(crate) id: u32,
-    pub(crate) repeats: bool,
+trait Macrotask: Send {
+    fn run(self: Box<Self>, context: &Ctx<'_>) -> Result<()>;
 }
 
-pub(crate) enum MacrotaskMessage {
-    Timer(TimerTask),
-    WindowEvent(WindowEventMessage),
+impl<F> Macrotask for F
+where
+    F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+{
+    fn run(self: Box<Self>, context: &Ctx<'_>) -> Result<()> {
+        (*self)(context)
+    }
 }
 
-#[derive(Clone)]
-pub(crate) struct EventLoopState {
-    pub(crate) tasks: tokio::sync::mpsc::UnboundedSender<MacrotaskMessage>,
-    pub(crate) next_timer_id: Arc<AtomicU32>,
-    pub(crate) cancelled_timers: Arc<Mutex<HashSet<u32>>>,
+type MacrotaskMessage = Box<dyn Macrotask>;
+
+struct ShutdownRequest {
+    acknowledge: Option<oneshot::Sender<()>>,
 }
 
-// This state contains no JavaScript values; it is safe to use for every
-// JavaScript lifetime while it remains owned by the QuickJS runtime userdata.
-unsafe impl<'js> JsLifetime<'js> for EventLoopState {
-    type Changed<'to> = EventLoopState;
+/// Failure to submit a macrotask to an isolate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MacrotaskQueueError {
+    /// The bounded queue has no remaining capacity.
+    Full,
+    /// The runtime has stopped accepting tasks.
+    Closed,
 }
 
-pub(crate) async fn install(context: &AsyncContext) -> Result<()> {
-    let (macrotask_sender, macrotask_receiver) = mpsc::unbounded_channel();
-    let event_loop = EventLoopState {
-        tasks: macrotask_sender,
-        next_timer_id: Arc::new(AtomicU32::new(1)),
-        cancelled_timers: Arc::new(Mutex::new(HashSet::new())),
+impl std::fmt::Display for MacrotaskQueueError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => formatter.write_str("the JavaScript macrotask queue is full"),
+            Self::Closed => formatter.write_str("the JavaScript macrotask queue is closed"),
+        }
+    }
+}
+
+impl std::error::Error for MacrotaskQueueError {}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeControl {
+    shutdown: Sender<ShutdownRequest>,
+}
+
+impl RuntimeControl {
+    pub(crate) fn request_shutdown(
+        &self,
+    ) -> std::result::Result<oneshot::Receiver<()>, MacrotaskQueueError> {
+        let (sender, receiver) = oneshot::channel();
+        self.shutdown
+            .try_send(ShutdownRequest {
+                acknowledge: Some(sender),
+            })
+            .map_err(map_try_send_error)?;
+        Ok(receiver)
+    }
+
+    pub(crate) fn request_shutdown_without_waiting(&self) {
+        let _ = self
+            .shutdown
+            .try_send(ShutdownRequest { acknowledge: None });
+    }
+}
+
+/// A cloneable handle to the runtime's macrotask queue.
+///
+/// Plugins can retrieve the handle during installation and move it into host
+/// callbacks or async work. A queued callback is always invoked with the
+/// runtime's QuickJS context, followed by a native QuickJS microtask
+/// checkpoint.
+#[derive(Clone, Debug)]
+pub struct MacrotaskQueue {
+    sender: Sender<MacrotaskMessage>,
+}
+
+// The queue contains no JavaScript values and does not depend on `'js`.
+unsafe impl<'js> JsLifetime<'js> for MacrotaskQueue {
+    type Changed<'to> = MacrotaskQueue;
+}
+
+impl MacrotaskQueue {
+    /// Retrieve the queue installed in a runtime context.
+    pub fn from_context(context: &Ctx<'_>) -> Result<Self> {
+        context
+            .userdata::<Self>()
+            .map(|queue| queue.clone())
+            .ok_or(rquickjs::Error::Unknown)
+    }
+
+    /// Enqueue one JavaScript macrotask, waiting for bounded capacity.
+    ///
+    /// Use this from asynchronous producers. Synchronous JavaScript host
+    /// callbacks should use [`Self::try_enqueue`] so the isolate cannot
+    /// deadlock waiting for itself to consume the queue.
+    pub async fn enqueue<F>(&self, task: F) -> std::result::Result<(), MacrotaskQueueError>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+    {
+        self.sender
+            .send(Box::new(task))
+            .await
+            .map_err(|_| MacrotaskQueueError::Closed)
+    }
+
+    /// Attempt to enqueue from a synchronous callback without waiting.
+    pub fn try_enqueue<F>(&self, task: F) -> std::result::Result<(), MacrotaskQueueError>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
+    {
+        self.sender
+            .try_send(Box::new(task))
+            .map_err(map_try_send_error)
+    }
+
+    /// Remaining task slots currently available to producers.
+    pub fn capacity(&self) -> usize {
+        self.sender.capacity()
+    }
+}
+
+fn map_try_send_error<T>(error: mpsc::error::TrySendError<T>) -> MacrotaskQueueError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => MacrotaskQueueError::Full,
+        mpsc::error::TrySendError::Closed(_) => MacrotaskQueueError::Closed,
+    }
+}
+
+pub(crate) async fn install(
+    context: &AsyncContext,
+    capacity: usize,
+) -> Result<(MacrotaskQueue, RuntimeControl, oneshot::Receiver<()>)> {
+    let (sender, receiver) = mpsc::channel(capacity);
+    let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
+    let (stopped_sender, stopped_receiver) = oneshot::channel();
+    let queue = MacrotaskQueue { sender };
+    let control = RuntimeControl {
+        shutdown: shutdown_sender,
     };
 
     context
-        .with(move |ctx| -> Result<()> {
-            ctx.store_userdata(event_loop.clone())
-                .map_err(|_| rquickjs::Error::Unknown)?;
-            ctx.globals()
-                .set(TIMER_REGISTRY, Object::new(ctx.clone())?)?;
-            host::install(&ctx)?;
-
-            ctx.spawn(Macrotask::new(run_macrotasks(
-                ctx.clone(),
-                macrotask_receiver,
-            )));
-            Ok(())
+        .with({
+            let queue = queue.clone();
+            move |context| -> Result<()> {
+                context
+                    .store_userdata(queue)
+                    .map_err(|_| rquickjs::Error::Unknown)?;
+                context.spawn(run(
+                    context.clone(),
+                    receiver,
+                    shutdown_receiver,
+                    stopped_sender,
+                ));
+                Ok(())
+            }
         })
-        .await
+        .await?;
+
+    Ok((queue, control, stopped_receiver))
 }
 
-async fn run_macrotasks<'js>(context: Ctx<'js>, mut tasks: UnboundedReceiver<MacrotaskMessage>) {
-    let timers: Object = context
-        .globals()
-        .get(TIMER_REGISTRY)
-        .expect("timer registry is installed before the event loop starts");
-
-    while let Some(task) = tasks.recv().await {
-        match task {
-            MacrotaskMessage::Timer(task) => {
-                if context.userdata::<EventLoopState>().is_some_and(|state| {
-                    state
-                        .cancelled_timers
-                        .lock()
-                        .expect("cancelled timer registry is not poisoned")
-                        .contains(&task.id)
-                }) {
-                    let _ = timers.remove(task.id);
-                    continue;
+async fn run<'js>(
+    context: Ctx<'js>,
+    mut tasks: Receiver<MacrotaskMessage>,
+    mut control: Receiver<ShutdownRequest>,
+    stopped: oneshot::Sender<()>,
+) {
+    loop {
+        let task = tokio::select! {
+            biased;
+            request = control.recv() => {
+                if let Some(ShutdownRequest {
+                    acknowledge: Some(acknowledge),
+                }) = request
+                {
+                    let _ = acknowledge.send(());
                 }
-                if let Ok(callback) = timers.get::<_, Function>(task.id) {
-                    if !task.repeats {
-                        let _ = timers.remove(task.id);
-                    }
-                    let _ = callback.call::<_, ()>(());
-                }
+                break;
             }
-            MacrotaskMessage::WindowEvent(event) => dispatch_window_event(&context, event),
+            task = tasks.recv() => {
+                let Some(task) = task else {
+                    break;
+                };
+                task
+            }
+        };
+
+        if let Err(error) = task.run(&context) {
+            eprintln!("JavaScript macrotask failed: {error}");
         }
 
-        // Give QuickJS a chance to drain promise jobs before the next timer.
-        sleep(Duration::from_millis(0)).await;
+        // Promises use QuickJS's own job queue. Draining it here establishes
+        // the JavaScript rule that all ready microtasks run before the next
+        // macrotask.
+        while context.execute_pending_job() {}
     }
-}
 
-fn dispatch_window_event<'js>(context: &Ctx<'js>, event: WindowEventMessage) {
-    let Ok(dispatch) = context
-        .globals()
-        .get::<_, Function>("__burokku_dispatch_event")
-    else {
-        return;
-    };
-    let Ok(js_event) = Object::new(context.clone()) else {
-        return;
-    };
-
-    let result = match event {
-        WindowEventMessage::CloseRequested => js_event.set("type", "close-requested"),
-        WindowEventMessage::Resized { width, height } => js_event
-            .set("type", "resized")
-            .and_then(|()| js_event.set("width", width))
-            .and_then(|()| js_event.set("height", height)),
-        WindowEventMessage::ScaleFactorChanged {
-            scale_factor,
-            width,
-            height,
-        } => js_event
-            .set("type", "scale-factor-changed")
-            .and_then(|()| js_event.set("scaleFactor", scale_factor))
-            .and_then(|()| js_event.set("width", width))
-            .and_then(|()| js_event.set("height", height)),
-        WindowEventMessage::Focused(focused) => js_event
-            .set("type", "focused")
-            .and_then(|()| js_event.set("focused", focused)),
-        WindowEventMessage::Occluded(occluded) => js_event
-            .set("type", "occluded")
-            .and_then(|()| js_event.set("occluded", occluded)),
-        WindowEventMessage::KeyboardInput {
-            key_code,
-            text,
-            state,
-            repeat,
-            modifiers,
-        } => js_event
-            .set("type", "keyboard-input")
-            .and_then(|()| js_event.set("keyCode", key_code))
-            .and_then(|()| js_event.set("text", text))
-            .and_then(|()| js_event.set("pressed", state == InputState::Pressed))
-            .and_then(|()| js_event.set("repeat", repeat))
-            .and_then(|()| set_modifiers(&js_event, modifiers)),
-        WindowEventMessage::ModifiersChanged(modifiers) => js_event
-            .set("type", "modifiers-changed")
-            .and_then(|()| set_modifiers(&js_event, modifiers)),
-        WindowEventMessage::CursorMoved { x, y } => js_event
-            .set("type", "cursor-moved")
-            .and_then(|()| js_event.set("x", x))
-            .and_then(|()| js_event.set("y", y)),
-        WindowEventMessage::MouseInput { state, button } => js_event
-            .set("type", "mouse-input")
-            .and_then(|()| js_event.set("pressed", state == InputState::Pressed))
-            .and_then(|()| js_event.set("button", mouse_button_code(button))),
-        WindowEventMessage::MouseWheel {
-            delta_x,
-            delta_y,
-            precise,
-        } => js_event
-            .set("type", "mouse-wheel")
-            .and_then(|()| js_event.set("deltaX", delta_x))
-            .and_then(|()| js_event.set("deltaY", delta_y))
-            .and_then(|()| js_event.set("precise", precise)),
-    };
-    if result.is_ok() {
-        let _ = dispatch.call::<_, ()>((js_event,));
-    }
-}
-
-fn set_modifiers<'js>(event: &Object<'js>, modifiers: ModifiersState) -> Result<()> {
-    event
-        .set("shiftKey", modifiers.shift)
-        .and_then(|()| event.set("ctrlKey", modifiers.control))
-        .and_then(|()| event.set("altKey", modifiers.alt))
-        .and_then(|()| event.set("metaKey", modifiers.command))
-        .and_then(|()| event.set("capsLock", modifiers.caps_lock))
-}
-
-fn mouse_button_code(button: MouseButton) -> u16 {
-    match button {
-        MouseButton::Left => 0,
-        MouseButton::Middle => 1,
-        MouseButton::Right => 2,
-        MouseButton::Other(button) => button,
-    }
-}
-
-pub(crate) fn state<'js>(context: &Ctx<'js>) -> Result<EventLoopState> {
-    context
-        .userdata::<EventLoopState>()
-        .ok_or(rquickjs::Error::Unknown)
-        .map(|state| state.clone())
-}
-
-pub(crate) fn enqueue_window_events<'js>(
-    context: &Ctx<'js>,
-    events: &[WindowEventMessage],
-) -> Result<()> {
-    let state = state(context)?;
-    for event in events {
-        state
-            .tasks
-            .send(MacrotaskMessage::WindowEvent(event.clone()))
-            .map_err(|_| rquickjs::Error::Unknown)?;
-    }
-    Ok(())
+    let _ = stopped.send(());
 }
