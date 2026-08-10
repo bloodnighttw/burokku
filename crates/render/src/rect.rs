@@ -1,8 +1,12 @@
 //! Retained rectangle commands and their private wgpu renderer.
 
 use bytemuck::{Pod, Zeroable};
+use std::ops::Range;
 
-use crate::canvas::{DrawCommand, DrawList};
+use crate::{
+    canvas::{DrawCommand, DrawList},
+    clip::{ClipStack, ScissorRect},
+};
 
 /// A rectangle in logical canvas pixels.
 ///
@@ -48,6 +52,7 @@ pub(crate) struct RectRenderer {
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
     instances: Vec<RectInstance>,
+    batches: Vec<RectBatch>,
 }
 
 impl RectRenderer {
@@ -124,6 +129,7 @@ impl RectRenderer {
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
+            batches: Vec::new(),
         }
     }
 
@@ -132,20 +138,25 @@ impl RectRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         commands: &[DrawCommand],
-        canvas_size: [f32; 2],
+        canvas_size: [u32; 2],
     ) {
         queue.write_buffer(
             &self.screen_buffer,
             0,
             bytemuck::bytes_of(&ScreenUniform {
-                size: canvas_size,
+                size: [canvas_size[0] as f32, canvas_size[1] as f32],
                 _padding: [0.0; 2],
             }),
         );
 
         self.instances.clear();
-        self.instances
-            .extend(commands.iter().filter_map(RectInstance::from_command));
+        self.batches.clear();
+        collect_instances(
+            commands,
+            canvas_size,
+            &mut self.instances,
+            &mut self.batches,
+        );
         if self.instances.is_empty() {
             return;
         }
@@ -170,7 +181,55 @@ impl RectRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        pass.draw(0..6, 0..self.instances.len() as u32);
+        for batch in &self.batches {
+            pass.set_scissor_rect(
+                batch.scissor.x,
+                batch.scissor.y,
+                batch.scissor.width,
+                batch.scissor.height,
+            );
+            pass.draw(0..6, batch.instances.clone());
+        }
+    }
+}
+
+fn collect_instances(
+    commands: &[DrawCommand],
+    canvas_size: [u32; 2],
+    instances: &mut Vec<RectInstance>,
+    batches: &mut Vec<RectBatch>,
+) {
+    let mut clips = ClipStack::new(canvas_size);
+
+    for command in commands {
+        match command {
+            DrawCommand::PushClip { rect } => {
+                clips.push(*rect);
+            }
+            DrawCommand::PopClip => {
+                clips.pop();
+            }
+            DrawCommand::Rect { rect, color } => {
+                let active_clip = clips.active();
+                if rect.is_empty() || active_clip.is_empty() {
+                    continue;
+                }
+
+                let instance = RectInstance::new(*rect, *color);
+                let instance_index = instances.len() as u32;
+                instances.push(instance);
+
+                match batches.last_mut() {
+                    Some(batch) if batch.scissor == active_clip => {
+                        batch.instances.end = instance_index + 1;
+                    }
+                    _ => batches.push(RectBatch {
+                        scissor: active_clip,
+                        instances: instance_index..instance_index + 1,
+                    }),
+                }
+            }
+        }
     }
 }
 
@@ -198,9 +257,8 @@ struct RectInstance {
 }
 
 impl RectInstance {
-    fn from_command(command: &DrawCommand) -> Option<Self> {
-        let DrawCommand::Rect { rect, color } = command;
-        (!rect.is_empty()).then_some(Self {
+    fn new(rect: Rect, color: wgpu::Color) -> Self {
+        Self {
             bounds: [rect.x, rect.y, rect.width, rect.height],
             color: [
                 color.r as f32,
@@ -208,7 +266,7 @@ impl RectInstance {
                 color.b as f32,
                 color.a as f32,
             ],
-        })
+        }
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -220,6 +278,12 @@ impl RectInstance {
             attributes: &ATTRIBUTES,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RectBatch {
+    scissor: ScissorRect,
+    instances: Range<u32>,
 }
 
 #[cfg(test)]
@@ -253,5 +317,67 @@ mod tests {
     fn gpu_types_have_wgsl_compatible_layouts() {
         assert_eq!(std::mem::size_of::<ScreenUniform>(), 16);
         assert_eq!(std::mem::size_of::<RectInstance>(), 32);
+    }
+
+    #[test]
+    fn nested_clips_create_ordered_scissor_batches() {
+        let commands = [
+            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::RED),
+            DrawCommand::push_clip(Rect::new(10.0, 10.0, 50.0, 50.0)),
+            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::GREEN),
+            DrawCommand::push_clip(Rect::new(40.0, 0.0, 50.0, 30.0)),
+            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::BLUE),
+            DrawCommand::pop_clip(),
+            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::WHITE),
+            DrawCommand::pop_clip(),
+            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::BLACK),
+        ];
+        let mut instances = Vec::new();
+        let mut batches = Vec::new();
+
+        collect_instances(&commands, [100, 100], &mut instances, &mut batches);
+
+        assert_eq!(instances.len(), 5);
+        assert_eq!(
+            batches,
+            vec![
+                RectBatch {
+                    scissor: ScissorRect::new(0, 0, 100, 100),
+                    instances: 0..1,
+                },
+                RectBatch {
+                    scissor: ScissorRect::new(10, 10, 50, 50),
+                    instances: 1..2,
+                },
+                RectBatch {
+                    scissor: ScissorRect::new(40, 10, 20, 20),
+                    instances: 2..3,
+                },
+                RectBatch {
+                    scissor: ScissorRect::new(10, 10, 50, 50),
+                    instances: 3..4,
+                },
+                RectBatch {
+                    scissor: ScissorRect::new(0, 0, 100, 100),
+                    instances: 4..5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_nested_clip_discards_its_rectangles() {
+        let commands = [
+            DrawCommand::push_clip(Rect::new(200.0, 200.0, 10.0, 10.0)),
+            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::RED),
+            DrawCommand::pop_clip(),
+        ];
+        let mut instances = Vec::new();
+        let mut batches = Vec::new();
+
+        collect_instances(&commands, [100, 100], &mut instances, &mut batches);
+
+        assert!(instances.is_empty());
+        assert!(batches.is_empty());
     }
 }
