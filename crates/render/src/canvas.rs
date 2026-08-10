@@ -2,7 +2,10 @@
 
 use std::ops::{Deref, DerefMut};
 
-use crate::rect::{Rect, RectRenderer};
+use crate::{
+    clip::commands_are_balanced,
+    rect::{Rect, RectRenderer},
+};
 
 /// One backend-independent drawing operation.
 ///
@@ -11,12 +14,29 @@ use crate::rect::{Rect, RectRenderer};
 /// and encode it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawCommand {
-    Rect { rect: Rect, color: wgpu::Color },
+    Rect {
+        rect: Rect,
+        color: wgpu::Color,
+    },
+    /// Restricts following commands to `rect` until the matching [`Self::PopClip`].
+    PushClip {
+        rect: Rect,
+    },
+    /// Restores the clip active before the matching [`Self::PushClip`].
+    PopClip,
 }
 
 impl DrawCommand {
     pub const fn rect(rect: Rect, color: wgpu::Color) -> Self {
         Self::Rect { rect, color }
+    }
+
+    pub const fn push_clip(rect: Rect) -> Self {
+        Self::PushClip { rect }
+    }
+
+    pub const fn pop_clip() -> Self {
+        Self::PopClip
     }
 }
 
@@ -40,6 +60,24 @@ impl DrawList {
 
     pub fn commands(&self) -> &[DrawCommand] {
         &self.commands
+    }
+
+    /// Begins a nested rectangular clip scope.
+    pub fn push_clip(&mut self, rect: Rect) -> &mut Self {
+        self.draw(DrawCommand::push_clip(rect))
+    }
+
+    /// Ends the most recently started clip scope.
+    pub fn pop_clip(&mut self) -> &mut Self {
+        self.draw(DrawCommand::pop_clip())
+    }
+
+    /// Records a balanced rectangular clip around `draw`.
+    pub fn with_clip<R>(&mut self, rect: Rect, draw: impl FnOnce(&mut Self) -> R) -> R {
+        self.push_clip(rect);
+        let output = draw(self);
+        self.pop_clip();
+        output
     }
 
     pub fn is_empty(&self) -> bool {
@@ -77,6 +115,8 @@ pub enum CanvasRenderError {
     SurfaceLost,
     #[error("surface texture acquisition failed validation")]
     SurfaceValidation,
+    #[error("draw commands contain an unmatched push_clip or pop_clip")]
+    UnbalancedClipStack,
 }
 
 /// A surface-backed drawing canvas.
@@ -211,6 +251,10 @@ impl<'window> Canvas<'window> {
         clear_color: wgpu::Color,
         pre_present: impl FnOnce(),
     ) -> Result<(), CanvasRenderError> {
+        if !commands_are_balanced(draws.commands()) {
+            return Err(CanvasRenderError::UnbalancedClipStack);
+        }
+
         let device = self
             .device
             .as_ref()
@@ -232,7 +276,7 @@ impl<'window> Canvas<'window> {
             device,
             queue,
             draws.commands(),
-            [config.width as f32, config.height as f32],
+            [config.width, config.height],
         );
 
         let surface_frame = acquire_frame(&self.surface)?;
@@ -333,5 +377,26 @@ mod tests {
         draws.draw(first.clone()).draw(second.clone());
 
         assert_eq!(draws.commands(), &[first, second]);
+    }
+
+    #[test]
+    fn scoped_clip_records_balanced_commands_in_order() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let child = DrawCommand::rect(Rect::new(90.0, 90.0, 20.0, 20.0), wgpu::Color::RED);
+        let mut draws = DrawList::new();
+
+        draws.with_clip(clip, |draws| {
+            draws.draw(child.clone());
+        });
+
+        assert_eq!(
+            draws.commands(),
+            &[
+                DrawCommand::PushClip { rect: clip },
+                child,
+                DrawCommand::PopClip,
+            ]
+        );
+        assert!(commands_are_balanced(draws.commands()));
     }
 }
