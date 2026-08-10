@@ -108,6 +108,7 @@ fn float_edge(value: f32, maximum: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{canvas::DrawList, offscreen::OffscreenSurface, rect::DrawRectExt};
 
     #[test]
     fn validates_balanced_and_unbalanced_command_lists() {
@@ -154,5 +155,29 @@ mod tests {
         let mut disjoint = ClipStack::new([100, 100]);
         disjoint.push(Rect::new(200.0, 200.0, 10.0, 10.0));
         assert!(disjoint.active().is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn offscreen_pixels_match_nested_clip() {
+        let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping offscreen clip test: no WebGPU adapter available");
+            return;
+        };
+        let mut draws = DrawList::new();
+        draws.with_clip(Rect::new(2.0, 2.0, 12.0, 12.0), |draws| {
+            draws.with_clip(Rect::new(4.0, 4.0, 8.0, 8.0), |draws| {
+                draws.draw_rect(Rect::new(0.0, 0.0, 16.0, 16.0), wgpu::Color::RED);
+            });
+        });
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLUE).await;
+
+        assert_eq!(surface.pixel(&pixels, 4, 4), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 11, 11), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 3, 4), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 12, 11), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 4, 3), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 11, 12), [0, 0, 255, 255]);
     }
 }
