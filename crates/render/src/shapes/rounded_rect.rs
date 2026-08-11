@@ -6,7 +6,7 @@ use std::ops::Range;
 use crate::{
     canvas::DrawCommand,
     clip::{ClipMask, ClipStack, ScissorRect},
-    shapes::{rect::Rect, round::Round, stroke::Stroke},
+    shapes::{rect::Rect, round::Round, stroke::Stroke, ShapePipeline},
 };
 
 pub(crate) struct RoundedRectRenderer {
@@ -170,23 +170,42 @@ impl RoundedRectRenderer {
         );
     }
 
-    pub(crate) fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.batches.is_empty() {
-            return;
-        }
-
+    fn draw_batch<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, batch_index: usize) {
+        let batch = &self.batches[batch_index];
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        for batch in &self.batches {
-            pass.set_scissor_rect(
-                batch.scissor.x,
-                batch.scissor.y,
-                batch.scissor.width,
-                batch.scissor.height,
-            );
-            pass.draw(0..6, batch.instances.clone());
-        }
+        pass.set_scissor_rect(
+            batch.scissor.x,
+            batch.scissor.y,
+            batch.scissor.width,
+            batch.scissor.height,
+        );
+        pass.draw(0..6, batch.instances.clone());
+    }
+}
+
+impl ShapePipeline for RoundedRectRenderer {
+    fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        commands: &[DrawCommand],
+        canvas_size: [u32; 2],
+    ) {
+        Self::prepare(self, device, queue, commands, canvas_size);
+    }
+
+    fn batch_count(&self) -> usize {
+        self.batches.len()
+    }
+
+    fn batch_order(&self, batch_index: usize) -> usize {
+        self.batches[batch_index].first_order
+    }
+
+    fn draw_batch<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, batch_index: usize) {
+        Self::draw_batch(self, pass, batch_index);
     }
 }
 
@@ -277,6 +296,7 @@ fn push_instance(
         _ => batches.push(RoundedRectBatch {
             scissor,
             instances: instance_index..instance_index + 1,
+            first_order: order,
             last_order: order,
         }),
     }
@@ -406,6 +426,7 @@ enum RectPaintKind {
 struct RoundedRectBatch {
     scissor: ScissorRect,
     instances: Range<u32>,
+    first_order: usize,
     last_order: usize,
 }
 
@@ -488,6 +509,7 @@ mod tests {
             vec![RoundedRectBatch {
                 scissor: ScissorRect::new(0, 0, 20, 20),
                 instances: 0..3,
+                first_order: 0,
                 last_order: 2,
             }]
         );
@@ -601,26 +623,31 @@ mod tests {
                 RoundedRectBatch {
                     scissor: ScissorRect::new(0, 0, 100, 100),
                     instances: 0..1,
+                    first_order: 0,
                     last_order: 0,
                 },
                 RoundedRectBatch {
                     scissor: ScissorRect::new(10, 10, 50, 50),
                     instances: 1..2,
+                    first_order: 2,
                     last_order: 2,
                 },
                 RoundedRectBatch {
                     scissor: ScissorRect::new(40, 10, 20, 20),
                     instances: 2..3,
+                    first_order: 4,
                     last_order: 4,
                 },
                 RoundedRectBatch {
                     scissor: ScissorRect::new(10, 10, 50, 50),
                     instances: 3..4,
+                    first_order: 6,
                     last_order: 6,
                 },
                 RoundedRectBatch {
                     scissor: ScissorRect::new(0, 0, 100, 100),
                     instances: 4..5,
+                    first_order: 8,
                     last_order: 8,
                 },
             ]
