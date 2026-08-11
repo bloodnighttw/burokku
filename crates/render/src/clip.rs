@@ -14,6 +14,7 @@ pub(crate) fn commands_are_balanced(commands: &[DrawCommand]) -> bool {
             DrawCommand::PopClip if depth == 0 => return false,
             DrawCommand::PopClip => depth -= 1,
             DrawCommand::Rect { .. } => {}
+            DrawCommand::Stroke { .. } => {}
         }
     }
     depth == 0
