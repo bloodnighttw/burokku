@@ -24,7 +24,11 @@ pub(crate) struct RoundedRectRenderer {
 }
 
 impl RoundedRectRenderer {
-    pub(crate) fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("render rounded rectangle screen uniform"),
             size: std::mem::size_of::<ScreenUniform>() as u64,
@@ -85,7 +89,10 @@ impl RoundedRectRenderer {
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fragment_main"),

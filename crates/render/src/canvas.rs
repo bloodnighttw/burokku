@@ -222,7 +222,7 @@ impl<'window> Canvas<'window> {
             .ok_or(CanvasSurfaceError::UnsupportedSurface)?;
         self.surface.configure(device, &config);
 
-        self.shape_renderer = Some(ShapeRenderer::new(device, config.format));
+        self.shape_renderer = Some(ShapeRenderer::new(device, config.format, 1));
         self.device = Some(device.clone());
         self.queue = Some(queue.clone());
         self.config = Some(config);
