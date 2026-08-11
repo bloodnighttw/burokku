@@ -12,4 +12,5 @@ thiserror = "2"
 wgpu = "29"
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 tokio = { version = "1", features = ["macros", "rt"] }

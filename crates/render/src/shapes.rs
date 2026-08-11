@@ -44,10 +44,18 @@ struct PreparedBatch {
 }
 
 impl ShapeRenderer {
-    pub(crate) fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         Self {
             // in future, we can expand it with custom wgsl shaders.
-            renderers: vec![Box::new(RoundedRectRenderer::new(device, surface_format))],
+            renderers: vec![Box::new(RoundedRectRenderer::new(
+                device,
+                surface_format,
+                sample_count,
+            ))],
             batches: Vec::new(),
         }
     }

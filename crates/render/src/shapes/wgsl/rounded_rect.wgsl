@@ -26,12 +26,12 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
-    @location(1) local_position: vec2<f32>,
+    @location(1) @interpolate(linear, sample) local_position: vec2<f32>,
     @location(2) size: vec2<f32>,
     @location(3) round: vec4<f32>,
     @location(4) line_width: f32,
     @location(5) @interpolate(flat) paint_kind: u32,
-    @location(6) pixel_position: vec2<f32>,
+    @location(6) @interpolate(linear, sample) pixel_position: vec2<f32>,
     @location(7) @interpolate(flat) clip_range: vec2<u32>,
 };
 
@@ -80,11 +80,19 @@ fn rounded_distance(position: vec2<f32>, bounds: vec4<f32>, round: vec4<f32>) ->
 }
 
 fn coverage(distance: f32) -> f32 {
-    return clamp(0.5 - distance, 0.0, 1.0);
+    let antialias_width = max(fwidth(distance), 0.75);
+    return 1.0 - smoothstep(
+        -antialias_width * 0.5,
+        antialias_width * 0.5,
+        distance,
+    );
 }
 
 @fragment
-fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment_main(
+    input: VertexOutput,
+    @builtin(sample_index) _sample_index: u32,
+) -> @location(0) vec4<f32> {
     let outer_coverage = coverage(rounded_distance(
         input.local_position,
         vec4<f32>(0.0, 0.0, input.size),
