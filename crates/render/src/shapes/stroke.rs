@@ -1,19 +1,11 @@
-//! Retained rectangular-outline commands and their private wgpu renderer.
-
-use std::ops::Range;
-
-use bytemuck::{Pod, Zeroable};
+//! Rectangular-outline geometry and retained drawing helpers.
 
 use crate::{
     canvas::{DrawCommand, DrawList},
-    clip::{ClipMask, ClipStack, ScissorRect},
-    shapes::round::Round,
+    shapes::{rect::Rect, round::Round},
 };
 
-/// A rectangular outline in logical canvas pixels.
-///
-/// `line_width` is drawn inward from the bounds, so the stroke never extends
-/// beyond `(x, y, width, height)`.
+/// An inward-facing outline around rectangular bounds.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
 pub struct Stroke {
     pub x: f32,
@@ -34,15 +26,16 @@ impl Stroke {
         }
     }
 
+    pub const fn from_rect(rect: Rect, line_width: f32) -> Self {
+        Self::new(rect.x, rect.y, rect.width, rect.height, line_width)
+    }
+
+    pub const fn rect(self) -> Rect {
+        Rect::new(self.x, self.y, self.width, self.height)
+    }
+
     pub fn is_empty(self) -> bool {
-        self.width <= 0.0
-            || self.height <= 0.0
-            || self.line_width <= 0.0
-            || !self.x.is_finite()
-            || !self.y.is_finite()
-            || !self.width.is_finite()
-            || !self.height.is_finite()
-            || !self.line_width.is_finite()
+        self.rect().is_empty() || self.line_width <= 0.0 || !self.line_width.is_finite()
     }
 }
 
@@ -72,375 +65,16 @@ impl DrawStrokeExt for DrawList {
     }
 }
 
-pub(crate) struct StrokeRenderer {
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    screen_buffer: wgpu::Buffer,
-    screen_bind_group: wgpu::BindGroup,
-    clip_buffer: wgpu::Buffer,
-    clip_capacity: u64,
-    instance_buffer: wgpu::Buffer,
-    instance_capacity: u64,
-    instances: Vec<StrokeInstance>,
-    clip_masks: Vec<ClipMask>,
-    batches: Vec<StrokeBatch>,
-}
-
-impl StrokeRenderer {
-    pub(crate) fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("render stroke screen uniform"),
-            size: std::mem::size_of::<ScreenUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("render stroke bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let clip_capacity = std::mem::size_of::<ClipMask>() as u64;
-        let clip_buffer = create_clip_buffer(device, clip_capacity);
-        let screen_bind_group =
-            create_bind_group(device, &bind_group_layout, &screen_buffer, &clip_buffer);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("render stroke shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("wgsl/stroke.wgsl").into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("render stroke pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("render stroke pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex_main"),
-                compilation_options: Default::default(),
-                buffers: &[StrokeInstance::layout()],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let instance_capacity = std::mem::size_of::<StrokeInstance>() as u64;
-        let instance_buffer = create_instance_buffer(device, instance_capacity);
-
-        Self {
-            pipeline,
-            bind_group_layout,
-            screen_buffer,
-            screen_bind_group,
-            clip_buffer,
-            clip_capacity,
-            instance_buffer,
-            instance_capacity,
-            instances: Vec::new(),
-            clip_masks: Vec::new(),
-            batches: Vec::new(),
-        }
-    }
-
-    pub(crate) fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        commands: &[DrawCommand],
-        canvas_size: [u32; 2],
-    ) {
-        queue.write_buffer(
-            &self.screen_buffer,
-            0,
-            bytemuck::bytes_of(&ScreenUniform {
-                size: [canvas_size[0] as f32, canvas_size[1] as f32],
-                _padding: [0.0; 2],
-            }),
-        );
-
-        self.instances.clear();
-        self.clip_masks.clear();
-        self.batches.clear();
-        collect_instances(
-            commands,
-            canvas_size,
-            &mut self.instances,
-            &mut self.clip_masks,
-            &mut self.batches,
-        );
-        if self.instances.is_empty() {
-            return;
-        }
-
-        let required_clips = std::mem::size_of_val(self.clip_masks.as_slice()) as u64;
-        if required_clips > self.clip_capacity {
-            self.clip_capacity = required_clips.next_power_of_two();
-            self.clip_buffer = create_clip_buffer(device, self.clip_capacity);
-            self.screen_bind_group = create_bind_group(
-                device,
-                &self.bind_group_layout,
-                &self.screen_buffer,
-                &self.clip_buffer,
-            );
-        }
-        if !self.clip_masks.is_empty() {
-            queue.write_buffer(&self.clip_buffer, 0, bytemuck::cast_slice(&self.clip_masks));
-        }
-
-        let required = std::mem::size_of_val(self.instances.as_slice()) as u64;
-        if required > self.instance_capacity {
-            self.instance_capacity = required.next_power_of_two();
-            self.instance_buffer = create_instance_buffer(device, self.instance_capacity);
-        }
-        queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(&self.instances),
-        );
-    }
-
-    pub(crate) fn batch_count(&self) -> usize {
-        self.batches.len()
-    }
-
-    pub(crate) fn batch_order(&self, index: usize) -> usize {
-        self.batches[index].order
-    }
-
-    pub(crate) fn draw_batch<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, index: usize) {
-        let batch = &self.batches[index];
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.screen_bind_group, &[]);
-        pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        pass.set_scissor_rect(
-            batch.scissor.x,
-            batch.scissor.y,
-            batch.scissor.width,
-            batch.scissor.height,
-        );
-        pass.draw(0..6, batch.instances.clone());
-    }
-}
-
-fn collect_instances(
-    commands: &[DrawCommand],
-    canvas_size: [u32; 2],
-    instances: &mut Vec<StrokeInstance>,
-    clip_masks: &mut Vec<ClipMask>,
-    batches: &mut Vec<StrokeBatch>,
-) {
-    let mut clips = ClipStack::new(canvas_size);
-    let mut rounded_clips = Vec::new();
-
-    for (order, command) in commands.iter().enumerate() {
-        match command {
-            DrawCommand::PushClip { rect, round } => {
-                clips.push(*rect);
-                let mask = ClipMask::new(*rect, *round);
-                rounded_clips.push(mask.is_rounded().then_some(mask));
-            }
-            DrawCommand::PopClip => {
-                clips.pop();
-                rounded_clips.pop();
-            }
-            DrawCommand::Stroke {
-                stroke,
-                round,
-                color,
-            } => {
-                let active_clip = clips.active();
-                if stroke.is_empty() || active_clip.is_empty() {
-                    continue;
-                }
-
-                push_instance(
-                    StrokeInstance::new(*stroke, *color, *round),
-                    active_clip,
-                    &rounded_clips,
-                    order,
-                    instances,
-                    clip_masks,
-                    batches,
-                );
-            }
-            DrawCommand::Rect { .. } => {}
-        }
-    }
-}
-
-fn push_instance(
-    mut instance: StrokeInstance,
-    scissor: ScissorRect,
-    rounded_clips: &[Option<ClipMask>],
-    order: usize,
-    instances: &mut Vec<StrokeInstance>,
-    clip_masks: &mut Vec<ClipMask>,
-    batches: &mut Vec<StrokeBatch>,
-) {
-    let clip_start = clip_masks.len() as u32;
-    clip_masks.extend(rounded_clips.iter().flatten().copied());
-    instance.clip_range = [clip_start, clip_masks.len() as u32 - clip_start];
-
-    let instance_index = instances.len() as u32;
-    instances.push(instance);
-
-    match batches.last_mut() {
-        Some(batch) if batch.scissor == scissor && batch.last_order + 1 == order => {
-            batch.instances.end = instance_index + 1;
-            batch.last_order = order;
-        }
-        _ => batches.push(StrokeBatch {
-            scissor,
-            instances: instance_index..instance_index + 1,
-            order,
-            last_order: order,
-        }),
-    }
-}
-
-fn create_instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("render stroke instance buffer"),
-        size,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn create_clip_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("render stroke rounded clip buffer"),
-        size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn create_bind_group(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    screen_buffer: &wgpu::Buffer,
-    clip_buffer: &wgpu::Buffer,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("render stroke bind group"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: screen_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: clip_buffer.as_entire_binding(),
-            },
-        ],
-    })
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
-struct ScreenUniform {
-    size: [f32; 2],
-    _padding: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct StrokeInstance {
-    bounds: [f32; 4],
-    color: [f32; 4],
-    round: [f32; 4],
-    line_width: f32,
-    clip_range: [u32; 2],
-    _padding: f32,
-}
-
-impl StrokeInstance {
-    fn new(stroke: Stroke, color: wgpu::Color, round: Round) -> Self {
-        let round = round.fit(stroke.width, stroke.height);
-        Self {
-            bounds: [stroke.x, stroke.y, stroke.width, stroke.height],
-            color: [
-                color.r as f32,
-                color.g as f32,
-                color.b as f32,
-                color.a as f32,
-            ],
-            round: [round.lt, round.rt, round.rb, round.lb],
-            line_width: stroke.line_width,
-            clip_range: [0; 2],
-            _padding: 0.0,
-        }
-    }
-
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-            0 => Float32x4,
-            1 => Float32x4,
-            2 => Float32x4,
-            3 => Float32,
-            4 => Uint32x2
-        ];
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &ATTRIBUTES,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct StrokeBatch {
-    scissor: ScissorRect,
-    instances: Range<u32>,
-    order: usize,
-    last_order: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shapes::rect::Rect;
 
     #[test]
     fn non_positive_or_invalid_strokes_are_empty() {
         assert!(Stroke::new(0.0, 0.0, 0.0, 10.0, 1.0).is_empty());
         assert!(Stroke::new(0.0, 0.0, 10.0, 10.0, 0.0).is_empty());
         assert!(Stroke::new(0.0, 0.0, 10.0, 10.0, f32::NAN).is_empty());
+        assert!(Stroke::new(f32::NAN, 0.0, 10.0, 10.0, 1.0).is_empty());
         assert!(!Stroke::new(0.0, 0.0, 10.0, 20.0, 2.0).is_empty());
     }
 
@@ -465,13 +99,6 @@ mod tests {
                 color: wgpu::Color::GREEN,
             }]
         );
-    }
-
-    #[test]
-    fn gpu_types_have_wgsl_compatible_layouts() {
-        assert_eq!(std::mem::size_of::<ScreenUniform>(), 16);
-        assert_eq!(std::mem::size_of::<StrokeInstance>(), 64);
-        assert_eq!(std::mem::size_of::<ClipMask>(), 32);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
