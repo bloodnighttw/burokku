@@ -109,17 +109,17 @@ fn float_edge(value: f32, maximum: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{canvas::DrawList, offscreen::OffscreenSurface, shapes::rect::DrawRectExt};
+    use crate::{canvas::DrawList, offscreen::OffscreenSurface, shapes::{rect::DrawRectExt, round::Round}};
 
     #[test]
     fn validates_balanced_and_unbalanced_command_lists() {
         let clip = Rect::new(0.0, 0.0, 10.0, 10.0);
         assert!(commands_are_balanced(&[
-            DrawCommand::push_clip(clip),
+            DrawCommand::push_clip(clip, Round::default()),
             DrawCommand::pop_clip(),
         ]));
         assert!(!commands_are_balanced(&[DrawCommand::pop_clip()]));
-        assert!(!commands_are_balanced(&[DrawCommand::push_clip(clip)]));
+        assert!(!commands_are_balanced(&[DrawCommand::push_clip(clip, Round::default())]));
     }
 
     #[test]

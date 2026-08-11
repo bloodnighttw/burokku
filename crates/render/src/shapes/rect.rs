@@ -41,7 +41,11 @@ pub trait DrawRectExt {
 
 impl DrawRectExt for DrawList {
     fn draw_rect(&mut self, rect: Rect, color: wgpu::Color) -> &mut Self {
-        self.draw(DrawCommand::rect(rect, color))
+        self.draw(DrawCommand::rect(
+            rect,
+            color,
+            crate::shapes::round::Round::default(),
+        ))
     }
 }
 
@@ -203,13 +207,13 @@ fn collect_instances(
 
     for command in commands {
         match command {
-            DrawCommand::PushClip { rect } => {
+            DrawCommand::PushClip { rect, .. } => {
                 clips.push(*rect);
             }
             DrawCommand::PopClip => {
                 clips.pop();
             }
-            DrawCommand::Rect { rect, color } => {
+            DrawCommand::Rect { rect, color, .. } => {
                 let active_clip = clips.active();
                 if rect.is_empty() || active_clip.is_empty() {
                     continue;
@@ -291,6 +295,8 @@ struct RectBatch {
 
 #[cfg(test)]
 mod tests {
+    use crate::shapes::round;
+
     use super::*;
 
     #[test]
@@ -312,6 +318,7 @@ mod tests {
             &[DrawCommand::Rect {
                 rect,
                 color: wgpu::Color::GREEN,
+                round: crate::shapes::round::Round::default(),
             }]
         );
     }
@@ -325,15 +332,35 @@ mod tests {
     #[test]
     fn nested_clips_create_ordered_scissor_batches() {
         let commands = [
-            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::RED),
-            DrawCommand::push_clip(Rect::new(10.0, 10.0, 50.0, 50.0)),
-            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::GREEN),
-            DrawCommand::push_clip(Rect::new(40.0, 0.0, 50.0, 30.0)),
-            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::BLUE),
+            DrawCommand::rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                wgpu::Color::RED,
+                round::Round::default(),
+            ),
+            DrawCommand::push_clip(Rect::new(10.0, 10.0, 50.0, 50.0), round::Round::default()),
+            DrawCommand::rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                wgpu::Color::GREEN,
+                round::Round::default(),
+            ),
+            DrawCommand::push_clip(Rect::new(40.0, 0.0, 50.0, 30.0), round::Round::default()),
+            DrawCommand::rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                wgpu::Color::BLUE,
+                round::Round::default(),
+            ),
             DrawCommand::pop_clip(),
-            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::WHITE),
+            DrawCommand::rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                wgpu::Color::WHITE,
+                round::Round::default(),
+            ),
             DrawCommand::pop_clip(),
-            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::BLACK),
+            DrawCommand::rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                wgpu::Color::BLACK,
+                round::Round::default(),
+            ),
         ];
         let mut instances = Vec::new();
         let mut batches = Vec::new();
@@ -371,8 +398,12 @@ mod tests {
     #[test]
     fn empty_nested_clip_discards_its_rectangles() {
         let commands = [
-            DrawCommand::push_clip(Rect::new(200.0, 200.0, 10.0, 10.0)),
-            DrawCommand::rect(Rect::new(0.0, 0.0, 100.0, 100.0), wgpu::Color::RED),
+            DrawCommand::push_clip(Rect::new(200.0, 200.0, 10.0, 10.0), round::Round::default()),
+            DrawCommand::rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                wgpu::Color::RED,
+                round::Round::default(),
+            ),
             DrawCommand::pop_clip(),
         ];
         let mut instances = Vec::new();
