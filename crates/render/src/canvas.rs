@@ -3,7 +3,12 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::{
-    clip::commands_are_balanced, shapes::{rect::{Rect, RectRenderer}, round::Round, stroke::Stroke},
+    clip::commands_are_balanced,
+    shapes::{
+        rect::{Rect, RectRenderer},
+        round::Round,
+        stroke::Stroke,
+    },
 };
 
 /// One backend-independent drawing operation.
@@ -34,6 +39,10 @@ pub enum DrawCommand {
 impl DrawCommand {
     pub const fn rect(rect: Rect, color: wgpu::Color, round: Round) -> Self {
         Self::Rect { rect, color, round }
+    }
+
+    pub const fn stroke(stroke: Stroke, color: wgpu::Color) -> Self {
+        Self::Stroke { stroke, color }
     }
 
     pub const fn push_clip(rect: Rect, round: Round) -> Self {
@@ -69,7 +78,12 @@ impl DrawList {
 
     /// Begins a nested rectangular clip scope.
     pub fn push_clip(&mut self, rect: Rect) -> &mut Self {
-        self.draw(DrawCommand::push_clip(rect, Round::default()))
+        self.push_rounded_clip(rect, Round::default())
+    }
+
+    /// Begins a nested rounded-rectangle clip scope.
+    pub fn push_rounded_clip(&mut self, rect: Rect, round: Round) -> &mut Self {
+        self.draw(DrawCommand::push_clip(rect, round))
     }
 
     /// Ends the most recently started clip scope.
@@ -80,6 +94,19 @@ impl DrawList {
     /// Records a balanced rectangular clip around `draw`.
     pub fn with_clip<R>(&mut self, rect: Rect, draw: impl FnOnce(&mut Self) -> R) -> R {
         self.push_clip(rect);
+        let output = draw(self);
+        self.pop_clip();
+        output
+    }
+
+    /// Records a balanced rounded-rectangle clip around `draw`.
+    pub fn with_rounded_clip<R>(
+        &mut self,
+        rect: Rect,
+        round: Round,
+        draw: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.push_rounded_clip(rect, round);
         let output = draw(self);
         self.pop_clip();
         output
@@ -372,11 +399,24 @@ fn acquire_frame(surface: &wgpu::Surface<'_>) -> Result<wgpu::SurfaceTexture, Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::offscreen::OffscreenSurface;
 
     #[test]
     fn draw_list_retains_submission_order_without_a_gpu() {
-        let first = DrawCommand::rect(Rect::new(0.0, 0.0, 10.0, 10.0), wgpu::Color::RED, Round::default());
-        let second = DrawCommand::rect(Rect::new(5.0, 5.0, 20.0, 20.0), wgpu::Color::BLUE, Round::default());
+        let first = DrawCommand::rect(
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            wgpu::Color::RED,
+            Round::default(),
+        );
+        let second = DrawCommand::stroke(
+            Stroke {
+                x: 5.0,
+                y: 5.0,
+                path: vec![(10.0, 10.0), (20.0, 20.0)],
+                width: 2.0,
+            },
+            wgpu::Color::BLUE,
+        );
         let mut draws = DrawList::new();
 
         draws.draw(first.clone()).draw(second.clone());
@@ -387,7 +427,11 @@ mod tests {
     #[test]
     fn scoped_clip_records_balanced_commands_in_order() {
         let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
-        let child = DrawCommand::rect(Rect::new(90.0, 90.0, 20.0, 20.0), wgpu::Color::RED, Round::default());
+        let child = DrawCommand::rect(
+            Rect::new(90.0, 90.0, 20.0, 20.0),
+            wgpu::Color::RED,
+            Round::default(),
+        );
         let mut draws = DrawList::new();
 
         draws.with_clip(clip, |draws| {
@@ -397,11 +441,38 @@ mod tests {
         assert_eq!(
             draws.commands(),
             &[
-                DrawCommand::PushClip { rect: clip, round: Round::default() },
+                DrawCommand::PushClip {
+                    rect: clip,
+                    round: Round::default()
+                },
                 child,
                 DrawCommand::PopClip,
             ]
         );
         assert!(commands_are_balanced(draws.commands()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn offscreen_canvas_renders_a_stroke_command() {
+        let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping offscreen stroke test: no WebGPU adapter available");
+            return;
+        };
+        let mut draws = DrawList::new();
+        draws.draw(DrawCommand::stroke(
+            Stroke {
+                x: 2.0,
+                y: 2.0,
+                path: vec![(14.0, 14.0)],
+                width: 2.0,
+            },
+            wgpu::Color::RED,
+        ));
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLUE).await;
+
+        assert_eq!(surface.pixel(&pixels, 8, 8), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 5), [0, 0, 255, 255]);
     }
 }

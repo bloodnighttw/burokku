@@ -1,8 +1,8 @@
 //! CPU-side rectangular clipping for retained draw commands.
 //!
-//! Rectangular clips use wgpu's fixed-function scissor state, so they do not
-//! need shader code. Rounded or transformed clips can add a separate WGSL
-//! implementation later without changing the retained clip commands.
+//! Rectangular clips use wgpu's fixed-function scissor state. Rounded clips
+//! keep that scissor as a coarse bound and add a per-fragment mask in the
+//! rectangle renderer.
 
 use crate::{canvas::DrawCommand, shapes::rect::Rect};
 
