@@ -6,6 +6,7 @@ use std::ops::Range;
 use crate::{
     canvas::{DrawCommand, DrawList},
     clip::{ClipStack, ScissorRect},
+    shapes::round::Round,
 };
 
 /// A rectangle in logical canvas pixels.
@@ -37,25 +38,30 @@ impl Rect {
 /// Convenience rectangle recording for real frames and mock [`DrawList`]s.
 pub trait DrawRectExt {
     fn draw_rect(&mut self, rect: Rect, color: wgpu::Color) -> &mut Self;
+    fn draw_rounded_rect(&mut self, rect: Rect, color: wgpu::Color, round: Round) -> &mut Self;
 }
 
 impl DrawRectExt for DrawList {
     fn draw_rect(&mut self, rect: Rect, color: wgpu::Color) -> &mut Self {
-        self.draw(DrawCommand::rect(
-            rect,
-            color,
-            crate::shapes::round::Round::default(),
-        ))
+        self.draw_rounded_rect(rect, color, Round::default())
+    }
+
+    fn draw_rounded_rect(&mut self, rect: Rect, color: wgpu::Color, round: Round) -> &mut Self {
+        self.draw(DrawCommand::rect(rect, color, round))
     }
 }
 
 pub(crate) struct RectRenderer {
     pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
     screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
+    clip_buffer: wgpu::Buffer,
+    clip_capacity: u64,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
     instances: Vec<RectInstance>,
+    clip_masks: Vec<ClipMask>,
     batches: Vec<RectBatch>,
 }
 
@@ -69,25 +75,33 @@ impl RectRenderer {
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("render rectangle bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
-        let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render rectangle screen bind group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: screen_buffer.as_entire_binding(),
-            }],
-        });
+        let clip_capacity = std::mem::size_of::<ClipMask>() as u64;
+        let clip_buffer = create_clip_buffer(device, clip_capacity);
+        let screen_bind_group =
+            create_bind_group(device, &bind_group_layout, &screen_buffer, &clip_buffer);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("render rectangle shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("wgsl/rect.wgsl").into()),
@@ -128,11 +142,15 @@ impl RectRenderer {
 
         Self {
             pipeline,
+            bind_group_layout,
             screen_buffer,
             screen_bind_group,
+            clip_buffer,
+            clip_capacity,
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
+            clip_masks: Vec::new(),
             batches: Vec::new(),
         }
     }
@@ -154,15 +172,32 @@ impl RectRenderer {
         );
 
         self.instances.clear();
+        self.clip_masks.clear();
         self.batches.clear();
         collect_instances(
             commands,
             canvas_size,
             &mut self.instances,
+            &mut self.clip_masks,
             &mut self.batches,
         );
         if self.instances.is_empty() {
             return;
+        }
+
+        let required_clips = std::mem::size_of_val(self.clip_masks.as_slice()) as u64;
+        if required_clips > self.clip_capacity {
+            self.clip_capacity = required_clips.next_power_of_two();
+            self.clip_buffer = create_clip_buffer(device, self.clip_capacity);
+            self.screen_bind_group = create_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.screen_buffer,
+                &self.clip_buffer,
+            );
+        }
+        if !self.clip_masks.is_empty() {
+            queue.write_buffer(&self.clip_buffer, 0, bytemuck::cast_slice(&self.clip_masks));
         }
 
         let required = std::mem::size_of_val(self.instances.as_slice()) as u64;
@@ -201,42 +236,89 @@ fn collect_instances(
     commands: &[DrawCommand],
     canvas_size: [u32; 2],
     instances: &mut Vec<RectInstance>,
+    clip_masks: &mut Vec<ClipMask>,
     batches: &mut Vec<RectBatch>,
 ) {
     let mut clips = ClipStack::new(canvas_size);
+    let mut rounded_clips = Vec::new();
 
     for command in commands {
         match command {
-            DrawCommand::PushClip { rect, .. } => {
+            DrawCommand::PushClip { rect, round } => {
                 clips.push(*rect);
+                let mask = ClipMask::new(*rect, *round);
+                rounded_clips.push(mask.is_rounded().then_some(mask));
             }
             DrawCommand::PopClip => {
                 clips.pop();
+                rounded_clips.pop();
             }
-            DrawCommand::Rect { rect, color, .. } => {
+            DrawCommand::Rect { rect, color, round } => {
                 let active_clip = clips.active();
                 if rect.is_empty() || active_clip.is_empty() {
                     continue;
                 }
 
-                let instance = RectInstance::new(*rect, *color);
-                let instance_index = instances.len() as u32;
-                instances.push(instance);
-
-                match batches.last_mut() {
-                    Some(batch) if batch.scissor == active_clip => {
-                        batch.instances.end = instance_index + 1;
-                    }
-                    _ => batches.push(RectBatch {
-                        scissor: active_clip,
-                        instances: instance_index..instance_index + 1,
-                    }),
-                }
+                let instance = RectInstance::new(*rect, *color, *round);
+                push_instance(
+                    instance,
+                    active_clip,
+                    &rounded_clips,
+                    instances,
+                    clip_masks,
+                    batches,
+                );
             }
             DrawCommand::Stroke { stroke, color } => {
-                // TODO: Implement stroke rendering
+                let active_clip = clips.active();
+                if stroke.width <= 0.0 || !stroke.width.is_finite() || active_clip.is_empty() {
+                    continue;
+                }
+
+                let mut start = (stroke.x, stroke.y);
+                for &end in &stroke.path {
+                    if let Some(instance) =
+                        RectInstance::stroke_segment(start, end, stroke.width, *color)
+                    {
+                        push_instance(
+                            instance,
+                            active_clip,
+                            &rounded_clips,
+                            instances,
+                            clip_masks,
+                            batches,
+                        );
+                    }
+                    start = end;
+                }
             }
         }
+    }
+}
+
+fn push_instance(
+    mut instance: RectInstance,
+    scissor: ScissorRect,
+    rounded_clips: &[Option<ClipMask>],
+    instances: &mut Vec<RectInstance>,
+    clip_masks: &mut Vec<ClipMask>,
+    batches: &mut Vec<RectBatch>,
+) {
+    let clip_start = clip_masks.len() as u32;
+    clip_masks.extend(rounded_clips.iter().flatten().copied());
+    instance.clip_range = [clip_start, clip_masks.len() as u32 - clip_start];
+
+    let instance_index = instances.len() as u32;
+    instances.push(instance);
+
+    match batches.last_mut() {
+        Some(batch) if batch.scissor == scissor => {
+            batch.instances.end = instance_index + 1;
+        }
+        _ => batches.push(RectBatch {
+            scissor,
+            instances: instance_index..instance_index + 1,
+        }),
     }
 }
 
@@ -246,6 +328,37 @@ fn create_instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         size,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+fn create_clip_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("render rounded clip buffer"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    screen_buffer: &wgpu::Buffer,
+    clip_buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("render rectangle bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: clip_buffer.as_entire_binding(),
+            },
+        ],
     })
 }
 
@@ -261,10 +374,14 @@ struct ScreenUniform {
 struct RectInstance {
     bounds: [f32; 4],
     color: [f32; 4],
+    round: [f32; 4],
+    basis: [f32; 4],
+    clip_range: [u32; 2],
 }
 
 impl RectInstance {
-    fn new(rect: Rect, color: wgpu::Color) -> Self {
+    fn new(rect: Rect, color: wgpu::Color, round: Round) -> Self {
+        let round = round.fit(rect.width, rect.height);
         Self {
             bounds: [rect.x, rect.y, rect.width, rect.height],
             color: [
@@ -273,17 +390,79 @@ impl RectInstance {
                 color.b as f32,
                 color.a as f32,
             ],
+            round: [round.lt, round.rt, round.rb, round.lb],
+            basis: [1.0, 0.0, 0.0, 1.0],
+            clip_range: [0; 2],
         }
     }
 
+    fn stroke_segment(
+        start: (f32, f32),
+        end: (f32, f32),
+        width: f32,
+        color: wgpu::Color,
+    ) -> Option<Self> {
+        let delta = (end.0 - start.0, end.1 - start.1);
+        let length = delta.0.hypot(delta.1);
+        if !length.is_finite() || length <= f32::EPSILON {
+            return None;
+        }
+
+        let tangent = (delta.0 / length, delta.1 / length);
+        let normal = (-tangent.1, tangent.0);
+        Some(Self {
+            bounds: [
+                start.0 - normal.0 * width * 0.5,
+                start.1 - normal.1 * width * 0.5,
+                length,
+                width,
+            ],
+            color: [
+                color.r as f32,
+                color.g as f32,
+                color.b as f32,
+                color.a as f32,
+            ],
+            round: [0.0; 4],
+            basis: [tangent.0, tangent.1, normal.0, normal.1],
+            clip_range: [0; 2],
+        })
+    }
+
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+        const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            0 => Float32x4,
+            1 => Float32x4,
+            2 => Float32x4,
+            3 => Float32x4,
+            4 => Uint32x2
+        ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &ATTRIBUTES,
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct ClipMask {
+    bounds: [f32; 4],
+    round: [f32; 4],
+}
+
+impl ClipMask {
+    fn new(rect: Rect, round: Round) -> Self {
+        let round = round.fit(rect.width, rect.height);
+        Self {
+            bounds: [rect.x, rect.y, rect.width, rect.height],
+            round: [round.lt, round.rt, round.rb, round.lb],
+        }
+    }
+
+    fn is_rounded(self) -> bool {
+        self.round.iter().any(|radius| *radius > 0.0)
     }
 }
 
@@ -324,9 +503,105 @@ mod tests {
     }
 
     #[test]
+    fn extension_records_a_rounded_rectangle_without_a_gpu() {
+        let mut draws = DrawList::new();
+        let rect = Rect::new(1.0, 2.0, 30.0, 40.0);
+        let round = Round {
+            lt: 1.0,
+            rt: 2.0,
+            rb: 3.0,
+            lb: 4.0,
+        };
+
+        draws.draw_rounded_rect(rect, wgpu::Color::GREEN, round);
+
+        assert_eq!(
+            draws.commands(),
+            &[DrawCommand::Rect {
+                rect,
+                color: wgpu::Color::GREEN,
+                round,
+            }]
+        );
+    }
+
+    #[test]
     fn gpu_types_have_wgsl_compatible_layouts() {
         assert_eq!(std::mem::size_of::<ScreenUniform>(), 16);
-        assert_eq!(std::mem::size_of::<RectInstance>(), 32);
+        assert_eq!(std::mem::size_of::<RectInstance>(), 72);
+        assert_eq!(std::mem::size_of::<ClipMask>(), 32);
+    }
+
+    #[test]
+    fn rectangle_instance_carries_fitted_corner_radii() {
+        let instance = RectInstance::new(
+            Rect::new(0.0, 0.0, 40.0, 20.0),
+            wgpu::Color::WHITE,
+            Round {
+                lt: 30.0,
+                rt: 30.0,
+                rb: 0.0,
+                lb: 0.0,
+            },
+        );
+
+        assert_eq!(instance.round, [20.0, 20.0, 0.0, 0.0]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn offscreen_pixels_use_each_command_corner_radius() {
+        let Some(mut surface) = crate::offscreen::OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping offscreen rounded rectangle test: no WebGPU adapter available");
+            return;
+        };
+        let mut draws = DrawList::new();
+        draws.draw_rounded_rect(
+            Rect::new(2.0, 2.0, 12.0, 12.0),
+            wgpu::Color::RED,
+            Round {
+                lt: 4.0,
+                rt: 0.0,
+                rb: 0.0,
+                lb: 0.0,
+            },
+        );
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLUE).await;
+
+        assert_eq!(surface.pixel(&pixels, 2, 2), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 13, 2), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 2, 13), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 8), [255, 0, 0, 255]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn offscreen_pixels_use_rounded_clip_commands() {
+        let Some(mut surface) = crate::offscreen::OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping offscreen rounded clip test: no WebGPU adapter available");
+            return;
+        };
+        let mut draws = DrawList::new();
+        draws.with_rounded_clip(
+            Rect::new(2.0, 2.0, 12.0, 12.0),
+            Round {
+                lt: 4.0,
+                rt: 4.0,
+                rb: 4.0,
+                lb: 4.0,
+            },
+            |draws| {
+                draws.draw_rect(Rect::new(0.0, 0.0, 16.0, 16.0), wgpu::Color::RED);
+            },
+        );
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLUE).await;
+
+        assert_eq!(surface.pixel(&pixels, 2, 2), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 2), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 8), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 1, 8), [0, 0, 255, 255]);
     }
 
     #[test]
@@ -363,9 +638,16 @@ mod tests {
             ),
         ];
         let mut instances = Vec::new();
+        let mut clip_masks = Vec::new();
         let mut batches = Vec::new();
 
-        collect_instances(&commands, [100, 100], &mut instances, &mut batches);
+        collect_instances(
+            &commands,
+            [100, 100],
+            &mut instances,
+            &mut clip_masks,
+            &mut batches,
+        );
 
         assert_eq!(instances.len(), 5);
         assert_eq!(
@@ -407,9 +689,16 @@ mod tests {
             DrawCommand::pop_clip(),
         ];
         let mut instances = Vec::new();
+        let mut clip_masks = Vec::new();
         let mut batches = Vec::new();
 
-        collect_instances(&commands, [100, 100], &mut instances, &mut batches);
+        collect_instances(
+            &commands,
+            [100, 100],
+            &mut instances,
+            &mut clip_masks,
+            &mut batches,
+        );
 
         assert!(instances.is_empty());
         assert!(batches.is_empty());
