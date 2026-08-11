@@ -4,7 +4,7 @@
 //! need shader code. Rounded or transformed clips can add a separate WGSL
 //! implementation later without changing the retained clip commands.
 
-use crate::{canvas::DrawCommand, rect::Rect};
+use crate::{canvas::DrawCommand, shapes::rect::Rect};
 
 pub(crate) fn commands_are_balanced(commands: &[DrawCommand]) -> bool {
     let mut depth = 0usize;
@@ -108,7 +108,7 @@ fn float_edge(value: f32, maximum: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{canvas::DrawList, offscreen::OffscreenSurface, rect::DrawRectExt};
+    use crate::{canvas::DrawList, offscreen::OffscreenSurface, shapes::rect::DrawRectExt};
 
     #[test]
     fn validates_balanced_and_unbalanced_command_lists() {

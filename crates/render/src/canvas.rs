@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::{
     clip::commands_are_balanced,
-    rect::{Rect, RectRenderer},
+    shapes::rect::{Rect, RectRenderer},
 };
 
 /// One backend-independent drawing operation.
