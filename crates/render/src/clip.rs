@@ -2,9 +2,14 @@
 //!
 //! Rectangular clips use wgpu's fixed-function scissor state. Rounded clips
 //! keep that scissor as a coarse bound and add a per-fragment mask in the
-//! rectangle renderer.
+//! primitive renderers.
 
-use crate::{canvas::DrawCommand, shapes::rect::Rect};
+use bytemuck::{Pod, Zeroable};
+
+use crate::{
+    canvas::DrawCommand,
+    shapes::{rect::Rect, round::Round},
+};
 
 pub(crate) fn commands_are_balanced(commands: &[DrawCommand]) -> bool {
     let mut depth = 0usize;
@@ -23,6 +28,27 @@ pub(crate) fn commands_are_balanced(commands: &[DrawCommand]) -> bool {
 pub(crate) struct ClipStack {
     active: ScissorRect,
     ancestors: Vec<ScissorRect>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct ClipMask {
+    bounds: [f32; 4],
+    round: [f32; 4],
+}
+
+impl ClipMask {
+    pub(crate) fn new(rect: Rect, round: Round) -> Self {
+        let round = round.fit(rect.width, rect.height);
+        Self {
+            bounds: [rect.x, rect.y, rect.width, rect.height],
+            round: [round.lt, round.rt, round.rb, round.lb],
+        }
+    }
+
+    pub(crate) fn is_rounded(self) -> bool {
+        self.round.iter().any(|radius| *radius > 0.0)
+    }
 }
 
 impl ClipStack {
@@ -109,7 +135,11 @@ fn float_edge(value: f32, maximum: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{canvas::DrawList, offscreen::OffscreenSurface, shapes::{rect::DrawRectExt, round::Round}};
+    use crate::{
+        canvas::DrawList,
+        offscreen::OffscreenSurface,
+        shapes::{rect::DrawRectExt, round::Round},
+    };
 
     #[test]
     fn validates_balanced_and_unbalanced_command_lists() {
@@ -119,7 +149,10 @@ mod tests {
             DrawCommand::pop_clip(),
         ]));
         assert!(!commands_are_balanced(&[DrawCommand::pop_clip()]));
-        assert!(!commands_are_balanced(&[DrawCommand::push_clip(clip, Round::default())]));
+        assert!(!commands_are_balanced(&[DrawCommand::push_clip(
+            clip,
+            Round::default()
+        )]));
     }
 
     #[test]

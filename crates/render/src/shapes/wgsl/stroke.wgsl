@@ -18,7 +18,8 @@ struct VertexInput {
     @location(0) bounds: vec4<f32>,
     @location(1) color: vec4<f32>,
     @location(2) round: vec4<f32>,
-    @location(3) clip_range: vec2<u32>,
+    @location(3) line_width: f32,
+    @location(4) clip_range: vec2<u32>,
 };
 
 struct VertexOutput {
@@ -27,8 +28,9 @@ struct VertexOutput {
     @location(1) local_position: vec2<f32>,
     @location(2) size: vec2<f32>,
     @location(3) round: vec4<f32>,
-    @location(4) pixel_position: vec2<f32>,
-    @location(5) @interpolate(flat) clip_range: vec2<u32>,
+    @location(4) line_width: f32,
+    @location(5) pixel_position: vec2<f32>,
+    @location(6) @interpolate(flat) clip_range: vec2<u32>,
 };
 
 @vertex
@@ -56,6 +58,7 @@ fn vertex_main(
         local,
         input.bounds.zw,
         input.round,
+        input.line_width,
         pixel,
         input.clip_range,
     );
@@ -77,11 +80,24 @@ fn coverage(distance: f32) -> f32 {
 
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    var mask = coverage(rounded_distance(
+    let outer_coverage = coverage(rounded_distance(
         input.local_position,
         vec4<f32>(0.0, 0.0, input.size),
         input.round,
     ));
+
+    var inner_coverage = 0.0;
+    let inner_size = input.size - vec2<f32>(input.line_width * 2.0);
+    if all(inner_size > vec2<f32>(0.0)) {
+        let inner_round = max(input.round - vec4<f32>(input.line_width), vec4<f32>(0.0));
+        inner_coverage = coverage(rounded_distance(
+            input.local_position,
+            vec4<f32>(vec2<f32>(input.line_width), inner_size),
+            inner_round,
+        ));
+    }
+
+    var mask = outer_coverage * (1.0 - inner_coverage);
     for (var index = 0u; index < input.clip_range.y; index += 1u) {
         let clip_mask = clip_masks[input.clip_range.x + index];
         mask *= coverage(rounded_distance(
