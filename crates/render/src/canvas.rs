@@ -32,12 +32,12 @@ pub enum DrawCommand {
 }
 
 impl DrawCommand {
-    pub const fn rect(rect: Rect, color: wgpu::Color) -> Self {
-        Self::Rect { rect, color, round: Round::default() }
+    pub const fn rect(rect: Rect, color: wgpu::Color, round: Round) -> Self {
+        Self::Rect { rect, color, round }
     }
 
-    pub const fn push_clip(rect: Rect) -> Self {
-        Self::PushClip { rect, round: Round::default() }
+    pub const fn push_clip(rect: Rect, round: Round) -> Self {
+        Self::PushClip { rect, round }
     }
 
     pub const fn pop_clip() -> Self {
@@ -69,7 +69,7 @@ impl DrawList {
 
     /// Begins a nested rectangular clip scope.
     pub fn push_clip(&mut self, rect: Rect) -> &mut Self {
-        self.draw(DrawCommand::push_clip(rect))
+        self.draw(DrawCommand::push_clip(rect, Round::default()))
     }
 
     /// Ends the most recently started clip scope.
@@ -375,8 +375,8 @@ mod tests {
 
     #[test]
     fn draw_list_retains_submission_order_without_a_gpu() {
-        let first = DrawCommand::rect(Rect::new(0.0, 0.0, 10.0, 10.0), wgpu::Color::RED);
-        let second = DrawCommand::rect(Rect::new(5.0, 5.0, 20.0, 20.0), wgpu::Color::BLUE);
+        let first = DrawCommand::rect(Rect::new(0.0, 0.0, 10.0, 10.0), wgpu::Color::RED, Round::default());
+        let second = DrawCommand::rect(Rect::new(5.0, 5.0, 20.0, 20.0), wgpu::Color::BLUE, Round::default());
         let mut draws = DrawList::new();
 
         draws.draw(first.clone()).draw(second.clone());
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn scoped_clip_records_balanced_commands_in_order() {
         let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
-        let child = DrawCommand::rect(Rect::new(90.0, 90.0, 20.0, 20.0), wgpu::Color::RED);
+        let child = DrawCommand::rect(Rect::new(90.0, 90.0, 20.0, 20.0), wgpu::Color::RED, Round::default());
         let mut draws = DrawList::new();
 
         draws.with_clip(clip, |draws| {
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(
             draws.commands(),
             &[
-                DrawCommand::PushClip { rect: clip },
+                DrawCommand::PushClip { rect: clip, round: Round::default() },
                 child,
                 DrawCommand::PopClip,
             ]
