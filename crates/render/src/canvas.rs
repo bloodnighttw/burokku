@@ -468,7 +468,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn separate_shape_pipelines_preserve_command_order() {
+    async fn unified_shape_pipeline_preserves_command_order() {
         let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
             eprintln!("skipping shape order test: no WebGPU adapter available");
             return;
