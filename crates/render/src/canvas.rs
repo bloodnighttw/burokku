@@ -3,8 +3,7 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::{
-    clip::commands_are_balanced,
-    shapes::rect::{Rect, RectRenderer},
+    clip::commands_are_balanced, shapes::{rect::{Rect, RectRenderer}, stroke::Stroke},
 };
 
 /// One backend-independent drawing operation.
@@ -24,6 +23,10 @@ pub enum DrawCommand {
     },
     /// Restores the clip active before the matching [`Self::PushClip`].
     PopClip,
+    Stroke {
+        stroke: Stroke,
+        color: wgpu::Color,
+    },
 }
 
 impl DrawCommand {
