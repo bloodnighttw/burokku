@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use crate::{canvas::DrawList, clip::commands_are_balanced, rect::RectRenderer};
+use crate::{canvas::DrawList, clip::commands_are_balanced, shapes::rect::RectRenderer};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
