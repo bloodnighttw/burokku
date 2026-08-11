@@ -3,7 +3,7 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::{
-    clip::commands_are_balanced, shapes::{rect::{Rect, RectRenderer}, stroke::Stroke},
+    clip::commands_are_balanced, shapes::{rect::{Rect, RectRenderer}, round::Round, stroke::Stroke},
 };
 
 /// One backend-independent drawing operation.
@@ -15,11 +15,13 @@ use crate::{
 pub enum DrawCommand {
     Rect {
         rect: Rect,
+        round: Round,
         color: wgpu::Color,
     },
     /// Restricts following commands to `rect` until the matching [`Self::PopClip`].
     PushClip {
         rect: Rect,
+        round: Round,
     },
     /// Restores the clip active before the matching [`Self::PushClip`].
     PopClip,
@@ -31,11 +33,11 @@ pub enum DrawCommand {
 
 impl DrawCommand {
     pub const fn rect(rect: Rect, color: wgpu::Color) -> Self {
-        Self::Rect { rect, color }
+        Self::Rect { rect, color, round: Round::default() }
     }
 
     pub const fn push_clip(rect: Rect) -> Self {
-        Self::PushClip { rect }
+        Self::PushClip { rect, round: Round::default() }
     }
 
     pub const fn pop_clip() -> Self {

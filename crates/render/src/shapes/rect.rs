@@ -229,6 +229,9 @@ fn collect_instances(
                     }),
                 }
             }
+            DrawCommand::Stroke { stroke, color } => {
+                // TODO: Implement stroke rendering
+            }
         }
     }
 }
