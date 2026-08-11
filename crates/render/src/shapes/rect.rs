@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use crate::{
     canvas::{DrawCommand, DrawList},
-    clip::{ClipStack, ScissorRect},
+    clip::{ClipMask, ClipStack, ScissorRect},
     shapes::round::Round,
 };
 
@@ -212,23 +212,26 @@ impl RectRenderer {
         );
     }
 
-    pub(crate) fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.instances.is_empty() {
-            return;
-        }
+    pub(crate) fn batch_count(&self) -> usize {
+        self.batches.len()
+    }
 
+    pub(crate) fn batch_order(&self, index: usize) -> usize {
+        self.batches[index].order
+    }
+
+    pub(crate) fn draw_batch<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, index: usize) {
+        let batch = &self.batches[index];
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        for batch in &self.batches {
-            pass.set_scissor_rect(
-                batch.scissor.x,
-                batch.scissor.y,
-                batch.scissor.width,
-                batch.scissor.height,
-            );
-            pass.draw(0..6, batch.instances.clone());
-        }
+        pass.set_scissor_rect(
+            batch.scissor.x,
+            batch.scissor.y,
+            batch.scissor.width,
+            batch.scissor.height,
+        );
+        pass.draw(0..6, batch.instances.clone());
     }
 }
 
@@ -242,7 +245,7 @@ fn collect_instances(
     let mut clips = ClipStack::new(canvas_size);
     let mut rounded_clips = Vec::new();
 
-    for command in commands {
+    for (order, command) in commands.iter().enumerate() {
         match command {
             DrawCommand::PushClip { rect, round } => {
                 clips.push(*rect);
@@ -264,34 +267,13 @@ fn collect_instances(
                     instance,
                     active_clip,
                     &rounded_clips,
+                    order,
                     instances,
                     clip_masks,
                     batches,
                 );
             }
-            DrawCommand::Stroke { stroke, color } => {
-                let active_clip = clips.active();
-                if stroke.width <= 0.0 || !stroke.width.is_finite() || active_clip.is_empty() {
-                    continue;
-                }
-
-                let mut start = (stroke.x, stroke.y);
-                for &end in &stroke.path {
-                    if let Some(instance) =
-                        RectInstance::stroke_segment(start, end, stroke.width, *color)
-                    {
-                        push_instance(
-                            instance,
-                            active_clip,
-                            &rounded_clips,
-                            instances,
-                            clip_masks,
-                            batches,
-                        );
-                    }
-                    start = end;
-                }
-            }
+            _ => {}
         }
     }
 }
@@ -300,6 +282,7 @@ fn push_instance(
     mut instance: RectInstance,
     scissor: ScissorRect,
     rounded_clips: &[Option<ClipMask>],
+    order: usize,
     instances: &mut Vec<RectInstance>,
     clip_masks: &mut Vec<ClipMask>,
     batches: &mut Vec<RectBatch>,
@@ -312,12 +295,15 @@ fn push_instance(
     instances.push(instance);
 
     match batches.last_mut() {
-        Some(batch) if batch.scissor == scissor => {
+        Some(batch) if batch.scissor == scissor && batch.last_order + 1 == order => {
             batch.instances.end = instance_index + 1;
+            batch.last_order = order;
         }
         _ => batches.push(RectBatch {
             scissor,
             instances: instance_index..instance_index + 1,
+            order,
+            last_order: order,
         }),
     }
 }
@@ -375,7 +361,6 @@ struct RectInstance {
     bounds: [f32; 4],
     color: [f32; 4],
     round: [f32; 4],
-    basis: [f32; 4],
     clip_range: [u32; 2],
 }
 
@@ -391,51 +376,16 @@ impl RectInstance {
                 color.a as f32,
             ],
             round: [round.lt, round.rt, round.rb, round.lb],
-            basis: [1.0, 0.0, 0.0, 1.0],
             clip_range: [0; 2],
         }
-    }
-
-    fn stroke_segment(
-        start: (f32, f32),
-        end: (f32, f32),
-        width: f32,
-        color: wgpu::Color,
-    ) -> Option<Self> {
-        let delta = (end.0 - start.0, end.1 - start.1);
-        let length = delta.0.hypot(delta.1);
-        if !length.is_finite() || length <= f32::EPSILON {
-            return None;
-        }
-
-        let tangent = (delta.0 / length, delta.1 / length);
-        let normal = (-tangent.1, tangent.0);
-        Some(Self {
-            bounds: [
-                start.0 - normal.0 * width * 0.5,
-                start.1 - normal.1 * width * 0.5,
-                length,
-                width,
-            ],
-            color: [
-                color.r as f32,
-                color.g as f32,
-                color.b as f32,
-                color.a as f32,
-            ],
-            round: [0.0; 4],
-            basis: [tangent.0, tangent.1, normal.0, normal.1],
-            clip_range: [0; 2],
-        })
     }
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
             0 => Float32x4,
             1 => Float32x4,
             2 => Float32x4,
-            3 => Float32x4,
-            4 => Uint32x2
+            3 => Uint32x2
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -445,31 +395,12 @@ impl RectInstance {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct ClipMask {
-    bounds: [f32; 4],
-    round: [f32; 4],
-}
-
-impl ClipMask {
-    fn new(rect: Rect, round: Round) -> Self {
-        let round = round.fit(rect.width, rect.height);
-        Self {
-            bounds: [rect.x, rect.y, rect.width, rect.height],
-            round: [round.lt, round.rt, round.rb, round.lb],
-        }
-    }
-
-    fn is_rounded(self) -> bool {
-        self.round.iter().any(|radius| *radius > 0.0)
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RectBatch {
     scissor: ScissorRect,
     instances: Range<u32>,
+    order: usize,
+    last_order: usize,
 }
 
 #[cfg(test)]
@@ -528,7 +459,7 @@ mod tests {
     #[test]
     fn gpu_types_have_wgsl_compatible_layouts() {
         assert_eq!(std::mem::size_of::<ScreenUniform>(), 16);
-        assert_eq!(std::mem::size_of::<RectInstance>(), 72);
+        assert_eq!(std::mem::size_of::<RectInstance>(), 56);
         assert_eq!(std::mem::size_of::<ClipMask>(), 32);
     }
 
@@ -656,22 +587,32 @@ mod tests {
                 RectBatch {
                     scissor: ScissorRect::new(0, 0, 100, 100),
                     instances: 0..1,
+                    order: 0,
+                    last_order: 0,
                 },
                 RectBatch {
                     scissor: ScissorRect::new(10, 10, 50, 50),
                     instances: 1..2,
+                    order: 2,
+                    last_order: 2,
                 },
                 RectBatch {
                     scissor: ScissorRect::new(40, 10, 20, 20),
                     instances: 2..3,
+                    order: 4,
+                    last_order: 4,
                 },
                 RectBatch {
                     scissor: ScissorRect::new(10, 10, 50, 50),
                     instances: 3..4,
+                    order: 6,
+                    last_order: 6,
                 },
                 RectBatch {
                     scissor: ScissorRect::new(0, 0, 100, 100),
                     instances: 4..5,
+                    order: 8,
+                    last_order: 8,
                 },
             ]
         );

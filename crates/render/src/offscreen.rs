@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use crate::{canvas::DrawList, clip::commands_are_balanced, shapes::rect::RectRenderer};
+use crate::{canvas::DrawList, clip::commands_are_balanced, shapes::ShapeRenderer};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -11,7 +11,7 @@ pub(crate) struct OffscreenSurface {
     device: wgpu::Device,
     queue: wgpu::Queue,
     texture: wgpu::Texture,
-    renderer: RectRenderer,
+    renderer: ShapeRenderer,
     size: [u32; 2],
 }
 
@@ -47,7 +47,7 @@ impl OffscreenSurface {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let renderer = RectRenderer::new(&device, FORMAT);
+        let renderer = ShapeRenderer::new(&device, FORMAT);
 
         Some(Self {
             _instance: instance,

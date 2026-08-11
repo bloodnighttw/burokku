@@ -4,11 +4,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::{
     clip::commands_are_balanced,
-    shapes::{
-        rect::{Rect, RectRenderer},
-        round::Round,
-        stroke::Stroke,
-    },
+    shapes::{rect::Rect, round::Round, stroke::Stroke, ShapeRenderer},
 };
 
 /// One backend-independent drawing operation.
@@ -24,14 +20,12 @@ pub enum DrawCommand {
         color: wgpu::Color,
     },
     /// Restricts following commands to `rect` until the matching [`Self::PopClip`].
-    PushClip {
-        rect: Rect,
-        round: Round,
-    },
+    PushClip { rect: Rect, round: Round },
     /// Restores the clip active before the matching [`Self::PushClip`].
     PopClip,
     Stroke {
         stroke: Stroke,
+        round: Round,
         color: wgpu::Color,
     },
 }
@@ -41,8 +35,12 @@ impl DrawCommand {
         Self::Rect { rect, color, round }
     }
 
-    pub const fn stroke(stroke: Stroke, color: wgpu::Color) -> Self {
-        Self::Stroke { stroke, color }
+    pub const fn stroke(stroke: Stroke, color: wgpu::Color, round: Round) -> Self {
+        Self::Stroke {
+            stroke,
+            round,
+            color,
+        }
     }
 
     pub const fn push_clip(rect: Rect, round: Round) -> Self {
@@ -160,7 +158,7 @@ pub struct Canvas<'window> {
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
     config: Option<wgpu::SurfaceConfiguration>,
-    rect_renderer: Option<RectRenderer>,
+    shape_renderer: Option<ShapeRenderer>,
 }
 
 impl<'window> Canvas<'window> {
@@ -182,7 +180,7 @@ impl<'window> Canvas<'window> {
             device: None,
             queue: None,
             config: None,
-            rect_renderer: None,
+            shape_renderer: None,
         }
     }
 
@@ -224,7 +222,7 @@ impl<'window> Canvas<'window> {
             .ok_or(CanvasSurfaceError::UnsupportedSurface)?;
         self.surface.configure(device, &config);
 
-        self.rect_renderer = Some(RectRenderer::new(device, config.format));
+        self.shape_renderer = Some(ShapeRenderer::new(device, config.format));
         self.device = Some(device.clone());
         self.queue = Some(queue.clone());
         self.config = Some(config);
@@ -299,12 +297,12 @@ impl<'window> Canvas<'window> {
             .config
             .as_ref()
             .ok_or(CanvasRenderError::NotConfigured)?;
-        let rect_renderer = self
-            .rect_renderer
+        let shape_renderer = self
+            .shape_renderer
             .as_mut()
             .ok_or(CanvasRenderError::NotConfigured)?;
 
-        rect_renderer.prepare(
+        shape_renderer.prepare(
             device,
             queue,
             draws.commands(),
@@ -335,7 +333,7 @@ impl<'window> Canvas<'window> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rect_renderer.draw(&mut pass);
+            shape_renderer.draw(&mut pass);
         }
 
         queue.submit([encoder.finish()]);
@@ -409,13 +407,9 @@ mod tests {
             Round::default(),
         );
         let second = DrawCommand::stroke(
-            Stroke {
-                x: 5.0,
-                y: 5.0,
-                path: vec![(10.0, 10.0), (20.0, 20.0)],
-                width: 2.0,
-            },
+            Stroke::new(5.0, 5.0, 20.0, 20.0, 2.0),
             wgpu::Color::BLUE,
+            Round::default(),
         );
         let mut draws = DrawList::new();
 
@@ -461,18 +455,46 @@ mod tests {
         };
         let mut draws = DrawList::new();
         draws.draw(DrawCommand::stroke(
-            Stroke {
-                x: 2.0,
-                y: 2.0,
-                path: vec![(14.0, 14.0)],
-                width: 2.0,
-            },
+            Stroke::new(2.0, 2.0, 12.0, 12.0, 2.0),
             wgpu::Color::RED,
+            Round::default(),
         ));
 
         let pixels = surface.render_rgba8(&draws, wgpu::Color::BLUE).await;
 
-        assert_eq!(surface.pixel(&pixels, 8, 8), [255, 0, 0, 255]);
-        assert_eq!(surface.pixel(&pixels, 8, 5), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 2), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 8), [0, 0, 255, 255]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn separate_shape_pipelines_preserve_command_order() {
+        let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping shape order test: no WebGPU adapter available");
+            return;
+        };
+        let mut draws = DrawList::new();
+        draws
+            .draw(DrawCommand::rect(
+                Rect::new(0.0, 0.0, 16.0, 16.0),
+                wgpu::Color::RED,
+                Round::default(),
+            ))
+            .draw(DrawCommand::stroke(
+                Stroke::new(2.0, 2.0, 12.0, 12.0, 6.0),
+                wgpu::Color::BLUE,
+                Round::default(),
+            ))
+            .draw(DrawCommand::rect(
+                Rect::new(6.0, 6.0, 4.0, 4.0),
+                wgpu::Color::GREEN,
+                Round::default(),
+            ));
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLACK).await;
+
+        assert_eq!(surface.pixel(&pixels, 0, 0), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 3, 3), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 8, 8), [0, 255, 0, 255]);
     }
 }
