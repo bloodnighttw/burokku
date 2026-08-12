@@ -1,7 +1,12 @@
-use std::{env, fs::File, io, path::PathBuf};
+use std::{env, fs::File, io, mem, path::PathBuf};
 
+use bytemuck::{Pod, Zeroable};
 use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
 use render::{
+    backdrop::{
+        BackdropCreateContext, BackdropPrepareContext, BackdropRenderer, BackdropRendererFactory,
+        BackdropRendererHandle, ResolvedBackdropDraw,
+    },
     canvas::DrawList,
     offscreen::OffscreenSurface,
     shapes::{
@@ -10,7 +15,6 @@ use render::{
         stroke::{DrawStrokeExt, Stroke},
     },
     wgpu,
-    wgsl::WgslBlurredBackdrop,
 };
 
 const SIZE: [u32; 2] = [800, 500];
@@ -140,13 +144,915 @@ fn backdrop_main(input: WgslInput, params: array<vec4<f32>, 4>) -> vec4<f32> {
 }
 "#;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LiquidGlassDraw {
+    bounds: Rect,
+    round: Round,
+    blur_sigma: f32,
+    params: [[f32; 4]; 4],
+}
+
+struct LiquidGlass {
+    handle: BackdropRendererHandle<LiquidGlassDraw>,
+}
+
+impl LiquidGlass {
+    fn new() -> Self {
+        Self {
+            handle: BackdropRendererHandle::new("liquid glass", LiquidGlassFactory),
+        }
+    }
+
+    fn draw_rounded<'draws>(
+        &self,
+        draws: &'draws mut DrawList,
+        bounds: Rect,
+        round: Round,
+        blur_sigma: f32,
+        params: [[f32; 4]; 4],
+    ) -> &'draws mut DrawList {
+        draws.backdrop_with(
+            &self.handle,
+            LiquidGlassDraw {
+                bounds,
+                round,
+                blur_sigma: blur_sigma.max(0.0),
+                params,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LiquidGlassFactory;
+
+impl BackdropRendererFactory<LiquidGlassDraw> for LiquidGlassFactory {
+    type Renderer = LiquidGlassRenderer;
+
+    fn create(&self, context: BackdropCreateContext<'_>) -> Self::Renderer {
+        LiquidGlassRenderer::new(context)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LiquidGlassInstance {
+    bounds: [f32; 4],
+    round: [f32; 4],
+    clip_range: [u32; 2],
+    padding: [u32; 2],
+    params: [[f32; 4]; 4],
+}
+
+struct LiquidGlassRenderer {
+    effect_pipeline: wgpu::RenderPipeline,
+    effect_layout: wgpu::BindGroupLayout,
+    screen_buffer: wgpu::Buffer,
+    clip_buffer: wgpu::Buffer,
+    clip_capacity: u64,
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: u64,
+    effect_bind_group: wgpu::BindGroup,
+    instance_indices: Vec<Option<u32>>,
+    horizontal_blur_pipeline: wgpu::RenderPipeline,
+    vertical_blur_pipeline: wgpu::RenderPipeline,
+    blur_settings_layout: wgpu::BindGroupLayout,
+    blur_settings_buffer: wgpu::Buffer,
+    blur_settings_capacity: u64,
+    blur_settings_bind_group: wgpu::BindGroup,
+    scene_layout: wgpu::BindGroupLayout,
+    blur_sampler: wgpu::Sampler,
+    target_format: wgpu::TextureFormat,
+    blur_resources: Option<BlurResources>,
+}
+
+struct BlurResources {
+    size: [u32; 2],
+    _textures: [wgpu::Texture; 2],
+    views: [wgpu::TextureView; 2],
+    source_bind_groups: [wgpu::BindGroup; 2],
+}
+
+impl LiquidGlassRenderer {
+    fn new(context: BackdropCreateContext<'_>) -> Self {
+        const INITIAL_BUFFER_SIZE: u64 = 16;
+
+        let effect_layout = create_effect_layout(context.device);
+        let screen_buffer = create_buffer(
+            context.device,
+            "liquid glass screen uniform",
+            16,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let clip_buffer = create_buffer(
+            context.device,
+            "liquid glass clip masks",
+            INITIAL_BUFFER_SIZE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let instance_capacity = mem::size_of::<LiquidGlassInstance>() as u64;
+        let instance_buffer = create_buffer(
+            context.device,
+            "liquid glass instances",
+            instance_capacity,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let effect_bind_group = create_effect_bind_group(
+            context.device,
+            &effect_layout,
+            &screen_buffer,
+            &clip_buffer,
+            &instance_buffer,
+        );
+        let effect_source = format!(
+            "{}\n{}\n{}",
+            LIQUID_GLASS_SHADER_PREFIX, LIQUID_GLASS_WGSL, LIQUID_GLASS_SHADER_SUFFIX
+        );
+        let effect_shader = context
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("liquid glass effect shader"),
+                source: wgpu::ShaderSource::Wgsl(effect_source.into()),
+            });
+        let effect_pipeline = create_effect_pipeline(
+            context.device,
+            context.target_format,
+            context.scene_bind_group_layout,
+            &effect_layout,
+            &effect_shader,
+        );
+
+        let blur_settings_layout = create_blur_settings_layout(context.device);
+        let blur_settings_buffer = create_buffer(
+            context.device,
+            "liquid glass blur settings",
+            INITIAL_BUFFER_SIZE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let blur_settings_bind_group = create_blur_settings_bind_group(
+            context.device,
+            &blur_settings_layout,
+            &blur_settings_buffer,
+        );
+        let blur_shader = context
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("liquid glass Gaussian blur shader"),
+                source: wgpu::ShaderSource::Wgsl(GAUSSIAN_BLUR_WGSL.into()),
+            });
+        let horizontal_blur_pipeline = create_blur_pipeline(
+            context.device,
+            context.target_format,
+            context.scene_bind_group_layout,
+            &blur_settings_layout,
+            &blur_shader,
+            "blur_horizontal",
+        );
+        let vertical_blur_pipeline = create_blur_pipeline(
+            context.device,
+            context.target_format,
+            context.scene_bind_group_layout,
+            &blur_settings_layout,
+            &blur_shader,
+            "blur_vertical",
+        );
+        let blur_sampler = context.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("liquid glass blur sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        Self {
+            effect_pipeline,
+            effect_layout,
+            screen_buffer,
+            clip_buffer,
+            clip_capacity: INITIAL_BUFFER_SIZE,
+            instance_buffer,
+            instance_capacity,
+            effect_bind_group,
+            instance_indices: Vec::new(),
+            horizontal_blur_pipeline,
+            vertical_blur_pipeline,
+            blur_settings_layout,
+            blur_settings_buffer,
+            blur_settings_capacity: INITIAL_BUFFER_SIZE,
+            blur_settings_bind_group,
+            scene_layout: context.scene_bind_group_layout.clone(),
+            blur_sampler,
+            target_format: context.target_format,
+            blur_resources: None,
+        }
+    }
+
+    fn prepare_effect(
+        &mut self,
+        context: BackdropPrepareContext<'_>,
+        draws: &[ResolvedBackdropDraw<'_, LiquidGlassDraw>],
+    ) {
+        let mut instances = Vec::with_capacity(draws.len());
+        self.instance_indices.clear();
+        for draw in draws {
+            if draw.payload.bounds.is_empty() {
+                self.instance_indices.push(None);
+                continue;
+            }
+            let round = fit_round(
+                draw.payload.round,
+                draw.payload.bounds.width,
+                draw.payload.bounds.height,
+            );
+            self.instance_indices.push(Some(instances.len() as u32));
+            instances.push(LiquidGlassInstance {
+                bounds: [
+                    draw.payload.bounds.x,
+                    draw.payload.bounds.y,
+                    draw.payload.bounds.width,
+                    draw.payload.bounds.height,
+                ],
+                round: [round.lt, round.rt, round.rb, round.lb],
+                clip_range: draw.clip_masks.as_array(),
+                padding: [0; 2],
+                params: draw.payload.params,
+            });
+        }
+
+        let required_clips = mem::size_of_val(context.clip_masks) as u64;
+        let required_instances = mem::size_of_val(instances.as_slice()) as u64;
+        let mut recreate_bind_group = false;
+        if required_clips > self.clip_capacity {
+            self.clip_capacity = required_clips.next_power_of_two();
+            self.clip_buffer = create_buffer(
+                context.device,
+                "liquid glass clip masks",
+                self.clip_capacity,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            recreate_bind_group = true;
+        }
+        if required_instances > self.instance_capacity {
+            self.instance_capacity = required_instances.next_power_of_two();
+            self.instance_buffer = create_buffer(
+                context.device,
+                "liquid glass instances",
+                self.instance_capacity,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            recreate_bind_group = true;
+        }
+        if recreate_bind_group {
+            self.effect_bind_group = create_effect_bind_group(
+                context.device,
+                &self.effect_layout,
+                &self.screen_buffer,
+                &self.clip_buffer,
+                &self.instance_buffer,
+            );
+        }
+
+        context.queue.write_buffer(
+            &self.screen_buffer,
+            0,
+            bytemuck::cast_slice(&[
+                context.canvas_size[0] as f32,
+                context.canvas_size[1] as f32,
+                0.0,
+                0.0,
+            ]),
+        );
+        if !context.clip_masks.is_empty() {
+            context.queue.write_buffer(
+                &self.clip_buffer,
+                0,
+                bytemuck::cast_slice(context.clip_masks),
+            );
+        }
+        if !instances.is_empty() {
+            context
+                .queue
+                .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+        }
+    }
+
+    fn prepare_blur(
+        &mut self,
+        context: BackdropPrepareContext<'_>,
+        draws: &[ResolvedBackdropDraw<'_, LiquidGlassDraw>],
+    ) {
+        if self
+            .blur_resources
+            .as_ref()
+            .is_none_or(|resources| resources.size != context.canvas_size)
+        {
+            self.blur_resources = Some(create_blur_resources(
+                context.device,
+                &self.scene_layout,
+                &self.blur_sampler,
+                self.target_format,
+                context.canvas_size,
+            ));
+        }
+
+        let settings = draws
+            .iter()
+            .map(|draw| [draw.payload.blur_sigma.max(0.001), 0.0, 0.0, 0.0])
+            .collect::<Vec<_>>();
+        let required = mem::size_of_val(settings.as_slice()) as u64;
+        if required > self.blur_settings_capacity {
+            self.blur_settings_capacity = required.next_power_of_two();
+            self.blur_settings_buffer = create_buffer(
+                context.device,
+                "liquid glass blur settings",
+                self.blur_settings_capacity,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            self.blur_settings_bind_group = create_blur_settings_bind_group(
+                context.device,
+                &self.blur_settings_layout,
+                &self.blur_settings_buffer,
+            );
+        }
+        if !settings.is_empty() {
+            context.queue.write_buffer(
+                &self.blur_settings_buffer,
+                0,
+                bytemuck::cast_slice(&settings),
+            );
+        }
+    }
+}
+
+impl BackdropRenderer<LiquidGlassDraw> for LiquidGlassRenderer {
+    fn prepare(
+        &mut self,
+        context: BackdropPrepareContext<'_>,
+        draws: &[ResolvedBackdropDraw<'_, LiquidGlassDraw>],
+    ) {
+        self.prepare_effect(context, draws);
+        self.prepare_blur(context, draws);
+    }
+
+    fn encode_source<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        source_bind_group: &'resource wgpu::BindGroup,
+        draw_index: usize,
+    ) -> &'resource wgpu::BindGroup {
+        let resources = self
+            .blur_resources
+            .as_ref()
+            .expect("liquid glass blur resources must be prepared before encoding");
+        encode_blur_pass(
+            encoder,
+            &resources.views[0],
+            &self.horizontal_blur_pipeline,
+            source_bind_group,
+            &self.blur_settings_bind_group,
+            draw_index,
+            "liquid glass horizontal blur",
+        );
+        encode_blur_pass(
+            encoder,
+            &resources.views[1],
+            &self.vertical_blur_pipeline,
+            &resources.source_bind_groups[0],
+            &self.blur_settings_bind_group,
+            draw_index,
+            "liquid glass vertical blur",
+        );
+        &resources.source_bind_groups[1]
+    }
+
+    fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, draw_index: usize) {
+        let Some(instance) = self.instance_indices[draw_index] else {
+            return;
+        };
+        pass.set_pipeline(&self.effect_pipeline);
+        pass.set_bind_group(1, &self.effect_bind_group, &[]);
+        pass.draw(0..6, instance..instance + 1);
+    }
+}
+
+fn create_effect_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("liquid glass effect resources layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn create_effect_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    screen_buffer: &wgpu::Buffer,
+    clip_buffer: &wgpu::Buffer,
+    instance_buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("liquid glass effect resources"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: clip_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: instance_buffer.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+fn create_effect_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    scene_layout: &wgpu::BindGroupLayout,
+    effect_layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("liquid glass effect pipeline layout"),
+        bind_group_layouts: &[Some(scene_layout), Some(effect_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("liquid glass effect pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("liquid_vertex"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("liquid_fragment"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_blur_settings_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("liquid glass blur settings layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+fn create_blur_settings_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("liquid glass blur settings"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    })
+}
+
+fn create_blur_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    scene_layout: &wgpu::BindGroupLayout,
+    settings_layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+    fragment_entry: &str,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("liquid glass blur pipeline layout"),
+        bind_group_layouts: &[Some(scene_layout), Some(settings_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(fragment_entry),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("blur_vertex"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment_entry),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_blur_resources(
+    device: &wgpu::Device,
+    scene_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    format: wgpu::TextureFormat,
+    size: [u32; 2],
+) -> BlurResources {
+    let create_texture = |axis: &str| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(axis),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    };
+    let textures = [
+        create_texture("liquid glass horizontal blur texture"),
+        create_texture("liquid glass vertical blur texture"),
+    ];
+    let views = textures
+        .each_ref()
+        .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    let source_bind_groups = views.each_ref().map(|view| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("liquid glass blurred source"),
+            layout: scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    });
+    BlurResources {
+        size,
+        _textures: textures,
+        views,
+        source_bind_groups,
+    }
+}
+
+fn encode_blur_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    destination: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    source: &wgpu::BindGroup,
+    settings: &wgpu::BindGroup,
+    draw_index: usize,
+    label: &str,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: destination,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let instance = u32::try_from(draw_index).expect("liquid glass draw index must fit in u32");
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, source, &[]);
+    pass.set_bind_group(1, settings, &[]);
+    pass.draw(0..3, instance..instance + 1);
+}
+
+fn create_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage,
+        mapped_at_creation: false,
+    })
+}
+
+fn fit_round(round: Round, width: f32, height: f32) -> Round {
+    let mut radii = [round.lt, round.rt, round.rb, round.lb].map(|radius| radius.max(0.0));
+    let edge_scale = |length: f32, radii: f32| {
+        if length > 0.0 && radii > length {
+            length / radii
+        } else {
+            1.0
+        }
+    };
+    let scale = [
+        edge_scale(width, radii[0] + radii[1]),
+        edge_scale(height, radii[1] + radii[2]),
+        edge_scale(width, radii[2] + radii[3]),
+        edge_scale(height, radii[3] + radii[0]),
+    ]
+    .into_iter()
+    .fold(1.0_f32, f32::min);
+    radii.iter_mut().for_each(|radius| *radius *= scale);
+    Round {
+        lt: radii[0],
+        rt: radii[1],
+        rb: radii[2],
+        lb: radii[3],
+    }
+}
+
+const LIQUID_GLASS_SHADER_PREFIX: &str = r#"
+struct WgslInput {
+    local_position: vec2<f32>,
+    local_uv: vec2<f32>,
+    pixel_position: vec2<f32>,
+    screen_uv: vec2<f32>,
+    bounds: vec4<f32>,
+};
+
+struct LiquidGlassScreen {
+    size: vec2<f32>,
+    padding: vec2<f32>,
+};
+
+struct LiquidGlassClipMask {
+    bounds: vec4<f32>,
+    round: vec4<f32>,
+};
+
+struct LiquidGlassInstance {
+    bounds: vec4<f32>,
+    round: vec4<f32>,
+    clip_range: vec2<u32>,
+    padding: vec2<u32>,
+    params: array<vec4<f32>, 4>,
+};
+
+@group(0) @binding(0)
+var liquid_backdrop_texture: texture_2d<f32>;
+
+@group(0) @binding(1)
+var liquid_backdrop_sampler: sampler;
+
+@group(1) @binding(0)
+var<uniform> liquid_screen: LiquidGlassScreen;
+
+@group(1) @binding(1)
+var<storage, read> liquid_clip_masks: array<LiquidGlassClipMask>;
+
+@group(1) @binding(2)
+var<storage, read> liquid_instances: array<LiquidGlassInstance>;
+
+fn sample_backdrop(screen_uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(
+        liquid_backdrop_texture,
+        liquid_backdrop_sampler,
+        clamp(screen_uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+        0.0,
+    );
+}
+"#;
+
+const LIQUID_GLASS_SHADER_SUFFIX: &str = r#"
+struct LiquidVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) local_position: vec2<f32>,
+    @location(1) local_uv: vec2<f32>,
+    @location(2) pixel_position: vec2<f32>,
+    @location(3) bounds: vec4<f32>,
+    @location(4) @interpolate(flat) instance_index: u32,
+};
+
+@vertex
+fn liquid_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> LiquidVertexOutput {
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    let instance = liquid_instances[instance_index];
+    let local_uv = corners[vertex_index];
+    let local_position = local_uv * instance.bounds.zw;
+    let pixel_position = instance.bounds.xy + local_position;
+    let clip_position = vec2<f32>(
+        pixel_position.x / liquid_screen.size.x * 2.0 - 1.0,
+        1.0 - pixel_position.y / liquid_screen.size.y * 2.0,
+    );
+    return LiquidVertexOutput(
+        vec4<f32>(clip_position, 0.0, 1.0),
+        local_position,
+        local_uv,
+        pixel_position,
+        instance.bounds,
+        instance_index,
+    );
+}
+
+fn liquid_clip_distance(
+    position: vec2<f32>,
+    bounds: vec4<f32>,
+    round: vec4<f32>,
+) -> f32 {
+    let centered = position - bounds.xy - bounds.zw * 0.5;
+    let top_radius = select(round.x, round.y, centered.x > 0.0);
+    let bottom_radius = select(round.w, round.z, centered.x > 0.0);
+    let radius = select(top_radius, bottom_radius, centered.y > 0.0);
+    let corner = abs(centered) - bounds.zw * 0.5 + vec2<f32>(radius);
+    return min(max(corner.x, corner.y), 0.0)
+        + length(max(corner, vec2<f32>(0.0))) - radius;
+}
+
+fn liquid_coverage(distance: f32) -> f32 {
+    let antialias_width = max(fwidth(distance), 0.75);
+    return 1.0 - smoothstep(
+        -antialias_width * 0.5,
+        antialias_width * 0.5,
+        distance,
+    );
+}
+
+@fragment
+fn liquid_fragment(input: LiquidVertexOutput) -> @location(0) vec4<f32> {
+    let instance = liquid_instances[input.instance_index];
+    var mask = 1.0;
+    for (var index = 0u; index < instance.clip_range.y; index += 1u) {
+        let clip_mask = liquid_clip_masks[instance.clip_range.x + index];
+        mask *= liquid_coverage(liquid_clip_distance(
+            input.pixel_position,
+            clip_mask.bounds,
+            clip_mask.round,
+        ));
+    }
+    let user_input = WgslInput(
+        input.local_position,
+        input.local_uv,
+        input.pixel_position,
+        input.pixel_position / liquid_screen.size,
+        input.bounds,
+    );
+    let affected = backdrop_main(user_input, instance.params);
+    let alpha = affected.a * mask;
+    return vec4<f32>(affected.rgb * alpha, alpha);
+}
+"#;
+
+const GAUSSIAN_BLUR_WGSL: &str = r#"
+@group(0) @binding(0)
+var blur_source: texture_2d<f32>;
+
+@group(0) @binding(1)
+var blur_sampler: sampler;
+
+@group(1) @binding(0)
+var<storage, read> blur_settings: array<vec4<f32>>;
+
+struct BlurVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) draw_index: u32,
+};
+
+@vertex
+fn blur_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> BlurVertexOutput {
+    let positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    return BlurVertexOutput(
+        vec4<f32>(positions[vertex_index], 0.0, 1.0),
+        instance_index,
+    );
+}
+
+fn mirror_coordinate(value: i32, size: i32) -> i32 {
+    let period = size * 2;
+    let wrapped = ((value % period) + period) % period;
+    return select(wrapped, period - wrapped - 1, wrapped >= size);
+}
+
+fn gaussian_blur(position: vec2<i32>, draw_index: u32, axis: vec2<i32>) -> vec4<f32> {
+    let dimensions = vec2<i32>(textureDimensions(blur_source));
+    let sigma = max(blur_settings[draw_index].x, 0.001);
+    let radius = i32(ceil(sigma * 3.0));
+    var result = vec4<f32>(0.0);
+    var total_weight = 0.0;
+    for (var offset = -radius; offset <= radius; offset += 1) {
+        let sample_position = position + axis * offset;
+        let mirrored = vec2<i32>(
+            mirror_coordinate(sample_position.x, dimensions.x),
+            mirror_coordinate(sample_position.y, dimensions.y),
+        );
+        let scalar_offset = f32(offset);
+        let weight = exp(
+            -(scalar_offset * scalar_offset) / (2.0 * sigma * sigma),
+        );
+        result += textureLoad(blur_source, mirrored, 0) * weight;
+        total_weight += weight;
+    }
+    return result / total_weight;
+}
+
+@fragment
+fn blur_horizontal(input: BlurVertexOutput) -> @location(0) vec4<f32> {
+    return gaussian_blur(vec2<i32>(input.position.xy), input.draw_index, vec2<i32>(1, 0));
+}
+
+@fragment
+fn blur_vertical(input: BlurVertexOutput) -> @location(0) vec4<f32> {
+    return gaussian_blur(vec2<i32>(input.position.xy), input.draw_index, vec2<i32>(0, 1));
+}
+"#;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("render-shapes.png"));
-    let liquid_glass = WgslBlurredBackdrop::<4>::new("liquid glass", LIQUID_GLASS_WGSL)?;
+    let liquid_glass = LiquidGlass::new();
     let mut surface = OffscreenSurface::new(SIZE).await.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -163,7 +1069,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn scene(liquid_glass: &WgslBlurredBackdrop<4>) -> DrawList {
+fn scene(liquid_glass: &LiquidGlass) -> DrawList {
     let mut draws = DrawList::new();
     let card = Rect::new(55.0, 40.0, 690.0, 420.0);
     let card_round = rounded(44.0);
@@ -260,5 +1166,31 @@ const fn rgba(red: u8, green: u8, blue: u8, alpha: f64) -> wgpu::Color {
         g: green as f64 / 255.0,
         b: blue as f64 / 255.0,
         a: alpha,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_renderer_shaders_are_valid_wgsl() {
+        let effect = format!(
+            "{}\n{}\n{}",
+            LIQUID_GLASS_SHADER_PREFIX, LIQUID_GLASS_WGSL, LIQUID_GLASS_SHADER_SUFFIX
+        );
+        validate_wgsl(&effect);
+        validate_wgsl(GAUSSIAN_BLUR_WGSL);
+    }
+
+    fn validate_wgsl(source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("shader must pass Naga validation");
     }
 }
