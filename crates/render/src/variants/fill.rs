@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::canvas::DrawCommand;
+use crate::{canvas::DrawCommand, variants::clip::CLIP_FORMAT};
 
 const INITIAL_INSTANCE_CAPACITY: u64 = std::mem::size_of::<FillInstance>() as u64;
 
@@ -69,7 +69,28 @@ impl FillRenderer {
                 buffers: &[FillInstance::layout()],
             },
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: CLIP_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState {
+                    front: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Equal,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    back: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Equal,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    read_mask: u32::MAX,
+                    write_mask: 0,
+                },
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,

@@ -3,6 +3,7 @@
 use crate::{
     attributes::{corner::Corner, rect::Rect},
     engine::Engine,
+    variants::clip::{CLIP_FORMAT, MAX_CLIP_DEPTH},
 };
 
 /// A drawing operation recorded for a canvas.
@@ -12,10 +13,12 @@ use crate::{
 /// module so every kind of canvas has identical drawing behavior.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DrawCommand {
+    // !!! important: must match push clip stack
     PushClip {
         rect: Rect,
         corners: Corner,
     },
+    // !!! important: must match push clip stack
     PopClip,
     // Fill a rectangular area. Rounded bounds are applied by the clip stack.
     Fill {
@@ -53,6 +56,8 @@ pub enum DrawError {
     NotConfigured,
     #[error("draw commands contain an unmatched push or pop clip")]
     UnbalancedClipStack,
+    #[error("draw commands exceed the maximum clip nesting depth")]
+    ClipStackTooDeep,
     #[error("timed out while acquiring the next surface texture")]
     SurfaceTimeout,
     #[error("the surface is occluded")]
@@ -73,6 +78,7 @@ pub struct Canvas<'surface> {
     surface: wgpu::Surface<'surface>,
     config: Option<wgpu::SurfaceConfiguration>,
     engine: Option<Engine>,
+    clip_texture: Option<wgpu::Texture>,
 }
 
 impl<'surface> Canvas<'surface> {
@@ -99,6 +105,7 @@ impl<'surface> Canvas<'surface> {
             surface,
             config: None,
             engine: None,
+            clip_texture: None,
         }
     }
 
@@ -145,6 +152,7 @@ impl<'surface> Canvas<'surface> {
             .ok_or(CanvasError::UnsupportedSurface)?;
         self.surface.configure(device, &config);
         self.engine = Some(Engine::new(device, queue));
+        self.clip_texture = Some(create_clip_texture(device, [width, height]));
         self.config = Some(config);
         Ok(())
     }
@@ -165,6 +173,7 @@ impl<'surface> Canvas<'surface> {
         config.width = width;
         config.height = height;
         self.surface.configure(device, config);
+        self.clip_texture = Some(create_clip_texture(device, [width, height]));
         Ok(())
     }
 
@@ -183,9 +192,15 @@ impl<'surface> Canvas<'surface> {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let clip_view = self
+            .clip_texture
+            .as_ref()
+            .expect("configured canvas should have a clip texture")
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let command_buffer = encode_draw_commands(
             engine,
             &view,
+            &clip_view,
             target_format,
             canvas_size,
             commands,
@@ -208,6 +223,7 @@ impl<'surface> Canvas<'surface> {
 pub struct OffscreenCanvas {
     engine: Engine,
     texture: wgpu::Texture,
+    clip_texture: wgpu::Texture,
     size: [u32; 2],
 }
 
@@ -237,6 +253,7 @@ impl OffscreenCanvas {
         }
 
         self.texture = create_offscreen_texture(&self.engine, [width, height]);
+        self.clip_texture = create_clip_texture(self.engine.device(), [width, height]);
         self.size = [width, height];
         Ok(())
     }
@@ -251,9 +268,13 @@ impl OffscreenCanvas {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let clip_view = self
+            .clip_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let command_buffer = encode_draw_commands(
             engine,
             &view,
+            &clip_view,
             wgpu::TextureFormat::Rgba8Unorm,
             self.size,
             commands,
@@ -264,12 +285,31 @@ impl OffscreenCanvas {
 
     fn create(engine: Engine, size: [u32; 2]) -> Self {
         let texture = create_offscreen_texture(&engine, size);
+        let clip_texture = create_clip_texture(engine.device(), size);
         Self {
             engine,
             texture,
+            clip_texture,
             size,
         }
     }
+}
+
+fn create_clip_texture(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("render canvas clip stencil"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: CLIP_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    })
 }
 
 fn create_offscreen_texture(engine: &Engine, size: [u32; 2]) -> wgpu::Texture {
@@ -298,6 +338,7 @@ fn create_offscreen_texture(engine: &Engine, size: [u32; 2]) -> wgpu::Texture {
 fn encode_draw_commands(
     engine: &mut Engine,
     target: &wgpu::TextureView,
+    clip_target: &wgpu::TextureView,
     target_format: wgpu::TextureFormat,
     canvas_size: [u32; 2],
     commands: &[DrawCommand],
@@ -305,9 +346,11 @@ fn encode_draw_commands(
 ) -> Result<wgpu::CommandBuffer, DrawError> {
     validate_clip_stack(commands)?;
     engine.prepare_fill(target_format, commands, canvas_size);
+    engine.prepare_clip(target_format, commands, canvas_size);
 
     let mut encoder = engine.create_command_encoder(Some("render canvas encoder"));
     let fill_renderer = engine.fill_renderer();
+    let clip_renderer = engine.clip_renderer();
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("render canvas pass"),
@@ -320,17 +363,38 @@ fn encode_draw_commands(
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: clip_target,
+                depth_ops: None,
+                stencil_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
         });
 
+        let mut clip_depth = 0u32;
         for (command_index, command) in commands.iter().enumerate() {
             match command {
-                DrawCommand::PushClip { .. } | DrawCommand::PopClip => {}
-                DrawCommand::Fill { .. } => fill_renderer.draw_command(&mut pass, command_index),
-                DrawCommand::Stroke { .. } => draw_stroke(&mut pass),
+                DrawCommand::PushClip { .. } => {
+                    clip_renderer.push(&mut pass, command_index, clip_depth);
+                    clip_depth += 1;
+                }
+                DrawCommand::PopClip => {
+                    clip_renderer.pop(&mut pass, command_index, clip_depth);
+                    clip_depth -= 1;
+                }
+                DrawCommand::Fill { .. } => {
+                    pass.set_stencil_reference(clip_depth);
+                    fill_renderer.draw_command(&mut pass, command_index);
+                }
+                DrawCommand::Stroke { .. } => {
+                    pass.set_stencil_reference(clip_depth);
+                    draw_stroke(&mut pass);
+                }
             }
         }
     }
@@ -354,6 +418,9 @@ fn validate_clip_stack(commands: &[DrawCommand]) -> Result<(), DrawError> {
     let mut depth = 0usize;
     for command in commands {
         match command {
+            DrawCommand::PushClip { .. } if depth == MAX_CLIP_DEPTH => {
+                return Err(DrawError::ClipStackTooDeep);
+            }
             DrawCommand::PushClip { .. } => depth += 1,
             DrawCommand::PopClip if depth == 0 => return Err(DrawError::UnbalancedClipStack),
             DrawCommand::PopClip => depth -= 1,
@@ -421,6 +488,15 @@ mod tests {
         assert_eq!(
             validate_clip_stack(&[push_clip()]),
             Err(DrawError::UnbalancedClipStack)
+        );
+    }
+
+    #[test]
+    fn rejects_clip_stacks_deeper_than_stencil_capacity() {
+        let commands = vec![push_clip(); MAX_CLIP_DEPTH + 1];
+        assert_eq!(
+            validate_clip_stack(&commands),
+            Err(DrawError::ClipStackTooDeep)
         );
     }
 

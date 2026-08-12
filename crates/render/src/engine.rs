@@ -1,6 +1,9 @@
 //! Shared WebGPU state used by every canvas.
 
-use crate::{canvas::DrawCommand, variants::fill::FillRenderer};
+use crate::{
+    canvas::DrawCommand,
+    variants::{clip::ClipRenderer, fill::FillRenderer},
+};
 
 /// Persistent GPU state shared by canvas drawing code.
 ///
@@ -9,6 +12,7 @@ use crate::{canvas::DrawCommand, variants::fill::FillRenderer};
 pub struct Engine {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    clip_renderer: Option<(wgpu::TextureFormat, ClipRenderer)>,
     fill_renderer: Option<(wgpu::TextureFormat, FillRenderer)>,
 }
 
@@ -19,6 +23,7 @@ impl Engine {
         Self {
             device: device.clone(),
             queue: queue.clone(),
+            clip_renderer: None,
             fill_renderer: None,
         }
     }
@@ -64,11 +69,43 @@ impl Engine {
             .prepare(&self.device, &self.queue, commands, canvas_size);
     }
 
+    pub(crate) fn prepare_clip(
+        &mut self,
+        target_format: wgpu::TextureFormat,
+        commands: &[DrawCommand],
+        canvas_size: [u32; 2],
+    ) {
+        let renderer_matches_format = self
+            .clip_renderer
+            .as_ref()
+            .is_some_and(|(format, _)| *format == target_format);
+        if !renderer_matches_format {
+            self.clip_renderer = Some((
+                target_format,
+                ClipRenderer::new(&self.device, target_format),
+            ));
+        }
+
+        self.clip_renderer
+            .as_mut()
+            .expect("clip renderer should be initialized")
+            .1
+            .prepare(&self.device, &self.queue, commands, canvas_size);
+    }
+
     pub(crate) fn fill_renderer(&self) -> &FillRenderer {
         &self
             .fill_renderer
             .as_ref()
             .expect("fill renderer must be prepared before drawing")
+            .1
+    }
+
+    pub(crate) fn clip_renderer(&self) -> &ClipRenderer {
+        &self
+            .clip_renderer
+            .as_ref()
+            .expect("clip renderer must be prepared before drawing")
             .1
     }
 }
