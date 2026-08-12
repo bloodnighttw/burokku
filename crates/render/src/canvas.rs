@@ -3,8 +3,8 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::{
-    clip::commands_are_balanced,
-    shapes::{rect::Rect, round::Round, stroke::Stroke, ShapeRenderer},
+    engine::{RenderEngine, RenderEngineError, RenderTarget},
+    shapes::{rect::Rect, round::Round, stroke::Stroke},
 };
 
 /// One backend-independent drawing operation.
@@ -155,10 +155,8 @@ pub enum CanvasRenderError {
 /// Its coordinate system starts at the top-left corner, at `(0, 0)`.
 pub struct Canvas<'window> {
     surface: wgpu::Surface<'window>,
-    device: Option<wgpu::Device>,
-    queue: Option<wgpu::Queue>,
     config: Option<wgpu::SurfaceConfiguration>,
-    shape_renderer: Option<ShapeRenderer>,
+    engine: Option<RenderEngine>,
 }
 
 impl<'window> Canvas<'window> {
@@ -177,10 +175,8 @@ impl<'window> Canvas<'window> {
     pub fn from_surface(surface: wgpu::Surface<'window>) -> Self {
         Self {
             surface,
-            device: None,
-            queue: None,
             config: None,
-            shape_renderer: None,
+            engine: None,
         }
     }
 
@@ -189,11 +185,11 @@ impl<'window> Canvas<'window> {
     }
 
     pub fn device(&self) -> Option<&wgpu::Device> {
-        self.device.as_ref()
+        self.engine.as_ref().map(RenderEngine::device)
     }
 
     pub fn queue(&self) -> Option<&wgpu::Queue> {
-        self.queue.as_ref()
+        self.engine.as_ref().map(RenderEngine::queue)
     }
 
     pub fn configuration(&self) -> Option<&wgpu::SurfaceConfiguration> {
@@ -222,9 +218,7 @@ impl<'window> Canvas<'window> {
             .ok_or(CanvasSurfaceError::UnsupportedSurface)?;
         self.surface.configure(device, &config);
 
-        self.shape_renderer = Some(ShapeRenderer::new(device, config.format, 1));
-        self.device = Some(device.clone());
-        self.queue = Some(queue.clone());
+        self.engine = Some(RenderEngine::new(device, queue, config.format, 1));
         self.config = Some(config);
         Ok(())
     }
@@ -239,8 +233,9 @@ impl<'window> Canvas<'window> {
         }
 
         let device = self
-            .device
+            .engine
             .as_ref()
+            .map(RenderEngine::device)
             .ok_or(CanvasSurfaceError::NotConfigured)?;
         let config = self
             .config
@@ -281,62 +276,34 @@ impl<'window> Canvas<'window> {
         clear_color: wgpu::Color,
         pre_present: impl FnOnce(),
     ) -> Result<(), CanvasRenderError> {
-        if !commands_are_balanced(draws.commands()) {
-            return Err(CanvasRenderError::UnbalancedClipStack);
-        }
-
-        let device = self
-            .device
-            .as_ref()
-            .ok_or(CanvasRenderError::NotConfigured)?;
-        let queue = self
-            .queue
-            .as_ref()
-            .ok_or(CanvasRenderError::NotConfigured)?;
         let config = self
             .config
             .as_ref()
             .ok_or(CanvasRenderError::NotConfigured)?;
-        let shape_renderer = self
-            .shape_renderer
+        let engine = self
+            .engine
             .as_mut()
             .ok_or(CanvasRenderError::NotConfigured)?;
-
-        shape_renderer.prepare(
-            device,
-            queue,
-            draws.commands(),
-            [config.width, config.height],
-        );
+        engine
+            .prepare(draws, [config.width, config.height])
+            .map_err(|error| match error {
+                RenderEngineError::UnbalancedClipStack => CanvasRenderError::UnbalancedClipStack,
+            })?;
 
         let surface_frame = acquire_frame(&self.surface)?;
         let view = surface_frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render canvas frame encoder"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("render canvas frame pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            shape_renderer.draw(&mut pass);
-        }
+        let commands = engine.encode(
+            RenderTarget {
+                color_view: &view,
+                resolve_view: None,
+                store: wgpu::StoreOp::Store,
+            },
+            clear_color,
+        );
 
-        queue.submit([encoder.finish()]);
+        engine.queue().submit([commands]);
         pre_present();
         surface_frame.present();
         Ok(())
@@ -397,7 +364,7 @@ fn acquire_frame(surface: &wgpu::Surface<'_>) -> Result<wgpu::SurfaceTexture, Ca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::offscreen::OffscreenSurface;
+    use crate::{clip::commands_are_balanced, offscreen::OffscreenSurface};
 
     #[test]
     fn draw_list_retains_submission_order_without_a_gpu() {
