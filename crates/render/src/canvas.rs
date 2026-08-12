@@ -19,8 +19,9 @@ pub enum DrawCommand {
     PopClip,
     // fill an area with rect and corners
     Fill {
+        // we don't need to store corners as it will be covered by
+        // push clip and pop clip
         rect: Rect,
-        corners: Corner,
         color: wgpu::Color,
     },
     // stroke an area with rect and corners
