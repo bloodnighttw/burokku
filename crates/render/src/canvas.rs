@@ -1,8 +1,8 @@
 //! Render targets and draw-command encoding.
 
 use crate::{
-    engine::Engine,
     attributes::{corner::Corner, rect::Rect},
+    engine::Engine,
 };
 
 /// A drawing operation recorded for a canvas.
@@ -17,7 +17,7 @@ pub enum DrawCommand {
         corners: Corner,
     },
     PopClip,
-    // fill an area with rect and corners
+    // Fill a rectangular area. Rounded bounds are applied by the clip stack.
     Fill {
         // we don't need to store corners as it will be covered by
         // push clip and pop clip
@@ -174,14 +174,23 @@ impl<'surface> Canvas<'surface> {
         commands: &[DrawCommand],
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex, DrawError> {
-        self.config.as_ref().ok_or(DrawError::NotConfigured)?;
+        let config = self.config.as_ref().ok_or(DrawError::NotConfigured)?;
+        let target_format = config.format;
+        let canvas_size = [config.width, config.height];
         let engine = self.engine.as_mut().ok_or(DrawError::NotConfigured)?;
         validate_clip_stack(commands)?;
         let frame = acquire_surface_frame(&self.surface)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let command_buffer = encode_draw_commands(engine, &view, commands, clear_color)?;
+        let command_buffer = encode_draw_commands(
+            engine,
+            &view,
+            target_format,
+            canvas_size,
+            commands,
+            clear_color,
+        )?;
         let submission = engine.submit(command_buffer);
         frame.present();
         Ok(submission)
@@ -242,7 +251,14 @@ impl OffscreenCanvas {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let command_buffer = encode_draw_commands(engine, &view, commands, clear_color)?;
+        let command_buffer = encode_draw_commands(
+            engine,
+            &view,
+            wgpu::TextureFormat::Rgba8Unorm,
+            self.size,
+            commands,
+            clear_color,
+        )?;
         Ok(engine.submit(command_buffer))
     }
 
@@ -277,18 +293,21 @@ fn create_offscreen_texture(engine: &Engine, size: [u32; 2]) -> wgpu::Texture {
 
 /// The single draw path shared by every render target.
 ///
-/// Pipeline and buffer selection for `Fill` and `Stroke` will be added here as
-/// their command payloads are introduced. Keeping the render pass here avoids
-/// teaching `Engine` about surface or texture ownership.
+/// Keeping the render pass here avoids teaching `Engine` about surface or
+/// texture ownership.
 fn encode_draw_commands(
-    engine: &Engine,
+    engine: &mut Engine,
     target: &wgpu::TextureView,
+    target_format: wgpu::TextureFormat,
+    canvas_size: [u32; 2],
     commands: &[DrawCommand],
     clear_color: wgpu::Color,
 ) -> Result<wgpu::CommandBuffer, DrawError> {
     validate_clip_stack(commands)?;
+    engine.prepare_fill(target_format, commands, canvas_size);
 
     let mut encoder = engine.create_command_encoder(Some("render canvas encoder"));
+    let fill_renderer = engine.fill_renderer();
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("render canvas pass"),
@@ -307,20 +326,15 @@ fn encode_draw_commands(
             multiview_mask: None,
         });
 
-        for command in commands {
+        for (command_index, command) in commands.iter().enumerate() {
             match command {
                 DrawCommand::PushClip { .. } | DrawCommand::PopClip => {}
-                DrawCommand::Fill { .. } => draw_fill(&mut pass),
+                DrawCommand::Fill { .. } => fill_renderer.draw_command(&mut pass, command_index),
                 DrawCommand::Stroke { .. } => draw_stroke(&mut pass),
             }
         }
     }
     Ok(encoder.finish())
-}
-
-fn draw_fill(_pass: &mut wgpu::RenderPass<'_>) {
-    // The fill pipeline is installed here once `DrawCommand::Fill` carries a
-    // block payload.
 }
 
 fn draw_stroke(_pass: &mut wgpu::RenderPass<'_>) {
@@ -382,7 +396,6 @@ mod tests {
             push_clip(),
             DrawCommand::Fill {
                 rect: Rect::default(),
-                corners: Corner::default(),
                 color: wgpu::Color::BLACK,
             },
             push_clip(),
