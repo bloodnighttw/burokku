@@ -2,7 +2,7 @@
 
 use crate::{
     engine::Engine,
-    styles::{corner::Corner, rect::Rect},
+    attributes::{corner::Corner, rect::Rect},
 };
 
 /// A drawing operation recorded for a canvas.
