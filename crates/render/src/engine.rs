@@ -188,13 +188,16 @@ impl RenderEngine {
                 SceneOperation::Backdrop(scheduled) => {
                     let destination = 1 - current_scene;
                     let source_bind_group = self.compositor.scene_source_bind_group(current_scene);
+                    let effect_source =
+                        self.backdrop
+                            .encode_source(&mut encoder, *scheduled, source_bind_group);
                     {
                         let mut pass = self.compositor.begin_backdrop(
                             &mut encoder,
                             current_scene,
                             destination,
                         );
-                        self.backdrop.draw(&mut pass, *scheduled, source_bind_group);
+                        self.backdrop.draw(&mut pass, *scheduled, effect_source);
                     }
                     current_scene = destination;
                 }

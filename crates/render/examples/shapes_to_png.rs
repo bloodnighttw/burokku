@@ -10,7 +10,7 @@ use render::{
         stroke::{DrawStrokeExt, Stroke},
     },
     wgpu,
-    wgsl::WgslBackdrop,
+    wgsl::WgslBlurredBackdrop,
 };
 
 const SIZE: [u32; 2] = [800, 500];
@@ -41,8 +41,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-The upstream implementation receives an already-blurred backdrop. This
-self-contained example approximates that stage with a five-tap frost sample.
+The renderer runs the same three logical stages as upstream: separable Gaussian
+backdrop blur, displacement geometry, and final glass composition. Geometry and
+composition are combined in the final WGSL pass because this example has one
+static shape and does not need upstream's reusable geometry-texture cache.
 */
 const LIQUID_GLASS_WGSL: &str = r#"
 const LIQUID_LUMA: vec3<f32> = vec3<f32>(0.299, 0.587, 0.114);
@@ -59,90 +61,10 @@ fn liquid_rounded_rect_sdf(
         + length(max(corner, vec2<f32>(0.0))) - radius;
 }
 
-fn liquid_surface_height(distance: f32, thickness: f32) -> f32 {
-    if distance >= 0.0 {
-        return 0.0;
-    }
-    if distance < -thickness {
-        return thickness;
-    }
-    let edge_depth = thickness + distance;
-    return sqrt(max(0.0, thickness * thickness - edge_depth * edge_depth));
-}
-
-fn liquid_surface_normal(distance: f32, thickness: f32) -> vec3<f32> {
-    let gradient = vec2<f32>(dpdx(distance), dpdy(distance));
-    let normal_xy = clamp((thickness + distance) / thickness, 0.0, 1.0);
-    let normal_z = sqrt(max(0.0, 1.0 - normal_xy * normal_xy));
-    return normalize(vec3<f32>(gradient * normal_xy, normal_z));
-}
-
-fn liquid_frost_sample(
-    uv: vec2<f32>,
-    texel_size: vec2<f32>,
-    blur_radius: f32,
-) -> vec4<f32> {
-    let spread = texel_size * blur_radius;
-    let horizontal = vec2<f32>(spread.x, 0.0);
-    let vertical = vec2<f32>(0.0, spread.y);
-    return sample_backdrop(uv) * 0.4
-        + (sample_backdrop(uv + horizontal) + sample_backdrop(uv - horizontal)
-            + sample_backdrop(uv + vertical) + sample_backdrop(uv - vertical)) * 0.15;
-}
-
-fn liquid_apply_tint(color: vec3<f32>, tint: vec4<f32>) -> vec3<f32> {
-    let tint_luminance = dot(tint.rgb, LIQUID_LUMA);
-    var tinted: vec3<f32>;
-    if tint_luminance < 0.5 {
-        tinted = color * tint.rgb * 2.0;
-    } else {
-        tinted = vec3<f32>(1.0)
-            - (vec3<f32>(1.0) - color) * (vec3<f32>(1.0) - tint.rgb);
-    }
-    return mix(color, tinted, clamp(tint.a, 0.0, 1.0));
-}
-
-fn liquid_highlight_color(background: vec3<f32>) -> vec3<f32> {
-    let luminance = dot(background, LIQUID_LUMA);
-    let largest = max(max(background.r, background.g), background.b);
-    let smallest = min(min(background.r, background.g), background.b);
-    let saturation = (largest - smallest) / max(largest, 0.001);
-    let normalized = background / max(luminance, 0.001);
-    let gray = vec3<f32>(dot(normalized, LIQUID_LUMA));
-    let colored = clamp(mix(gray, normalized, 1.3), vec3<f32>(0.0), vec3<f32>(1.0));
-    let color_influence = smoothstep(0.0, 0.6, luminance)
-        * smoothstep(0.0, 0.4, saturation);
-    return mix(vec3<f32>(1.0), colored, color_influence);
-}
-
-fn liquid_rim_light(
-    normal: vec3<f32>,
-    distance: f32,
-    height: f32,
-    thickness: f32,
-    light: vec4<f32>,
-    background: vec3<f32>,
-) -> vec3<f32> {
-    let normalized_height = height / thickness;
-    let edge_shape = clamp((1.0 - normalized_height) * 1.111, 0.0, 1.0);
-    let thickness_visibility = clamp((thickness - 5.0) * 0.5, 0.0, 1.0);
-    let rim_distance = distance / 1.5;
-    let rim = 1.0 / (1.0 + 0.89 * rim_distance * rim_distance);
-
-    let light_direction = light.xy / max(length(light.xy), 0.001);
-    let main_light = max(dot(normal.xy, light_direction), 0.0);
-    let opposite_light = max(dot(normal.xy, -light_direction), 0.0);
-    let influence = main_light + opposite_light * 0.8;
-    let highlight = liquid_highlight_color(background);
-    let directional = highlight * 0.7 * influence * influence * light.z * 2.0;
-    let ambient = highlight * 0.4 * light.w;
-    return (directional + ambient) * rim * thickness_visibility * edge_shape;
-}
-
 fn backdrop_main(input: WgslInput, params: array<vec4<f32>, 4>) -> vec4<f32> {
     // tint: rgba
     let tint = params[0];
-    // optical: refractive index, chromatic aberration, thickness px, blur px
+    // optical: refractive index, chromatic aberration, thickness px, unused
     let optical = params[1];
     // light: direction xy, intensity, ambient strength
     let light = params[2];
@@ -153,30 +75,68 @@ fn backdrop_main(input: WgslInput, params: array<vec4<f32>, 4>) -> vec4<f32> {
     let radius = clamp(geometry.w, 0.0, min(size.x, size.y) * 0.5);
     let thickness = max(optical.z, 0.001);
     let distance = liquid_rounded_rect_sdf(input.local_position, size, radius);
-    let height = liquid_surface_height(distance, thickness);
-    let normal = liquid_surface_normal(distance, thickness);
+    let foreground_alpha = select(
+        0.0,
+        1.0 - smoothstep(-2.0, 0.0, distance),
+        distance < 0.0,
+    );
+
+    let edge_depth = thickness + distance;
+    let curved_height = sqrt(max(0.0, thickness * thickness - edge_depth * edge_depth));
+    let height = select(curved_height, thickness, distance < -thickness);
+    let gradient = vec2<f32>(dpdx(distance), dpdy(distance));
+    let normal_xy = max(thickness + distance, 0.0) / thickness;
+    let normal_z = sqrt(max(0.0, 1.0 - normal_xy * normal_xy));
+    let normal = normalize(vec3<f32>(gradient * normal_xy, normal_z));
 
     let incident = vec3<f32>(0.0, 0.0, -1.0);
-    let refracted = refract(incident, normal, 1.0 / max(optical.x, 1.001));
-    let travel = (height + thickness * 8.0) / max(abs(refracted.z), 0.001);
-    let displacement_px = refracted.xy * travel;
+    let refracted_ray = refract(incident, normal, 1.0 / max(optical.x, 1.001));
+    let travel = (height + thickness * 8.0) / max(abs(refracted_ray.z), 0.001);
+    let displacement_px = refracted_ray.xy * travel;
     let texel_size = vec2<f32>(1.0) / max(geometry.xy, vec2<f32>(1.0));
     let dispersion = optical.y * 0.5;
 
     let red_uv = input.screen_uv + displacement_px * (1.0 + dispersion) * texel_size;
     let green_uv = input.screen_uv + displacement_px * texel_size;
     let blue_uv = input.screen_uv + displacement_px * (1.0 - dispersion) * texel_size;
-    let red = liquid_frost_sample(red_uv, texel_size, optical.w);
-    let green = liquid_frost_sample(green_uv, texel_size, optical.w);
-    let blue = liquid_frost_sample(blue_uv, texel_size, optical.w);
+    let red = sample_backdrop(red_uv);
+    let green = sample_backdrop(green_uv);
+    let blue = sample_backdrop(blue_uv);
+    let refracted = vec4<f32>(red.r, green.g, blue.b, green.a);
 
-    var glass = vec3<f32>(red.r, green.g, blue.b);
-    glass = liquid_apply_tint(glass, tint);
-    glass += liquid_rim_light(normal, distance, height, thickness, light, glass);
+    // Port of liquid_glass_final_render.frag from the current renderer.
+    var glass = tint.rgb * tint.a + refracted.rgb * (1.0 - tint.a);
     let luminance = dot(glass, LIQUID_LUMA);
-    glass = mix(vec3<f32>(luminance), glass, geometry.z);
+    glass = clamp(mix(vec3<f32>(luminance), glass, geometry.z), vec3<f32>(0.0), vec3<f32>(1.0));
 
-    return vec4<f32>(clamp(glass, vec3<f32>(0.0), vec3<f32>(1.0)), green.a);
+    let normalized_height = height / thickness;
+    let thickness_scale = clamp(40.0 / max(thickness, 1.0), 1.0, 4.0);
+    let edge_threshold = mix(0.8, 0.5, 1.0 / thickness_scale);
+    let edge_factor = 1.0 - smoothstep(0.0, edge_threshold, normalized_height);
+    if edge_factor > 0.01 {
+        let displacement_length = length(displacement_px);
+        let edge_normal = displacement_px / max(displacement_length, 0.001);
+        let light_direction = light.xy / max(length(light.xy), 0.001);
+        let main_light = max(dot(edge_normal, light_direction), 0.0);
+        let opposite_light = max(dot(edge_normal, -light_direction), 0.0);
+        let influence = main_light + opposite_light * 0.8;
+        let directional = pow(influence, 1.5) * light.z * 3.0;
+        let ambient = light.w * 0.5;
+        let brightness = (directional + ambient) * edge_factor * thickness_scale * 0.8;
+
+        let background_luminance = dot(refracted.rgb, LIQUID_LUMA);
+        var saturated_background = refracted.rgb / max(background_luminance, 0.001);
+        saturated_background = mix(refracted.rgb, saturated_background, 0.8);
+        let colorfulness = length(refracted.rgb - vec3<f32>(background_luminance));
+        let color_mix = clamp(colorfulness + 0.5, 0.5, 1.0);
+        let highlight = mix(vec3<f32>(1.0), saturated_background, color_mix);
+        glass = mix(glass, highlight, brightness);
+    }
+
+    return vec4<f32>(
+        clamp(glass, vec3<f32>(0.0), vec3<f32>(1.0)),
+        foreground_alpha,
+    );
 }
 "#;
 
@@ -186,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("render-shapes.png"));
-    let liquid_glass = WgslBackdrop::<4>::new("liquid glass", LIQUID_GLASS_WGSL)?;
+    let liquid_glass = WgslBlurredBackdrop::<4>::new("liquid glass", LIQUID_GLASS_WGSL)?;
     let mut surface = OffscreenSurface::new(SIZE).await.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -203,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn scene(liquid_glass: &WgslBackdrop<4>) -> DrawList {
+fn scene(liquid_glass: &WgslBlurredBackdrop<4>) -> DrawList {
     let mut draws = DrawList::new();
     let card = Rect::new(55.0, 40.0, 690.0, 420.0);
     let card_round = rounded(44.0);
@@ -253,19 +213,14 @@ fn scene(liquid_glass: &WgslBackdrop<4>) -> DrawList {
         &mut draws,
         glass,
         glass_round,
+        5.0,
         [
-            [0.78, 0.92, 1.0, 0.14],
-            [1.2, 0.18, 16.0, 2.5],
-            [-0.707, -0.707, 0.72, 0.16],
-            [SIZE[0] as f32, SIZE[1] as f32, 1.2, 58.0],
+            [1.0, 1.0, 1.0, 0.0],
+            [1.2, 0.01, 20.0, 0.0],
+            [0.0, 1.0, 0.5, 0.0],
+            [SIZE[0] as f32, SIZE[1] as f32, 1.5, 58.0],
         ],
     );
-    draws.draw_rounded_stroke(
-        Stroke::from_rect(glass, 2.0),
-        rgba(255, 255, 255, 0.72),
-        glass_round,
-    );
-
     // This opaque pill is recorded later, so it stays crisp on top of the glass.
     draws.draw_rounded_rect(
         Rect::new(285.0, 211.0, 230.0, 78.0),
