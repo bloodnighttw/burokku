@@ -1,5 +1,6 @@
 pub mod canvas;
 mod clip;
+mod engine;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod offscreen;
 pub mod shapes;

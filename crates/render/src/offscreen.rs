@@ -2,7 +2,10 @@
 
 use std::sync::mpsc;
 
-use crate::{canvas::DrawList, clip::commands_are_balanced, shapes::ShapeRenderer};
+use crate::{
+    canvas::DrawList,
+    engine::{RenderEngine, RenderTarget},
+};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SAMPLE_COUNT: u32 = 4;
@@ -10,11 +13,9 @@ const SAMPLE_COUNT: u32 = 4;
 /// A reusable GPU-backed canvas that renders into an in-memory RGBA8 texture.
 pub struct OffscreenSurface {
     _instance: wgpu::Instance,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
     multisample_texture: wgpu::Texture,
     resolve_texture: wgpu::Texture,
-    renderer: ShapeRenderer,
+    engine: RenderEngine,
     size: [u32; 2],
 }
 
@@ -65,24 +66,22 @@ impl OffscreenSurface {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let renderer = ShapeRenderer::new(&device, FORMAT, SAMPLE_COUNT);
+        let engine = RenderEngine::new(&device, &queue, FORMAT, SAMPLE_COUNT);
 
         Some(Self {
             _instance: instance,
-            device,
-            queue,
             multisample_texture,
             resolve_texture,
-            renderer,
+            engine,
             size,
         })
     }
 
     /// Renders `draws` and returns tightly packed, row-major RGBA8 pixels.
     pub async fn render_rgba8(&mut self, draws: &DrawList, clear_color: wgpu::Color) -> Vec<u8> {
-        assert!(commands_are_balanced(draws.commands()));
-        self.renderer
-            .prepare(&self.device, &self.queue, draws.commands(), self.size);
+        self.engine
+            .prepare(draws, self.size)
+            .expect("draw commands must contain balanced clip scopes");
 
         let multisample_view = self
             .multisample_texture
@@ -90,41 +89,32 @@ impl OffscreenSurface {
         let resolve_view = self
             .resolve_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render offscreen encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("render offscreen pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &multisample_view,
-                    depth_slice: None,
-                    resolve_target: Some(&resolve_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.renderer.draw(&mut pass);
-        }
+        let render_commands = self.engine.encode(
+            RenderTarget {
+                color_view: &multisample_view,
+                resolve_view: Some(&resolve_view),
+                store: wgpu::StoreOp::Discard,
+            },
+            clear_color,
+        );
+
+        let mut readback_encoder =
+            self.engine
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("render offscreen readback encoder"),
+                });
 
         let unpadded_bytes_per_row = self.size[0] * 4;
         let padded_bytes_per_row =
             align_to(unpadded_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let readback = self.engine.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("render offscreen readback"),
             size: padded_bytes_per_row as u64 * self.size[1] as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        encoder.copy_texture_to_buffer(
+        readback_encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.resolve_texture,
                 mip_level: 0,
@@ -146,7 +136,9 @@ impl OffscreenSurface {
             },
         );
 
-        self.queue.submit([encoder.finish()]);
+        self.engine
+            .queue()
+            .submit([render_commands, readback_encoder.finish()]);
         let slice = readback.slice(..);
         let (sender, receiver) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -154,7 +146,8 @@ impl OffscreenSurface {
                 .send(result)
                 .expect("offscreen map receiver should still exist");
         });
-        self.device
+        self.engine
+            .device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("offscreen GPU work should complete");
         receiver
@@ -182,4 +175,46 @@ impl OffscreenSurface {
 
 const fn align_to(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shapes::rect::{DrawRectExt, Rect};
+
+    #[tokio::test]
+    async fn empty_frame_still_clears_and_resolves_the_output() {
+        let Some(mut surface) = OffscreenSurface::new([4, 4]).await else {
+            eprintln!("skipping offscreen clear test: no WebGPU adapter available");
+            return;
+        };
+
+        let pixels = surface
+            .render_rgba8(&DrawList::new(), wgpu::Color::GREEN)
+            .await;
+
+        assert!(pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 255, 0, 255]));
+    }
+
+    #[tokio::test]
+    async fn successive_frames_do_not_reuse_previous_batches_or_pixels() {
+        let Some(mut surface) = OffscreenSurface::new([8, 8]).await else {
+            eprintln!("skipping offscreen frame reuse test: no WebGPU adapter available");
+            return;
+        };
+        let mut first_frame = DrawList::new();
+        first_frame.draw_rect(Rect::new(0.0, 0.0, 8.0, 8.0), wgpu::Color::RED);
+
+        let first_pixels = surface.render_rgba8(&first_frame, wgpu::Color::BLACK).await;
+        assert_eq!(surface.pixel(&first_pixels, 4, 4), [255, 0, 0, 255]);
+
+        let second_pixels = surface
+            .render_rgba8(&DrawList::new(), wgpu::Color::BLUE)
+            .await;
+        assert!(second_pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 255, 255]));
+    }
 }
