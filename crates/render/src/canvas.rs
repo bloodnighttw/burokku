@@ -1,18 +1,37 @@
 //! Render targets and draw-command encoding.
 
-use crate::engine::Engine;
+use crate::{
+    engine::Engine,
+    styles::{corner::Corner, rect::Rect},
+};
 
 /// A drawing operation recorded for a canvas.
 ///
 /// The primitive variants are intentionally small while their payload types
 /// are being built in `variants`. Command interpretation belongs in this
 /// module so every kind of canvas has identical drawing behavior.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DrawCommand {
-    PushClip,
+    PushClip {
+        rect: Rect,
+        corners: Corner,
+    },
     PopClip,
-    Fill,
-    Stroke,
+    // fill an area with rect and corners
+    Fill {
+        rect: Rect,
+        corners: Corner,
+        color: wgpu::Color,
+    },
+    // stroke an area with rect and corners
+    Stroke {
+        rect: Rect,
+        // the width of the stroke, note this is not same as the rect's dimensions
+        // and it is drawn inside the rect
+        width: f32,
+        corners: Corner,
+        color: wgpu::Color,
+    },
 }
 
 /// Errors that can occur while creating or resizing a canvas.
@@ -289,9 +308,9 @@ fn encode_draw_commands(
 
         for command in commands {
             match command {
-                DrawCommand::PushClip | DrawCommand::PopClip => {}
-                DrawCommand::Fill => draw_fill(&mut pass),
-                DrawCommand::Stroke => draw_stroke(&mut pass),
+                DrawCommand::PushClip { .. } | DrawCommand::PopClip => {}
+                DrawCommand::Fill { .. } => draw_fill(&mut pass),
+                DrawCommand::Stroke { .. } => draw_stroke(&mut pass),
             }
         }
     }
@@ -320,10 +339,10 @@ fn validate_clip_stack(commands: &[DrawCommand]) -> Result<(), DrawError> {
     let mut depth = 0usize;
     for command in commands {
         match command {
-            DrawCommand::PushClip => depth += 1,
+            DrawCommand::PushClip { .. } => depth += 1,
             DrawCommand::PopClip if depth == 0 => return Err(DrawError::UnbalancedClipStack),
             DrawCommand::PopClip => depth -= 1,
-            DrawCommand::Fill | DrawCommand::Stroke => {}
+            DrawCommand::Fill { .. } | DrawCommand::Stroke { .. } => {}
         }
     }
 
@@ -359,10 +378,19 @@ mod tests {
     #[test]
     fn accepts_balanced_nested_clips() {
         let commands = [
-            DrawCommand::PushClip,
-            DrawCommand::Fill,
-            DrawCommand::PushClip,
-            DrawCommand::Stroke,
+            push_clip(),
+            DrawCommand::Fill {
+                rect: Rect::default(),
+                corners: Corner::default(),
+                color: wgpu::Color::BLACK,
+            },
+            push_clip(),
+            DrawCommand::Stroke {
+                rect: Rect::default(),
+                width: 1.0,
+                corners: Corner::default(),
+                color: wgpu::Color::BLACK,
+            },
             DrawCommand::PopClip,
             DrawCommand::PopClip,
         ];
@@ -377,8 +405,15 @@ mod tests {
             Err(DrawError::UnbalancedClipStack)
         );
         assert_eq!(
-            validate_clip_stack(&[DrawCommand::PushClip]),
+            validate_clip_stack(&[push_clip()]),
             Err(DrawError::UnbalancedClipStack)
         );
+    }
+
+    fn push_clip() -> DrawCommand {
+        DrawCommand::PushClip {
+            rect: Rect::default(),
+            corners: Corner::default(),
+        }
     }
 }

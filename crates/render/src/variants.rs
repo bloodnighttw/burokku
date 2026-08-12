@@ -1,3 +1,3 @@
 mod block;
-mod stroke;
 mod clip;
+mod stroke;
