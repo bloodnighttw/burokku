@@ -364,29 +364,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn offscreen_canvas_applies_and_restores_nested_clips() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-        {
-            Ok(adapter) => adapter,
-            Err(error) => {
-                eprintln!("skipping offscreen clip test: no WebGPU adapter available: {error}");
-                return;
-            }
-        };
-        let Ok((device, queue)) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("render clip test device"),
-                ..Default::default()
-            })
-            .await
-        else {
-            eprintln!("skipping offscreen clip test: WebGPU device creation failed");
+        let Some(mut canvas) = create_offscreen_canvas([16, 16]).await else {
             return;
         };
-        let engine = Engine::new(&device, &queue);
-        let mut canvas = OffscreenCanvas::new(engine, 16, 16).unwrap();
         let round = Corner::new(4.0, 4.0, 4.0, 4.0);
 
         canvas
@@ -439,6 +419,84 @@ mod tests {
         assert_eq!(pixel(&pixels, canvas.size(), 3, 7), [0, 0, 0, 255]);
         assert_eq!(pixel(&pixels, canvas.size(), 13, 13), [255, 0, 0, 255]);
         assert_eq!(pixel(&pixels, canvas.size(), 15, 15), [0, 0, 255, 255]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn offscreen_canvas_clips_all_four_large_rounded_corners() {
+        let Some(mut canvas) = create_offscreen_canvas([32, 32]).await else {
+            return;
+        };
+        let clip = Rect::new(4.0, 4.0, 24.0, 24.0);
+        let large_round = Corner::new(10.0, 10.0, 10.0, 10.0);
+
+        canvas
+            .draw(
+                &[
+                    DrawCommand::PushClip {
+                        rect: clip,
+                        corners: large_round,
+                    },
+                    fill(Rect::new(0.0, 0.0, 32.0, 32.0), wgpu::Color::RED),
+                    DrawCommand::PopClip,
+                ],
+                wgpu::Color::BLUE,
+            )
+            .unwrap();
+
+        let pixels = read_offscreen_pixels(&canvas);
+        for (name, x, y) in [
+            ("left-top", 4, 4),
+            ("right-top", 27, 4),
+            ("right-bottom", 27, 27),
+            ("left-bottom", 4, 27),
+        ] {
+            assert_eq!(
+                pixel(&pixels, canvas.size(), x, y),
+                [0, 0, 255, 255],
+                "{name} rounded corner must retain the background color",
+            );
+        }
+
+        for (name, x, y) in [
+            ("top edge", 16, 4),
+            ("right edge", 27, 16),
+            ("bottom edge", 16, 27),
+            ("left edge", 4, 16),
+            ("center", 16, 16),
+        ] {
+            assert_eq!(
+                pixel(&pixels, canvas.size(), x, y),
+                [255, 0, 0, 255],
+                "{name} must contain the fill color",
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn create_offscreen_canvas(size: [u32; 2]) -> Option<OffscreenCanvas> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+        {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                eprintln!("skipping offscreen clip test: no WebGPU adapter available: {error}");
+                return None;
+            }
+        };
+        let Ok((device, queue)) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("render clip test device"),
+                ..Default::default()
+            })
+            .await
+        else {
+            eprintln!("skipping offscreen clip test: WebGPU device creation failed");
+            return None;
+        };
+        OffscreenCanvas::new(Engine::new(&device, &queue), size[0], size[1]).ok()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
