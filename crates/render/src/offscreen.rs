@@ -182,7 +182,7 @@ mod tests {
     use super::*;
     use crate::{
         shapes::rect::{DrawRectExt, Rect},
-        wgsl::{WgslBackdrop, WgslRaster},
+        wgsl::{WgslBackdrop, WgslBlurredBackdrop, WgslRaster},
     };
 
     const SOLID_RASTER: &str = r#"
@@ -195,6 +195,12 @@ fn raster_main(_input: WgslInput, params: array<vec4<f32>, 1>) -> vec4<f32> {
 fn backdrop_main(input: WgslInput, params: array<vec4<f32>, 1>) -> vec4<f32> {
     let prior = sample_backdrop(input.screen_uv);
     return vec4<f32>((vec3<f32>(1.0) - prior.rgb) * params[0].rgb, prior.a);
+}
+"#;
+
+    const BLURRED_BACKDROP: &str = r#"
+fn backdrop_main(input: WgslInput, _params: array<vec4<f32>, 1>) -> vec4<f32> {
+    return vec4<f32>(sample_backdrop(input.screen_uv).rgb, 1.0);
 }
 "#;
 
@@ -285,6 +291,27 @@ fn backdrop_main(input: WgslInput, params: array<vec4<f32>, 1>) -> vec4<f32> {
         assert_eq!(surface.pixel(&pixels, 2, 2), [0, 0, 255, 255]);
         assert_eq!(surface.pixel(&pixels, 14, 2), [255, 0, 0, 255]);
         assert_eq!(surface.pixel(&pixels, 6, 6), [0, 255, 0, 255]);
+    }
+
+    #[tokio::test]
+    async fn blurred_backdrop_uses_private_intermediates_without_leaking() {
+        let Some(mut surface) = OffscreenSurface::new([16, 8]).await else {
+            eprintln!("skipping blurred WGSL backdrop test: no WebGPU adapter available");
+            return;
+        };
+        let effect =
+            WgslBlurredBackdrop::<1>::new("Gaussian backdrop test", BLURRED_BACKDROP).unwrap();
+        let mut draws = DrawList::new();
+        draws.draw_rect(Rect::new(0.0, 0.0, 8.0, 8.0), wgpu::Color::RED);
+        draws.draw_rect(Rect::new(8.0, 0.0, 8.0, 8.0), wgpu::Color::BLUE);
+        effect.draw(&mut draws, Rect::new(4.0, 0.0, 8.0, 8.0), 2.0, [[0.0; 4]]);
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLACK).await;
+
+        assert_eq!(surface.pixel(&pixels, 2, 4), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 14, 4), [0, 0, 255, 255]);
+        let mixed = surface.pixel(&pixels, 7, 4);
+        assert!(mixed[0] > 0 && mixed[2] > 0);
     }
 
     #[tokio::test]

@@ -97,6 +97,17 @@ pub trait BackdropRenderer<P: BackdropPayload>: 'static {
         draws: &[ResolvedBackdropDraw<'_, P>],
     );
 
+    /// Optionally preprocesses the source scene and returns the bind group the
+    /// effect should sample. The default samples the unmodified scene.
+    fn encode_source<'resource>(
+        &'resource self,
+        _encoder: &mut wgpu::CommandEncoder,
+        source_bind_group: &'resource wgpu::BindGroup,
+        _draw_index: usize,
+    ) -> &'resource wgpu::BindGroup {
+        source_bind_group
+    }
+
     fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, draw_index: usize);
 }
 
@@ -242,6 +253,13 @@ where
 trait ErasedBackdropRenderer {
     fn prepare(&mut self, context: BackdropPrepareContext<'_>, draws: &[QueuedBackdropDraw]);
 
+    fn encode_source<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        source_bind_group: &'resource wgpu::BindGroup,
+        draw_index: usize,
+    ) -> &'resource wgpu::BindGroup;
+
     fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, draw_index: usize);
 }
 
@@ -268,6 +286,16 @@ where
             })
             .collect::<Vec<_>>();
         self.renderer.prepare(context, &typed_draws);
+    }
+
+    fn encode_source<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        source_bind_group: &'resource wgpu::BindGroup,
+        draw_index: usize,
+    ) -> &'resource wgpu::BindGroup {
+        self.renderer
+            .encode_source(encoder, source_bind_group, draw_index)
     }
 
     fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, draw_index: usize) {
@@ -379,6 +407,17 @@ impl BackdropSystem {
         self.entries[scheduled.renderer_index]
             .renderer
             .draw(pass, scheduled.draw_index);
+    }
+
+    pub(crate) fn encode_source<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        scheduled: ScheduledBackdrop,
+        source_bind_group: &'resource wgpu::BindGroup,
+    ) -> &'resource wgpu::BindGroup {
+        self.entries[scheduled.renderer_index]
+            .renderer
+            .encode_source(encoder, source_bind_group, scheduled.draw_index)
     }
 
     fn renderer_index(&mut self, registration: &Arc<RendererRegistration>) -> usize {
