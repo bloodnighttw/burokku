@@ -1,44 +1,25 @@
-//! CPU-side rectangular clipping for retained draw commands.
+//! Central CPU-side clip resolution for retained draw commands.
 //!
-//! Rectangular clips use wgpu's fixed-function scissor state. Rounded clips
-//! keep that scissor as a coarse bound and add a per-fragment mask in the
-//! primitive renderers.
+//! Rectangular clips become fixed-function scissor rectangles. Rounded clips
+//! additionally become contiguous mask ranges that raster renderers can share
+//! for every draw recorded in the same clip scope.
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::{
-    canvas::DrawCommand,
-    shapes::{rect::Rect, round::Round},
-};
+use crate::shapes::{rect::Rect, round::Round};
 
-pub(crate) fn commands_are_balanced(commands: &[DrawCommand]) -> bool {
-    let mut depth = 0usize;
-    for command in commands {
-        match command {
-            DrawCommand::PushClip { .. } => depth += 1,
-            DrawCommand::PopClip if depth == 0 => return false,
-            DrawCommand::PopClip => depth -= 1,
-            DrawCommand::Rect { .. } => {}
-            DrawCommand::Stroke { .. } => {}
-        }
-    }
-    depth == 0
-}
-
-pub(crate) struct ClipStack {
-    active: ScissorRect,
-    ancestors: Vec<ScissorRect>,
-}
-
+/// One rounded-rectangle mask in the shared clip buffer.
+///
+/// The C layout maps to two consecutive WGSL `vec4<f32>` fields.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub(crate) struct ClipMask {
-    bounds: [f32; 4],
-    round: [f32; 4],
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct ClipMask {
+    pub bounds: [f32; 4],
+    pub round: [f32; 4],
 }
 
 impl ClipMask {
-    pub(crate) fn new(rect: Rect, round: Round) -> Self {
+    fn new(rect: Rect, round: Round) -> Self {
         let round = round.fit(rect.width, rect.height);
         Self {
             bounds: [rect.x, rect.y, rect.width, rect.height],
@@ -46,46 +27,40 @@ impl ClipMask {
         }
     }
 
-    pub(crate) fn is_rounded(self) -> bool {
+    fn is_rounded(self) -> bool {
         self.round.iter().any(|radius| *radius > 0.0)
     }
 }
 
-impl ClipStack {
-    pub(crate) fn new(canvas_size: [u32; 2]) -> Self {
-        Self {
-            active: ScissorRect::new(0, 0, canvas_size[0], canvas_size[1]),
-            ancestors: Vec::new(),
-        }
+/// A contiguous range in the shared clip-mask buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct ClipMaskRange {
+    pub start: u32,
+    pub count: u32,
+}
+
+impl ClipMaskRange {
+    pub const fn new(start: u32, count: u32) -> Self {
+        Self { start, count }
     }
 
-    pub(crate) fn active(&self) -> ScissorRect {
-        self.active
-    }
-
-    pub(crate) fn push(&mut self, rect: Rect) {
-        self.ancestors.push(self.active);
-        self.active = self.active.intersect_rect(rect);
-    }
-
-    pub(crate) fn pop(&mut self) {
-        self.active = self
-            .ancestors
-            .pop()
-            .expect("clip commands are validated before rectangle preparation");
+    pub const fn as_array(self) -> [u32; 2] {
+        [self.start, self.count]
     }
 }
 
+/// A pixel-space scissor rectangle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ScissorRect {
-    pub(crate) x: u32,
-    pub(crate) y: u32,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+pub struct ScissorRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl ScissorRect {
-    pub(crate) const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
             x,
             y,
@@ -94,7 +69,7 @@ impl ScissorRect {
         }
     }
 
-    pub(crate) const fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.width == 0 || self.height == 0
     }
 
@@ -128,6 +103,92 @@ impl ScissorRect {
     }
 }
 
+/// The fully resolved clip applied to one draw command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedClip {
+    pub(crate) scissor: ScissorRect,
+    pub(crate) masks: ClipMaskRange,
+}
+
+/// A malformed clip command sequence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ClipResolveError {
+    #[error("clip commands contain an unmatched push or pop")]
+    Unbalanced,
+}
+
+/// Resolves one command stream's nested clips into reusable frame data.
+pub(crate) struct ClipResolver {
+    current: ResolvedClip,
+    ancestors: Vec<ResolvedClip>,
+    masks: Vec<ClipMask>,
+    unbalanced: bool,
+}
+
+impl ClipResolver {
+    pub(crate) fn new(canvas_size: [u32; 2]) -> Self {
+        Self {
+            current: ResolvedClip {
+                scissor: ScissorRect::new(0, 0, canvas_size[0], canvas_size[1]),
+                masks: ClipMaskRange::default(),
+            },
+            ancestors: Vec::new(),
+            masks: Vec::new(),
+            unbalanced: false,
+        }
+    }
+
+    pub(crate) const fn current(&self) -> ResolvedClip {
+        self.current
+    }
+
+    pub(crate) fn push(&mut self, rect: Rect, round: Round) {
+        let parent = self.current;
+        self.ancestors.push(parent);
+
+        let mask = ClipMask::new(rect, round);
+        let masks = if mask.is_rounded() {
+            let start = u32::try_from(self.masks.len())
+                .expect("a frame cannot contain more than u32::MAX clip masks");
+            let parent_start = parent.masks.start as usize;
+            let parent_end = parent_start + parent.masks.count as usize;
+            self.masks.extend_from_within(parent_start..parent_end);
+            self.masks.push(mask);
+            ClipMaskRange {
+                start,
+                count: parent
+                    .masks
+                    .count
+                    .checked_add(1)
+                    .expect("a clip scope cannot contain more than u32::MAX masks"),
+            }
+        } else {
+            parent.masks
+        };
+
+        self.current = ResolvedClip {
+            scissor: parent.scissor.intersect_rect(rect),
+            masks,
+        };
+    }
+
+    pub(crate) fn pop(&mut self) -> Result<(), ClipResolveError> {
+        let Some(parent) = self.ancestors.pop() else {
+            self.unbalanced = true;
+            return Err(ClipResolveError::Unbalanced);
+        };
+        self.current = parent;
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Result<Vec<ClipMask>, ClipResolveError> {
+        if self.unbalanced || !self.ancestors.is_empty() {
+            return Err(ClipResolveError::Unbalanced);
+        }
+        Ok(self.masks)
+    }
+}
+
 fn float_edge(value: f32, maximum: u32) -> u32 {
     value.clamp(0.0, maximum as f32) as u32
 }
@@ -135,60 +196,107 @@ fn float_edge(value: f32, maximum: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        canvas::DrawList,
-        offscreen::OffscreenSurface,
-        shapes::{rect::DrawRectExt, round::Round},
-    };
+    use crate::{canvas::DrawList, offscreen::OffscreenSurface, shapes::rect::DrawRectExt};
+
+    fn rounded(radius: f32) -> Round {
+        Round {
+            lt: radius,
+            rt: radius,
+            rb: radius,
+            lb: radius,
+        }
+    }
 
     #[test]
-    fn validates_balanced_and_unbalanced_command_lists() {
-        let clip = Rect::new(0.0, 0.0, 10.0, 10.0);
-        assert!(commands_are_balanced(&[
-            DrawCommand::push_clip(clip, Round::default()),
-            DrawCommand::pop_clip(),
-        ]));
-        assert!(!commands_are_balanced(&[DrawCommand::pop_clip()]));
-        assert!(!commands_are_balanced(&[DrawCommand::push_clip(
-            clip,
-            Round::default()
-        )]));
+    fn detects_clip_stack_underflow_and_unclosed_scopes() {
+        let mut underflow = ClipResolver::new([100, 100]);
+        assert_eq!(underflow.pop(), Err(ClipResolveError::Unbalanced));
+        assert_eq!(underflow.finish(), Err(ClipResolveError::Unbalanced));
+
+        let mut unclosed = ClipResolver::new([100, 100]);
+        unclosed.push(Rect::new(0.0, 0.0, 10.0, 10.0), Round::default());
+        assert_eq!(unclosed.finish(), Err(ClipResolveError::Unbalanced));
+
+        let mut balanced = ClipResolver::new([100, 100]);
+        balanced.push(Rect::new(0.0, 0.0, 10.0, 10.0), Round::default());
+        assert_eq!(balanced.pop(), Ok(()));
+        assert_eq!(balanced.finish(), Ok(Vec::new()));
     }
 
     #[test]
     fn nested_clips_intersect_and_restore() {
-        let mut clips = ClipStack::new([100, 100]);
+        let mut clips = ClipResolver::new([100, 100]);
 
-        clips.push(Rect::new(10.0, 10.0, 50.0, 50.0));
-        assert_eq!(clips.active(), ScissorRect::new(10, 10, 50, 50));
+        clips.push(Rect::new(10.0, 10.0, 50.0, 50.0), Round::default());
+        assert_eq!(clips.current().scissor, ScissorRect::new(10, 10, 50, 50));
 
-        clips.push(Rect::new(40.0, 0.0, 50.0, 30.0));
-        assert_eq!(clips.active(), ScissorRect::new(40, 10, 20, 20));
+        clips.push(Rect::new(40.0, 0.0, 50.0, 30.0), Round::default());
+        assert_eq!(clips.current().scissor, ScissorRect::new(40, 10, 20, 20));
 
-        clips.pop();
-        assert_eq!(clips.active(), ScissorRect::new(10, 10, 50, 50));
-        clips.pop();
-        assert_eq!(clips.active(), ScissorRect::new(0, 0, 100, 100));
+        clips.pop().unwrap();
+        assert_eq!(clips.current().scissor, ScissorRect::new(10, 10, 50, 50));
+        clips.pop().unwrap();
+        assert_eq!(clips.current().scissor, ScissorRect::new(0, 0, 100, 100));
+        assert!(clips.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rounded_scope_builds_its_mask_range_once_and_reuses_it() {
+        let mut clips = ClipResolver::new([100, 100]);
+        clips.push(Rect::new(10.0, 10.0, 80.0, 80.0), rounded(8.0));
+
+        let first_draw_clip = clips.current();
+        let second_draw_clip = clips.current();
+        assert_eq!(first_draw_clip, second_draw_clip);
+        assert_eq!(first_draw_clip.masks, ClipMaskRange { start: 0, count: 1 });
+        assert_eq!(clips.masks.len(), 1);
+
+        clips.push(Rect::new(20.0, 20.0, 60.0, 60.0), Round::default());
+        assert_eq!(clips.current().masks, first_draw_clip.masks);
+        assert_eq!(clips.masks.len(), 1);
+        clips.pop().unwrap();
+        clips.pop().unwrap();
+
+        assert_eq!(clips.finish().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn nested_rounded_scope_copies_parent_into_one_contiguous_range() {
+        let mut clips = ClipResolver::new([100, 100]);
+        clips.push(Rect::new(0.0, 0.0, 80.0, 80.0), rounded(8.0));
+        let parent = clips.current();
+        clips.push(Rect::new(10.0, 10.0, 40.0, 40.0), rounded(4.0));
+        let child = clips.current();
+
+        assert_eq!(parent.masks, ClipMaskRange { start: 0, count: 1 });
+        assert_eq!(child.masks, ClipMaskRange { start: 1, count: 2 });
+
+        clips.pop().unwrap();
+        assert_eq!(clips.current(), parent);
+        clips.pop().unwrap();
+        let masks = clips.finish().unwrap();
+        assert_eq!(masks.len(), 3);
+        assert_eq!(masks[0], masks[1]);
+        assert_ne!(masks[1], masks[2]);
     }
 
     #[test]
     fn fractional_clip_edges_cover_partial_pixels() {
-        let mut clips = ClipStack::new([100, 100]);
+        let mut clips = ClipResolver::new([100, 100]);
+        clips.push(Rect::new(10.25, 20.75, 5.5, 6.5), Round::default());
 
-        clips.push(Rect::new(10.25, 20.75, 5.5, 6.5));
-
-        assert_eq!(clips.active(), ScissorRect::new(10, 20, 6, 8));
+        assert_eq!(clips.current().scissor, ScissorRect::new(10, 20, 6, 8));
     }
 
     #[test]
     fn invalid_or_disjoint_clip_is_empty() {
-        let mut invalid = ClipStack::new([100, 100]);
-        invalid.push(Rect::new(f32::NAN, 0.0, 10.0, 10.0));
-        assert!(invalid.active().is_empty());
+        let mut invalid = ClipResolver::new([100, 100]);
+        invalid.push(Rect::new(f32::NAN, 0.0, 10.0, 10.0), Round::default());
+        assert!(invalid.current().scissor.is_empty());
 
-        let mut disjoint = ClipStack::new([100, 100]);
-        disjoint.push(Rect::new(200.0, 200.0, 10.0, 10.0));
-        assert!(disjoint.active().is_empty());
+        let mut disjoint = ClipResolver::new([100, 100]);
+        disjoint.push(Rect::new(200.0, 200.0, 10.0, 10.0), Round::default());
+        assert!(disjoint.current().scissor.is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -1176,6 +1176,7 @@ dependencies = [
  "bytemuck",
  "glyphon",
  "image",
+ "naga",
  "thiserror",
  "tokio",
  "wgpu",

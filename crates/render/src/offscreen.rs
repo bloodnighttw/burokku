@@ -180,7 +180,23 @@ const fn align_to(value: u32, alignment: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shapes::rect::{DrawRectExt, Rect};
+    use crate::{
+        shapes::rect::{DrawRectExt, Rect},
+        wgsl::{WgslBackdrop, WgslRaster},
+    };
+
+    const SOLID_RASTER: &str = r#"
+fn raster_main(_input: WgslInput, params: array<vec4<f32>, 1>) -> vec4<f32> {
+    return params[0];
+}
+"#;
+
+    const INVERT_TINT_BACKDROP: &str = r#"
+fn backdrop_main(input: WgslInput, params: array<vec4<f32>, 1>) -> vec4<f32> {
+    let prior = sample_backdrop(input.screen_uv);
+    return vec4<f32>((vec3<f32>(1.0) - prior.rgb) * params[0].rgb, prior.a);
+}
+"#;
 
     #[tokio::test]
     async fn empty_frame_still_clears_and_resolves_the_output() {
@@ -216,5 +232,104 @@ mod tests {
         assert!(second_pixels
             .chunks_exact(4)
             .all(|pixel| pixel == [0, 0, 255, 255]));
+    }
+
+    #[tokio::test]
+    async fn wgsl_raster_preserves_interleaved_draw_order() {
+        let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping WGSL raster test: no WebGPU adapter available");
+            return;
+        };
+        let shader = WgslRaster::<1>::new("solid raster test", SOLID_RASTER).unwrap();
+        let mut draws = DrawList::new();
+        draws.draw_rect(Rect::new(0.0, 0.0, 16.0, 16.0), wgpu::Color::RED);
+        shader.draw(
+            &mut draws,
+            Rect::new(2.0, 2.0, 12.0, 12.0),
+            [[0.0, 0.0, 1.0, 1.0]],
+        );
+        draws.draw_rect(Rect::new(4.0, 4.0, 8.0, 8.0), wgpu::Color::GREEN);
+        shader.draw(
+            &mut draws,
+            Rect::new(6.0, 6.0, 4.0, 4.0),
+            [[1.0, 1.0, 1.0, 1.0]],
+        );
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLACK).await;
+
+        assert_eq!(surface.pixel(&pixels, 1, 1), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 3, 3), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 5, 5), [0, 255, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 7, 7), [255, 255, 255, 255]);
+    }
+
+    #[tokio::test]
+    async fn backdrop_reads_the_scene_and_later_raster_stays_on_top() {
+        let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping WGSL backdrop test: no WebGPU adapter available");
+            return;
+        };
+        let effect =
+            WgslBackdrop::<1>::new("invert tint backdrop test", INVERT_TINT_BACKDROP).unwrap();
+        let mut draws = DrawList::new();
+        draws.draw_rect(Rect::new(0.0, 0.0, 8.0, 16.0), wgpu::Color::RED);
+        effect.draw(
+            &mut draws,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            [[1.0, 0.0, 1.0, 1.0]],
+        );
+        draws.draw_rect(Rect::new(4.0, 4.0, 8.0, 8.0), wgpu::Color::GREEN);
+
+        let pixels = surface.render_rgba8(&draws, wgpu::Color::BLUE).await;
+
+        assert_eq!(surface.pixel(&pixels, 2, 2), [0, 0, 255, 255]);
+        assert_eq!(surface.pixel(&pixels, 14, 2), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&pixels, 6, 6), [0, 255, 0, 255]);
+    }
+
+    #[tokio::test]
+    async fn clipped_and_consecutive_backdrops_sample_the_latest_scene() {
+        let Some(mut surface) = OffscreenSurface::new([16, 16]).await else {
+            eprintln!("skipping WGSL backdrop chain test: no WebGPU adapter available");
+            return;
+        };
+        let effect =
+            WgslBackdrop::<1>::new("invert tint backdrop chain", INVERT_TINT_BACKDROP).unwrap();
+        let mut clipped = DrawList::new();
+        clipped.draw_rect(Rect::new(0.0, 0.0, 16.0, 16.0), wgpu::Color::RED);
+        clipped.with_clip(Rect::new(4.0, 4.0, 8.0, 8.0), |draws| {
+            effect.draw(
+                draws,
+                Rect::new(0.0, 0.0, 16.0, 16.0),
+                [[1.0, 1.0, 1.0, 1.0]],
+            );
+        });
+        let clipped_pixels = surface.render_rgba8(&clipped, wgpu::Color::BLACK).await;
+        assert_eq!(surface.pixel(&clipped_pixels, 2, 2), [255, 0, 0, 255]);
+        assert_eq!(surface.pixel(&clipped_pixels, 8, 8), [0, 255, 255, 255]);
+
+        let mut chained = DrawList::new();
+        chained.draw_rect(Rect::new(0.0, 0.0, 16.0, 16.0), wgpu::Color::RED);
+        effect.draw(
+            &mut chained,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            [[1.0, 1.0, 1.0, 1.0]],
+        );
+        effect.draw(
+            &mut chained,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            [[1.0, 0.0, 1.0, 1.0]],
+        );
+        let chained_pixels = surface.render_rgba8(&chained, wgpu::Color::BLACK).await;
+        assert_eq!(surface.pixel(&chained_pixels, 8, 8), [255, 0, 0, 255]);
+
+        let mut clear_only = DrawList::new();
+        effect.draw(
+            &mut clear_only,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            [[1.0, 1.0, 1.0, 1.0]],
+        );
+        let clear_pixels = surface.render_rgba8(&clear_only, wgpu::Color::BLUE).await;
+        assert_eq!(surface.pixel(&clear_pixels, 8, 8), [255, 255, 0, 255]);
     }
 }
