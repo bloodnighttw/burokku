@@ -3,15 +3,16 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::{
+    backdrop::{BackdropDraw, BackdropPayload, BackdropRendererHandle},
     engine::{RenderEngine, RenderEngineError, RenderTarget},
+    raster::{RasterPayload, RasterRendererHandle, RendererDraw},
     shapes::{rect::Rect, round::Round, stroke::Stroke},
 };
 
 /// One backend-independent drawing operation.
 ///
-/// Commands are retained in submission order. Adding another built-in
-/// primitive means adding a variant here and teaching Canvas how to prepare
-/// and encode it.
+/// Commands are retained in submission order. Built-in geometry keeps an
+/// explicit representation while custom raster renderers use [`Self::Raster`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum DrawCommand {
     Rect {
@@ -28,6 +29,10 @@ pub enum DrawCommand {
         round: Round,
         color: wgpu::Color,
     },
+    /// A payload recorded for a typed [`RasterRendererHandle`].
+    Raster(RendererDraw),
+    /// A typed effect that samples the scene produced by earlier commands.
+    Backdrop(BackdropDraw),
 }
 
 impl DrawCommand {
@@ -68,6 +73,24 @@ impl DrawList {
     pub fn draw(&mut self, command: impl Into<DrawCommand>) -> &mut Self {
         self.commands.push(command.into());
         self
+    }
+
+    /// Records `payload` for a reusable typed raster renderer registration.
+    pub fn draw_with<P: RasterPayload>(
+        &mut self,
+        renderer: &RasterRendererHandle<P>,
+        payload: P,
+    ) -> &mut Self {
+        self.draw(renderer.command(payload))
+    }
+
+    /// Records a typed effect that samples the scene drawn so far.
+    pub fn backdrop_with<P: BackdropPayload>(
+        &mut self,
+        renderer: &BackdropRendererHandle<P>,
+        payload: P,
+    ) -> &mut Self {
+        self.draw(renderer.command(payload))
     }
 
     pub fn commands(&self) -> &[DrawCommand] {
@@ -364,7 +387,7 @@ fn acquire_frame(surface: &wgpu::Surface<'_>) -> Result<wgpu::SurfaceTexture, Ca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{clip::commands_are_balanced, offscreen::OffscreenSurface};
+    use crate::offscreen::OffscreenSurface;
 
     #[test]
     fn draw_list_retains_submission_order_without_a_gpu() {
@@ -410,7 +433,6 @@ mod tests {
                 DrawCommand::PopClip,
             ]
         );
-        assert!(commands_are_balanced(draws.commands()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

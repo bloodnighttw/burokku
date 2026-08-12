@@ -1,13 +1,48 @@
 //! Shared fill and stroke renderer for rounded rectangles.
 
+use std::{ops::Range, sync::OnceLock};
+
 use bytemuck::{Pod, Zeroable};
-use std::ops::Range;
 
 use crate::{
-    canvas::DrawCommand,
-    clip::{ClipMask, ClipStack, ScissorRect},
-    shapes::{rect::Rect, round::Round, stroke::Stroke, ShapePipeline},
+    clip::ClipMask,
+    raster::{
+        ClipMaskRange, RasterBatch, RasterCreateContext, RasterPrepareContext, RasterRenderer,
+        RasterRendererFactory, RasterRendererHandle, ResolvedRasterDraw,
+    },
+    shapes::{rect::Rect, round::Round, stroke::Stroke},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RoundedRectDraw {
+    Fill {
+        rect: Rect,
+        color: wgpu::Color,
+        round: Round,
+    },
+    Stroke {
+        stroke: Stroke,
+        color: wgpu::Color,
+        round: Round,
+    },
+}
+
+pub(crate) fn rounded_rect_handle() -> &'static RasterRendererHandle<RoundedRectDraw> {
+    static HANDLE: OnceLock<RasterRendererHandle<RoundedRectDraw>> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| RasterRendererHandle::new("rounded rectangle", RoundedRectRendererFactory))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RoundedRectRendererFactory;
+
+impl RasterRendererFactory<RoundedRectDraw> for RoundedRectRendererFactory {
+    type Renderer = RoundedRectRenderer;
+
+    fn create(&self, context: RasterCreateContext<'_>) -> Self::Renderer {
+        RoundedRectRenderer::new(context)
+    }
+}
 
 pub(crate) struct RoundedRectRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -19,16 +54,17 @@ pub(crate) struct RoundedRectRenderer {
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
     instances: Vec<RoundedRectInstance>,
-    clip_masks: Vec<ClipMask>,
-    batches: Vec<RoundedRectBatch>,
+    batches: Vec<Range<u32>>,
 }
 
 impl RoundedRectRenderer {
-    pub(crate) fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
-        sample_count: u32,
-    ) -> Self {
+    fn new(context: RasterCreateContext<'_>) -> Self {
+        let RasterCreateContext {
+            device,
+            queue: _,
+            target_format,
+            sample_count,
+        } = context;
         let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("render rounded rectangle screen uniform"),
             size: std::mem::size_of::<ScreenUniform>() as u64,
@@ -74,7 +110,7 @@ impl RoundedRectRenderer {
             immediate_size: 0,
         });
         let targets = [Some(wgpu::ColorTargetState {
-            format: surface_format,
+            format: target_format,
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
             write_mask: wgpu::ColorWrites::ALL,
         })];
@@ -115,18 +151,24 @@ impl RoundedRectRenderer {
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
-            clip_masks: Vec::new(),
             batches: Vec::new(),
         }
     }
+}
 
-    pub(crate) fn prepare(
+impl RasterRenderer<RoundedRectDraw> for RoundedRectRenderer {
+    fn prepare(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        commands: &[DrawCommand],
-        canvas_size: [u32; 2],
+        context: RasterPrepareContext<'_>,
+        draws: &[ResolvedRasterDraw<'_, RoundedRectDraw>],
+        batches: &[RasterBatch],
     ) {
+        let RasterPrepareContext {
+            device,
+            queue,
+            canvas_size,
+            clip_masks,
+        } = context;
         queue.write_buffer(
             &self.screen_buffer,
             0,
@@ -137,20 +179,10 @@ impl RoundedRectRenderer {
         );
 
         self.instances.clear();
-        self.clip_masks.clear();
         self.batches.clear();
-        collect_instances(
-            commands,
-            canvas_size,
-            &mut self.instances,
-            &mut self.clip_masks,
-            &mut self.batches,
-        );
-        if self.instances.is_empty() {
-            return;
-        }
+        collect_instances(draws, batches, &mut self.instances, &mut self.batches);
 
-        let required_clips = std::mem::size_of_val(self.clip_masks.as_slice()) as u64;
+        let required_clips = std::mem::size_of_val(clip_masks) as u64;
         if required_clips > self.clip_capacity {
             self.clip_capacity = required_clips.next_power_of_two();
             self.clip_buffer = create_clip_buffer(device, self.clip_capacity);
@@ -161,13 +193,17 @@ impl RoundedRectRenderer {
                 &self.clip_buffer,
             );
         }
-        if !self.clip_masks.is_empty() {
-            queue.write_buffer(&self.clip_buffer, 0, bytemuck::cast_slice(&self.clip_masks));
+        if !clip_masks.is_empty() {
+            queue.write_buffer(&self.clip_buffer, 0, bytemuck::cast_slice(clip_masks));
         }
 
-        let required = std::mem::size_of_val(self.instances.as_slice()) as u64;
-        if required > self.instance_capacity {
-            self.instance_capacity = required.next_power_of_two();
+        if self.instances.is_empty() {
+            return;
+        }
+
+        let required_instances = std::mem::size_of_val(self.instances.as_slice()) as u64;
+        if required_instances > self.instance_capacity {
+            self.instance_capacity = required_instances.next_power_of_two();
             self.instance_buffer = create_instance_buffer(device, self.instance_capacity);
         }
         queue.write_buffer(
@@ -178,134 +214,33 @@ impl RoundedRectRenderer {
     }
 
     fn draw_batch<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, batch_index: usize) {
-        let batch = &self.batches[batch_index];
+        let instances = &self.batches[batch_index];
+        if instances.is_empty() {
+            return;
+        }
+
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        pass.set_scissor_rect(
-            batch.scissor.x,
-            batch.scissor.y,
-            batch.scissor.width,
-            batch.scissor.height,
-        );
-        pass.draw(0..6, batch.instances.clone());
-    }
-}
-
-impl ShapePipeline for RoundedRectRenderer {
-    fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        commands: &[DrawCommand],
-        canvas_size: [u32; 2],
-    ) {
-        Self::prepare(self, device, queue, commands, canvas_size);
-    }
-
-    fn batch_count(&self) -> usize {
-        self.batches.len()
-    }
-
-    fn batch_order(&self, batch_index: usize) -> usize {
-        self.batches[batch_index].first_order
-    }
-
-    fn draw_batch<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, batch_index: usize) {
-        Self::draw_batch(self, pass, batch_index);
+        pass.draw(0..6, instances.clone());
     }
 }
 
 fn collect_instances(
-    commands: &[DrawCommand],
-    canvas_size: [u32; 2],
+    draws: &[ResolvedRasterDraw<'_, RoundedRectDraw>],
+    batches: &[RasterBatch],
     instances: &mut Vec<RoundedRectInstance>,
-    clip_masks: &mut Vec<ClipMask>,
-    batches: &mut Vec<RoundedRectBatch>,
+    renderer_batches: &mut Vec<Range<u32>>,
 ) {
-    let mut clips = ClipStack::new(canvas_size);
-    let mut rounded_clips = Vec::new();
-
-    for (order, command) in commands.iter().enumerate() {
-        match command {
-            DrawCommand::PushClip { rect, round } => {
-                clips.push(*rect);
-                let mask = ClipMask::new(*rect, *round);
-                rounded_clips.push(mask.is_rounded().then_some(mask));
-            }
-            DrawCommand::PopClip => {
-                clips.pop();
-                rounded_clips.pop();
-            }
-            DrawCommand::Rect { rect, color, round } => {
-                let active_clip = clips.active();
-                if rect.is_empty() || active_clip.is_empty() {
-                    continue;
-                }
-
-                let instance = RoundedRectInstance::fill(*rect, *color, *round);
-                push_instance(
-                    instance,
-                    active_clip,
-                    &rounded_clips,
-                    order,
-                    instances,
-                    clip_masks,
-                    batches,
-                );
-            }
-            DrawCommand::Stroke {
-                stroke,
-                color,
-                round,
-            } => {
-                let active_clip = clips.active();
-                if stroke.is_empty() || active_clip.is_empty() {
-                    continue;
-                }
-
-                let instance = RoundedRectInstance::stroke(*stroke, *color, *round);
-                push_instance(
-                    instance,
-                    active_clip,
-                    &rounded_clips,
-                    order,
-                    instances,
-                    clip_masks,
-                    batches,
-                );
+    for batch in batches {
+        let first_instance = instances.len() as u32;
+        for draw_index in batch.draws.clone() {
+            let draw = &draws[draw_index];
+            if let Some(instance) = RoundedRectInstance::from_draw(draw.payload, draw.clip_masks) {
+                instances.push(instance);
             }
         }
-    }
-}
-
-fn push_instance(
-    mut instance: RoundedRectInstance,
-    scissor: ScissorRect,
-    rounded_clips: &[Option<ClipMask>],
-    order: usize,
-    instances: &mut Vec<RoundedRectInstance>,
-    clip_masks: &mut Vec<ClipMask>,
-    batches: &mut Vec<RoundedRectBatch>,
-) {
-    let clip_start = clip_masks.len() as u32;
-    clip_masks.extend(rounded_clips.iter().flatten().copied());
-    instance.clip_range = [clip_start, clip_masks.len() as u32 - clip_start];
-
-    let instance_index = instances.len() as u32;
-    instances.push(instance);
-
-    match batches.last_mut() {
-        Some(batch) if batch.scissor == scissor && batch.last_order + 1 == order => {
-            batch.instances.end = instance_index + 1;
-            batch.last_order = order;
-        }
-        _ => batches.push(RoundedRectBatch {
-            scissor,
-            instances: instance_index..instance_index + 1,
-            first_order: order,
-            last_order: order,
-        }),
+        renderer_batches.push(first_instance..instances.len() as u32);
     }
 }
 
@@ -368,18 +303,30 @@ struct RoundedRectInstance {
 }
 
 impl RoundedRectInstance {
-    fn fill(rect: Rect, color: wgpu::Color, round: Round) -> Self {
-        Self::new(rect, color, round, 0.0, RectPaintKind::Fill)
-    }
-
-    fn stroke(stroke: Stroke, color: wgpu::Color, round: Round) -> Self {
-        Self::new(
-            stroke.rect(),
-            color,
-            round,
-            stroke.line_width,
-            RectPaintKind::Stroke,
-        )
+    fn from_draw(draw: &RoundedRectDraw, clip_masks: ClipMaskRange) -> Option<Self> {
+        match *draw {
+            RoundedRectDraw::Fill { rect, color, round } if !rect.is_empty() => Some(Self::new(
+                rect,
+                color,
+                round,
+                0.0,
+                RectPaintKind::Fill,
+                clip_masks,
+            )),
+            RoundedRectDraw::Stroke {
+                stroke,
+                color,
+                round,
+            } if !stroke.is_empty() => Some(Self::new(
+                stroke.rect(),
+                color,
+                round,
+                stroke.line_width,
+                RectPaintKind::Stroke,
+                clip_masks,
+            )),
+            RoundedRectDraw::Fill { .. } | RoundedRectDraw::Stroke { .. } => None,
+        }
     }
 
     fn new(
@@ -388,6 +335,7 @@ impl RoundedRectInstance {
         round: Round,
         line_width: f32,
         paint_kind: RectPaintKind,
+        clip_masks: ClipMaskRange,
     ) -> Self {
         let round = round.fit(rect.width, rect.height);
         Self {
@@ -401,7 +349,7 @@ impl RoundedRectInstance {
             round: [round.lt, round.rt, round.rb, round.lb],
             line_width,
             paint_kind: paint_kind as u32,
-            clip_range: [0; 2],
+            clip_range: clip_masks.as_array(),
         }
     }
 
@@ -429,19 +377,12 @@ enum RectPaintKind {
     Stroke = 1,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RoundedRectBatch {
-    scissor: ScissorRect,
-    instances: Range<u32>,
-    first_order: usize,
-    last_order: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
         canvas::DrawList,
-        shapes::{rect::DrawRectExt, round},
+        clip::ScissorRect,
+        shapes::rect::{DrawRectExt, Rect},
     };
 
     use super::*;
@@ -454,51 +395,59 @@ mod tests {
     }
 
     #[test]
-    fn rectangle_instance_carries_fitted_corner_radii() {
-        let instance = RoundedRectInstance::fill(
-            Rect::new(0.0, 0.0, 40.0, 20.0),
-            wgpu::Color::WHITE,
-            Round {
+    fn rectangle_instance_carries_fitted_corner_radii_and_clip_range() {
+        let draw = RoundedRectDraw::Fill {
+            rect: Rect::new(0.0, 0.0, 40.0, 20.0),
+            color: wgpu::Color::WHITE,
+            round: Round {
                 lt: 30.0,
                 rt: 30.0,
                 rb: 0.0,
                 lb: 0.0,
             },
-        );
+        };
+        let instance = RoundedRectInstance::from_draw(&draw, ClipMaskRange::new(4, 2))
+            .expect("non-empty rectangle should produce an instance");
 
         assert_eq!(instance.round, [20.0, 20.0, 0.0, 0.0]);
+        assert_eq!(instance.clip_range, [4, 2]);
     }
 
     #[test]
-    fn adjacent_fills_and_strokes_share_one_ordered_batch() {
-        let commands = [
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 20.0, 20.0),
-                wgpu::Color::RED,
-                Round::default(),
-            ),
-            DrawCommand::stroke(
-                Stroke::from_rect(Rect::new(2.0, 2.0, 16.0, 16.0), 2.0),
-                wgpu::Color::BLUE,
-                Round::default(),
-            ),
-            DrawCommand::rect(
-                Rect::new(6.0, 6.0, 8.0, 8.0),
-                wgpu::Color::GREEN,
-                Round::default(),
-            ),
+    fn typed_fills_and_strokes_preserve_batch_and_paint_order() {
+        let payloads = [
+            RoundedRectDraw::Fill {
+                rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+                color: wgpu::Color::RED,
+                round: Round::default(),
+            },
+            RoundedRectDraw::Stroke {
+                stroke: Stroke::from_rect(Rect::new(2.0, 2.0, 16.0, 16.0), 2.0),
+                color: wgpu::Color::BLUE,
+                round: Round::default(),
+            },
+            RoundedRectDraw::Fill {
+                rect: Rect::new(6.0, 6.0, 8.0, 8.0),
+                color: wgpu::Color::GREEN,
+                round: Round::default(),
+            },
         ];
+        let draws = payloads
+            .iter()
+            .enumerate()
+            .map(|(index, payload)| ResolvedRasterDraw {
+                payload,
+                clip_masks: ClipMaskRange::new(index as u32, 1),
+            })
+            .collect::<Vec<_>>();
+        let batches = [RasterBatch {
+            scissor: ScissorRect::new(0, 0, 20, 20),
+            draws: 0..3,
+        }];
         let mut instances = Vec::new();
-        let mut clip_masks = Vec::new();
-        let mut batches = Vec::new();
+        let mut renderer_batches = Vec::new();
 
-        collect_instances(
-            &commands,
-            [20, 20],
-            &mut instances,
-            &mut clip_masks,
-            &mut batches,
-        );
+        collect_instances(&draws, &batches, &mut instances, &mut renderer_batches);
 
         assert_eq!(
             instances
@@ -512,14 +461,53 @@ mod tests {
             ]
         );
         assert_eq!(
-            batches,
-            vec![RoundedRectBatch {
-                scissor: ScissorRect::new(0, 0, 20, 20),
-                instances: 0..3,
-                first_order: 0,
-                last_order: 2,
-            }]
+            instances
+                .iter()
+                .map(|instance| instance.clip_range)
+                .collect::<Vec<_>>(),
+            vec![[0, 1], [1, 1], [2, 1]]
         );
+        assert_eq!(renderer_batches, vec![0..3]);
+    }
+
+    #[test]
+    fn culled_shapes_keep_empty_renderer_batch_slots() {
+        let payloads = [
+            RoundedRectDraw::Fill {
+                rect: Rect::new(0.0, 0.0, 0.0, 20.0),
+                color: wgpu::Color::RED,
+                round: Round::default(),
+            },
+            RoundedRectDraw::Stroke {
+                stroke: Stroke::new(2.0, 2.0, 16.0, 16.0, 2.0),
+                color: wgpu::Color::BLUE,
+                round: Round::default(),
+            },
+        ];
+        let draws = payloads
+            .iter()
+            .map(|payload| ResolvedRasterDraw {
+                payload,
+                clip_masks: ClipMaskRange::new(0, 0),
+            })
+            .collect::<Vec<_>>();
+        let batches = [
+            RasterBatch {
+                scissor: ScissorRect::new(0, 0, 20, 20),
+                draws: 0..1,
+            },
+            RasterBatch {
+                scissor: ScissorRect::new(0, 0, 20, 20),
+                draws: 1..2,
+            },
+        ];
+        let mut instances = Vec::new();
+        let mut renderer_batches = Vec::new();
+
+        collect_instances(&draws, &batches, &mut instances, &mut renderer_batches);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(renderer_batches, vec![0..0, 0..1]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -576,115 +564,5 @@ mod tests {
         assert_eq!(surface.pixel(&pixels, 8, 2), [255, 0, 0, 255]);
         assert_eq!(surface.pixel(&pixels, 8, 8), [255, 0, 0, 255]);
         assert_eq!(surface.pixel(&pixels, 1, 8), [0, 0, 255, 255]);
-    }
-
-    #[test]
-    fn nested_clips_create_ordered_scissor_batches() {
-        let commands = [
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 100.0, 100.0),
-                wgpu::Color::RED,
-                round::Round::default(),
-            ),
-            DrawCommand::push_clip(Rect::new(10.0, 10.0, 50.0, 50.0), round::Round::default()),
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 100.0, 100.0),
-                wgpu::Color::GREEN,
-                round::Round::default(),
-            ),
-            DrawCommand::push_clip(Rect::new(40.0, 0.0, 50.0, 30.0), round::Round::default()),
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 100.0, 100.0),
-                wgpu::Color::BLUE,
-                round::Round::default(),
-            ),
-            DrawCommand::pop_clip(),
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 100.0, 100.0),
-                wgpu::Color::WHITE,
-                round::Round::default(),
-            ),
-            DrawCommand::pop_clip(),
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 100.0, 100.0),
-                wgpu::Color::BLACK,
-                round::Round::default(),
-            ),
-        ];
-        let mut instances = Vec::new();
-        let mut clip_masks = Vec::new();
-        let mut batches = Vec::new();
-
-        collect_instances(
-            &commands,
-            [100, 100],
-            &mut instances,
-            &mut clip_masks,
-            &mut batches,
-        );
-
-        assert_eq!(instances.len(), 5);
-        assert_eq!(
-            batches,
-            vec![
-                RoundedRectBatch {
-                    scissor: ScissorRect::new(0, 0, 100, 100),
-                    instances: 0..1,
-                    first_order: 0,
-                    last_order: 0,
-                },
-                RoundedRectBatch {
-                    scissor: ScissorRect::new(10, 10, 50, 50),
-                    instances: 1..2,
-                    first_order: 2,
-                    last_order: 2,
-                },
-                RoundedRectBatch {
-                    scissor: ScissorRect::new(40, 10, 20, 20),
-                    instances: 2..3,
-                    first_order: 4,
-                    last_order: 4,
-                },
-                RoundedRectBatch {
-                    scissor: ScissorRect::new(10, 10, 50, 50),
-                    instances: 3..4,
-                    first_order: 6,
-                    last_order: 6,
-                },
-                RoundedRectBatch {
-                    scissor: ScissorRect::new(0, 0, 100, 100),
-                    instances: 4..5,
-                    first_order: 8,
-                    last_order: 8,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn empty_nested_clip_discards_its_rectangles() {
-        let commands = [
-            DrawCommand::push_clip(Rect::new(200.0, 200.0, 10.0, 10.0), round::Round::default()),
-            DrawCommand::rect(
-                Rect::new(0.0, 0.0, 100.0, 100.0),
-                wgpu::Color::RED,
-                round::Round::default(),
-            ),
-            DrawCommand::pop_clip(),
-        ];
-        let mut instances = Vec::new();
-        let mut clip_masks = Vec::new();
-        let mut batches = Vec::new();
-
-        collect_instances(
-            &commands,
-            [100, 100],
-            &mut instances,
-            &mut clip_masks,
-            &mut batches,
-        );
-
-        assert!(instances.is_empty());
-        assert!(batches.is_empty());
     }
 }
