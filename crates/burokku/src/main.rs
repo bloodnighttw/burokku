@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
 use std::error::Error;
-use vello;
 
 use runtime::{
     plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
