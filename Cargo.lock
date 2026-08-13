@@ -2293,6 +2293,7 @@ name = "vello-shapes"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "pollster",
  "vello",
  "winit",
