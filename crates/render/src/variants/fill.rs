@@ -284,8 +284,7 @@ mod tests {
         {
             Ok(adapter) => adapter,
             Err(error) => {
-                eprintln!("skipping offscreen fill test: no WebGPU adapter available: {error}");
-                return;
+                panic!("skipping offscreen fill test: no WebGPU adapter available: {error}");
             }
         };
         let Ok((device, queue)) = adapter
@@ -295,8 +294,7 @@ mod tests {
             })
             .await
         else {
-            eprintln!("skipping offscreen fill test: WebGPU device creation failed");
-            return;
+            panic!("skipping offscreen fill test: WebGPU device creation failed");
         };
         let engine = Engine::new(&device, &queue);
         let mut canvas = OffscreenCanvas::new(engine, 8, 8).unwrap();
