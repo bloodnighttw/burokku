@@ -347,10 +347,12 @@ fn encode_draw_commands(
     validate_clip_stack(commands)?;
     engine.prepare_fill(target_format, commands, canvas_size);
     engine.prepare_clip(target_format, commands, canvas_size);
+    engine.prepare_stroke(target_format, commands, canvas_size);
 
     let mut encoder = engine.create_command_encoder(Some("render canvas encoder"));
     let fill_renderer = engine.fill_renderer();
     let clip_renderer = engine.clip_renderer();
+    let stroke_renderer = engine.stroke_renderer();
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("render canvas pass"),
@@ -393,17 +395,12 @@ fn encode_draw_commands(
                 }
                 DrawCommand::Stroke { .. } => {
                     pass.set_stencil_reference(clip_depth);
-                    draw_stroke(&mut pass);
+                    stroke_renderer.draw_command(&mut pass, command_index);
                 }
             }
         }
     }
     Ok(encoder.finish())
-}
-
-fn draw_stroke(_pass: &mut wgpu::RenderPass<'_>) {
-    // The stroke pipeline is installed here once `DrawCommand::Stroke` carries
-    // a stroke payload.
 }
 
 fn validate_size(width: u32, height: u32) -> Result<(), CanvasError> {

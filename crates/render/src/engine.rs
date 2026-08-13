@@ -2,7 +2,7 @@
 
 use crate::{
     canvas::DrawCommand,
-    variants::{clip::ClipRenderer, fill::FillRenderer},
+    variants::{clip::ClipRenderer, fill::FillRenderer, stroke::StrokeRenderer},
 };
 
 /// Persistent GPU state shared by canvas drawing code.
@@ -14,6 +14,7 @@ pub struct Engine {
     queue: wgpu::Queue,
     clip_renderer: Option<(wgpu::TextureFormat, ClipRenderer)>,
     fill_renderer: Option<(wgpu::TextureFormat, FillRenderer)>,
+    stroke_renderer: Option<(wgpu::TextureFormat, StrokeRenderer)>,
 }
 
 impl Engine {
@@ -25,6 +26,7 @@ impl Engine {
             queue: queue.clone(),
             clip_renderer: None,
             fill_renderer: None,
+            stroke_renderer: None,
         }
     }
 
@@ -93,6 +95,30 @@ impl Engine {
             .prepare(&self.device, &self.queue, commands, canvas_size);
     }
 
+    pub(crate) fn prepare_stroke(
+        &mut self,
+        target_format: wgpu::TextureFormat,
+        commands: &[DrawCommand],
+        canvas_size: [u32; 2],
+    ) {
+        let renderer_matches_format = self
+            .stroke_renderer
+            .as_ref()
+            .is_some_and(|(format, _)| *format == target_format);
+        if !renderer_matches_format {
+            self.stroke_renderer = Some((
+                target_format,
+                StrokeRenderer::new(&self.device, target_format),
+            ));
+        }
+
+        self.stroke_renderer
+            .as_mut()
+            .expect("stroke renderer should be initialized")
+            .1
+            .prepare(&self.device, &self.queue, commands, canvas_size);
+    }
+
     pub(crate) fn fill_renderer(&self) -> &FillRenderer {
         &self
             .fill_renderer
@@ -106,6 +132,14 @@ impl Engine {
             .clip_renderer
             .as_ref()
             .expect("clip renderer must be prepared before drawing")
+            .1
+    }
+
+    pub(crate) fn stroke_renderer(&self) -> &StrokeRenderer {
+        &self
+            .stroke_renderer
+            .as_ref()
+            .expect("stroke renderer must be prepared before drawing")
             .1
     }
 }
