@@ -1,3 +1,7 @@
 [workspace]
-members = ["crates/runtime", "crates/render", "crates/winit", "crates/burokku"]
+members = [
+    "crates/runtime",
+    "crates/winit",
+    "crates/burokku"
+]
 resolver = "2"

@@ -19,6 +19,9 @@ A Rust workspace containing an asynchronous JavaScript runtime and the Burokku a
 pipelines, shader code, text shaping, and texture atlas, and renders into the
 surface supplied by the application:
 
+For procedural fills, scene-sampling effects, and the liquid-glass example,
+see [Custom WGSL shaders](docs/custom_shaders.md).
+
 ```rust
 use render::{
     wgpu, Border, BoxStyle, Canvas, Color, CornerRadius, Outline, Rect,
