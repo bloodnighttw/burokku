@@ -4,39 +4,15 @@ use std::error::Error;
 
 use runtime::{
     plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
-    Runtime,
+    DualRuntime,
 };
 
 mod ui;
 
-const DEFAULT_SCRIPT: &str = r##"
-const card = document.createElement("div");
-Object.assign(card.style, {
-    display: "flex",
-    flexDirection: "column",
-    width: "360px",
-    margin: "32px",
-    padding: "24px",
-    gap: "12px",
-    backgroundColor: "#f5f7fa",
-    borderColor: "#cbd2dc",
-    borderWidth: "1px",
-    borderRadius: "16px",
-});
+const MAIN_SCRIPT: &str = r#"console.log("Hello, world from the main runtime!");"#;
+const BACKGROUND_SCRIPT: &str = r#"console.log("Hello, world from the background runtime!");"#;
 
-const title = document.createElement("span");
-Object.assign(title.style, { color: "#18202b", fontSize: "28px", lineHeight: "34px", fontWeight: "700" });
-title.textContent = "Burokku DOM";
-
-const detail = document.createElement("span");
-Object.assign(detail.style, { color: "#526071", fontSize: "16px", lineHeight: "24px" });
-detail.textContent = "Solid and React can mutate this native tree with familiar DOM operations.";
-
-card.append(title, detail);
-document.body.appendChild(card);
-"##;
-
-#[tokio::main(flavor = "multi_thread")]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
@@ -49,24 +25,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let source = match script_path {
         Some(path) => tokio::fs::read_to_string(path).await?,
-        None => DEFAULT_SCRIPT.into(),
+        None => BACKGROUND_SCRIPT.into(),
     };
-    let js_task = tokio::spawn(run_javascript(source));
-
-    let js_result = js_task.await?;
-
-    js_result.map_err(|error| std::io::Error::other(error.to_string()))?;
+    run_javascript(source).await?;
     Ok(())
 }
 
-async fn run_javascript(source: String) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let runtime = Runtime::builder()
-        .plugin(ConsolePlugin)
-        .plugin(JsonPlugin)
-        .plugin(TimersPlugin)
+async fn run_javascript(source: String) -> runtime::Result<()> {
+    let (runtime, main_driver) = DualRuntime::builder()
+        .main_plugin(ConsolePlugin)
+        .background_plugin(ConsolePlugin)
+        .background_plugin(JsonPlugin)
+        .background_plugin(TimersPlugin)
         .build()
         .await?;
-    runtime.eval::<()>(source).await?;
 
-    Ok(())
+    let application = async move {
+        let (main_result, background_result) = tokio::join!(
+            runtime.main().eval::<()>(MAIN_SCRIPT),
+            runtime.background().eval::<()>(source),
+        );
+        let shutdown_result = runtime.shutdown().await;
+
+        main_result?;
+        background_result?;
+        shutdown_result
+    };
+
+    let ((), result) = tokio::join!(main_driver.run(), application);
+    result
 }
