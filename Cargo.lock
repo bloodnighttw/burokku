@@ -108,6 +108,7 @@ dependencies = [
  "burokku-winit",
  "png",
  "runtime",
+ "slotmap",
  "taffy",
  "thiserror",
  "tokio",
