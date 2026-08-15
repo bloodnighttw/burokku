@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use self::styles::{flex::FlexStyle, grid::GridStyle};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
@@ -7,7 +9,7 @@ mod publication;
 
 pub use iter::ElementsIter;
 #[allow(unused_imports)]
-pub use publication::{ BtsDom, CommitError, DomSnapshot, SharedDom, StagingDomMut};
+pub use publication::{BtsDom, CommitError, DomSnapshot, SharedDom, StagingDomMut};
 pub mod styles;
 
 new_key_type! {
@@ -83,6 +85,8 @@ pub struct Node {
     element: Elements,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
+    attributes: BTreeMap<String, String>,
+    styles: BTreeMap<String, String>,
     revisions: NodeRevisions,
 }
 
@@ -97,6 +101,14 @@ impl Node {
 
     pub fn children(&self) -> &[NodeId] {
         &self.children
+    }
+
+    pub fn attributes(&self) -> &BTreeMap<String, String> {
+        &self.attributes
+    }
+
+    pub fn styles(&self) -> &BTreeMap<String, String> {
+        &self.styles
     }
 
     pub fn revisions(&self) -> NodeRevisions {
@@ -130,6 +142,8 @@ impl Dom {
             element: Elements::App,
             parent: None,
             children: Vec::new(),
+            attributes: BTreeMap::new(),
+            styles: BTreeMap::new(),
             revisions: NodeRevisions::default(),
         });
 
@@ -160,6 +174,14 @@ impl Dom {
         self.node(id).map(Node::element)
     }
 
+    pub fn attribute(&self, id: NodeId, name: &str) -> Option<&str> {
+        self.node(id)?.attributes.get(name).map(String::as_str)
+    }
+
+    pub fn style(&self, id: NodeId, name: &str) -> Option<&str> {
+        self.node(id)?.styles.get(name).map(String::as_str)
+    }
+
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).and_then(Node::parent)
     }
@@ -174,10 +196,62 @@ impl Dom {
             element,
             parent: None,
             children: Vec::new(),
+            attributes: BTreeMap::new(),
+            styles: BTreeMap::new(),
             revisions: NodeRevisions::default(),
         });
         self.bump_revision();
         id
+    }
+
+    /// Sets an element attribute, returning without a revision change when the
+    /// value is already present.
+    pub fn set_attribute(
+        &mut self,
+        id: NodeId,
+        name: String,
+        value: String,
+    ) -> Result<(), DomError> {
+        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        if node.attributes.get(&name) == Some(&value) {
+            return Ok(());
+        }
+        node.attributes.insert(name, value);
+        bump(&mut node.revisions.content);
+        self.bump_revision();
+        Ok(())
+    }
+
+    pub fn remove_attribute(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
+        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        let removed = node.attributes.remove(name);
+        if removed.is_some() {
+            bump(&mut node.revisions.content);
+            self.bump_revision();
+        }
+        Ok(removed)
+    }
+
+    /// Stores a normalized CSS property in authoritative DOM data.
+    pub fn set_style(&mut self, id: NodeId, name: String, value: String) -> Result<(), DomError> {
+        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        if node.styles.get(&name) == Some(&value) {
+            return Ok(());
+        }
+        node.styles.insert(name, value);
+        bump(&mut node.revisions.style);
+        self.bump_revision();
+        Ok(())
+    }
+
+    pub fn remove_style(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
+        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        let removed = node.styles.remove(name);
+        if removed.is_some() {
+            bump(&mut node.revisions.style);
+            self.bump_revision();
+        }
+        Ok(removed)
     }
 
     /// Replaces an element's data without changing its stable handle.

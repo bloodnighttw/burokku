@@ -64,6 +64,7 @@ impl SharedDom {
     }
 
     /// Subscribe to coalescing redraw/commit notifications.
+    #[allow(dead_code)] // Consumed by tests now and the MTS frame loop in Phase 3.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.commits.subscribe()
     }
@@ -133,10 +134,12 @@ impl BtsDom {
         }
     }
 
+    #[allow(dead_code)] // Useful to diagnostics and publication tests.
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
+    #[allow(dead_code)] // Reserved for a future explicit JavaScript batch API.
     pub fn begin_batch(&mut self) -> Result<(), BatchError> {
         self.batch_depth = self
             .batch_depth
@@ -145,6 +148,7 @@ impl BtsDom {
         Ok(())
     }
 
+    #[allow(dead_code)] // Reserved for a future explicit JavaScript batch API.
     pub fn end_batch(&mut self) -> Result<(), BatchError> {
         if self.batch_depth == 0 {
             return Err(BatchError::NotInBatch);
@@ -204,6 +208,7 @@ impl Drop for StagingDomMut<'_> {
     }
 }
 
+#[allow(dead_code)] // Reserved for a future explicit JavaScript batch API.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum BatchError {
     #[error("end_batch called without a matching begin_batch")]

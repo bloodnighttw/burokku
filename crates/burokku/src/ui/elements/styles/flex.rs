@@ -27,7 +27,7 @@ pub struct FlexStyle {
 
 impl FlexStyle {
     /// Build the Taffy value consumed only by MTS computed/layout state.
-    pub fn to_taffy_style(&self) -> taffy::Style<String> {
+    pub fn to_taffy_style(self) -> taffy::Style<String> {
         taffy::Style {
             display: taffy::Display::Flex,
             flex_direction: self.direction,
