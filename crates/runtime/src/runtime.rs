@@ -87,6 +87,7 @@ impl Runtime {
         let context = AsyncContext::full(&quickjs).await?;
         let role = builder.role;
         let macrotask_capacity = builder.macrotask_capacity;
+        let plugins = builder.plugins;
 
         context
             .with(move |context| {
@@ -100,15 +101,8 @@ impl Runtime {
             .await?;
 
         let (macrotasks, control, stopped) =
-            event_loop::install(&context, macrotask_capacity).await?;
-        context
-            .with(move |context| {
-                for plugin in &builder.plugins {
-                    plugin.install(&context)?;
-                }
-                installer(&context)
-            })
-            .await?;
+            event_loop::install(&context, macrotask_capacity, plugins).await?;
+        context.with(move |context| installer(&context)).await?;
 
         let driver = RuntimeDriver {
             context: Some(context),
@@ -236,12 +230,28 @@ impl std::fmt::Debug for RuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::Runtime;
-    use crate::{MacrotaskQueue, MacrotaskQueueError, RuntimeRole};
+    use crate::{MacrotaskQueue, MacrotaskQueueError, Plugin, RuntimeRole};
     use rquickjs::{prelude::Func, Ctx};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     };
+
+    struct RecordingCheckpoint {
+        values: Arc<Mutex<Vec<i32>>>,
+    }
+
+    impl Plugin for RecordingCheckpoint {
+        fn install<'js>(&self, _context: &Ctx<'js>) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn checkpoint<'js>(&mut self, context: &Ctx<'js>) -> crate::Result<()> {
+            let value = context.globals().get("__checkpoint_value")?;
+            self.values.lock().unwrap().push(value);
+            Ok(())
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluates_javascript() {
@@ -331,6 +341,33 @@ mod tests {
             .unwrap();
 
         assert!(runtime.eval::<bool>("isMain").await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_checkpoint_runs_after_microtasks_and_failed_macrotasks() {
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::builder()
+            .plugin(RecordingCheckpoint {
+                values: values.clone(),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        runtime
+            .eval::<()>(
+                "globalThis.__checkpoint_value = 1; \
+                 Promise.resolve().then(() => __checkpoint_value = 2)",
+            )
+            .await
+            .unwrap();
+        assert_eq!(*values.lock().unwrap(), [2]);
+
+        assert!(runtime
+            .eval::<()>("globalThis.__checkpoint_value = 7; throw new Error('failed')")
+            .await
+            .is_err());
+        assert_eq!(*values.lock().unwrap(), [2, 7]);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -4,7 +4,7 @@
 //! runtime drains QuickJS's native job queue, which is where promise reactions
 //! and the rest of JavaScript's microtasks live.
 
-use crate::Result;
+use crate::{Plugin, Result};
 use rquickjs::{AsyncContext, Ctx, JsLifetime};
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -144,6 +144,7 @@ fn map_try_send_error<T>(error: mpsc::error::TrySendError<T>) -> MacrotaskQueueE
 pub(crate) async fn install(
     context: &AsyncContext,
     capacity: usize,
+    plugins: Vec<Box<dyn Plugin>>,
 ) -> Result<(MacrotaskQueue, RuntimeControl, oneshot::Receiver<()>)> {
     let (sender, receiver) = mpsc::channel(capacity);
     let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
@@ -160,11 +161,15 @@ pub(crate) async fn install(
                 context
                     .store_userdata(queue)
                     .map_err(|_| rquickjs::Error::Unknown)?;
+                for plugin in &plugins {
+                    plugin.install(&context)?;
+                }
                 context.spawn(run(
                     context.clone(),
                     receiver,
                     shutdown_receiver,
                     stopped_sender,
+                    plugins,
                 ));
                 Ok(())
             }
@@ -179,6 +184,7 @@ async fn run<'js>(
     mut tasks: Receiver<MacrotaskMessage>,
     mut control: Receiver<ShutdownRequest>,
     stopped: oneshot::Sender<()>,
+    mut plugins: Vec<Box<dyn Plugin>>,
 ) {
     loop {
         let task = tokio::select! {
@@ -208,6 +214,15 @@ async fn run<'js>(
         // the JavaScript rule that all ready microtasks run before the next
         // macrotask.
         while context.execute_pending_job() {}
+
+        for plugin in &mut plugins {
+            if let Err(error) = plugin.checkpoint(&context) {
+                eprintln!(
+                    "JavaScript checkpoint for {} failed: {error}",
+                    plugin.name()
+                );
+            }
+        }
     }
 
     let _ = stopped.send(());

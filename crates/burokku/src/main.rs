@@ -32,11 +32,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_javascript(source: String) -> runtime::Result<()> {
+    let (dom_plugin, _shared_dom) = ui::js_bridge::DomPlugin::with_new_dom();
     let (runtime, main_driver) = DualRuntime::builder()
         .main_plugin(ConsolePlugin)
         .background_plugin(ConsolePlugin)
         .background_plugin(JsonPlugin)
         .background_plugin(TimersPlugin)
+        .background_plugin(dom_plugin)
         .build()
         .await?;
 
