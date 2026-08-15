@@ -219,7 +219,7 @@ impl ComputedState {
             .is_none_or(|current| current.source_revision != snapshot.revision());
 
         if needs_rebuild {
-            let mut tree = LowLevelTree::from_snapshot(snapshot);
+            let mut tree = LayoutTree::from_snapshot(snapshot);
             tree.compute_layout(available_space);
             let hit_test = tree.build_hit_test_data(snapshot.revision());
             self.current = Some(ComputedRevision {
@@ -280,7 +280,7 @@ impl ComputedState {
 struct ComputedRevision {
     source_revision: u64,
     available_space: Size<AvailableSpace>,
-    tree: LowLevelTree,
+    tree: LayoutTree,
     hit_test: HitTestData,
 }
 
@@ -299,13 +299,13 @@ struct ComputedNode {
 /// Taffy IDs are dense indexes into `nodes`. Stable DOM IDs are kept in the
 /// reverse map and remain the only handles exposed outside computed state.
 #[derive(Debug)]
-struct LowLevelTree {
+struct LayoutTree {
     nodes: Vec<ComputedNode>,
     dom_to_taffy: HashMap<NodeId, TaffyNodeId>,
     root: TaffyNodeId,
 }
 
-impl LowLevelTree {
+impl LayoutTree {
     fn from_snapshot(snapshot: &DomSnapshot) -> Self {
         let dom = snapshot.dom();
         let mut nodes = Vec::new();
@@ -450,7 +450,7 @@ impl Iterator for ChildIter<'_> {
     }
 }
 
-impl TraversePartialTree for LowLevelTree {
+impl TraversePartialTree for LayoutTree {
     type ChildIter<'a>
         = ChildIter<'a>
     where
@@ -469,9 +469,9 @@ impl TraversePartialTree for LowLevelTree {
     }
 }
 
-impl TraverseTree for LowLevelTree {}
+impl TraverseTree for LayoutTree {}
 
-impl LayoutPartialTree for LowLevelTree {
+impl LayoutPartialTree for LayoutTree {
     type CoreContainerStyle<'a>
         = &'a Style<String>
     where
@@ -491,7 +491,7 @@ impl LayoutPartialTree for LowLevelTree {
     }
 }
 
-impl CacheTree for LowLevelTree {
+impl CacheTree for LayoutTree {
     fn cache_get(&self, node_id: TaffyNodeId, inputs: &LayoutInput) -> Option<LayoutOutput> {
         self.node(node_id).cache.get(inputs)
     }
@@ -505,7 +505,7 @@ impl CacheTree for LowLevelTree {
     }
 }
 
-impl LayoutBlockContainer for LowLevelTree {
+impl LayoutBlockContainer for LayoutTree {
     type BlockContainerStyle<'a>
         = &'a Style<String>
     where
@@ -533,7 +533,7 @@ impl LayoutBlockContainer for LowLevelTree {
     }
 }
 
-impl LayoutFlexboxContainer for LowLevelTree {
+impl LayoutFlexboxContainer for LayoutTree {
     type FlexboxContainerStyle<'a>
         = &'a Style<String>
     where
@@ -552,7 +552,7 @@ impl LayoutFlexboxContainer for LowLevelTree {
     }
 }
 
-impl LayoutGridContainer for LowLevelTree {
+impl LayoutGridContainer for LayoutTree {
     type GridContainerStyle<'a>
         = &'a Style<String>
     where
@@ -571,7 +571,7 @@ impl LayoutGridContainer for LowLevelTree {
     }
 }
 
-impl RoundTree for LowLevelTree {
+impl RoundTree for LayoutTree {
     fn get_unrounded_layout(&self, node_id: TaffyNodeId) -> Layout {
         self.node(node_id).unrounded_layout
     }
