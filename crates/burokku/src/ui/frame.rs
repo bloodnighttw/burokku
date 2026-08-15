@@ -5,12 +5,14 @@ use std::sync::{
 
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
-use vello::{
+use vello_common::{
     kurbo::{Affine, Rect},
-    peniko::{Color, Fill},
-    util::{RenderContext, RenderSurface},
-    wgpu::{CommandEncoderDescriptor, CurrentSurfaceTexture, PresentMode, TextureViewDescriptor},
-    AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene,
+    peniko::Color,
+};
+use vello_hybrid::{RenderSize, RenderTargetConfig, Renderer, Resources, Scene, TextureBindings};
+use wgpu::{
+    CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance, PresentMode, Queue, Surface,
+    SurfaceConfiguration, TextureViewDescriptor,
 };
 use winit::{
     application::ApplicationHandler, ActiveEventLoop, ControlFlow, PhysicalSize, Window,
@@ -28,7 +30,15 @@ const DEFAULT_SCALE_FACTOR: f64 = 1.0;
 #[derive(Debug, Error)]
 pub enum FrameError {
     #[error(transparent)]
-    Vello(#[from] vello::Error),
+    CreateSurface(#[from] wgpu::CreateSurfaceError),
+    #[error(transparent)]
+    RequestAdapter(#[from] wgpu::RequestAdapterError),
+    #[error(transparent)]
+    RequestDevice(#[from] wgpu::RequestDeviceError),
+    #[error(transparent)]
+    Hybrid(#[from] vello_hybrid::RenderError),
+    #[error("the physical render size {width}x{height} exceeds Vello Hybrid's u16 viewport")]
+    ViewportTooLarge { width: u32, height: u32 },
     #[error(
         "computed data revision mismatch: DOM {dom_revision}, layout {layout_revision:?}, hit testing {hit_test_revision:?}"
     )]
@@ -94,7 +104,7 @@ struct SceneState {
 impl SceneState {
     fn new() -> Self {
         Self {
-            scene: Scene::new(),
+            scene: Scene::new(1, 1),
             source_revision: None,
         }
     }
@@ -103,6 +113,8 @@ impl SceneState {
         &mut self,
         snapshot: &DomSnapshot,
         computed: &ComputedState,
+        physical_size: PhysicalSize<u32>,
+        logical_size: taffy::geometry::Size<f32>,
         scale_factor: f64,
     ) -> Result<(), FrameError> {
         let hit_test = computed.hit_test_data();
@@ -118,8 +130,26 @@ impl SceneState {
             });
         }
 
-        self.scene.reset();
-        let transform = Affine::scale(scale_factor);
+        let scene_width =
+            u16::try_from(physical_size.width).map_err(|_| FrameError::ViewportTooLarge {
+                width: physical_size.width,
+                height: physical_size.height,
+            })?;
+        let scene_height =
+            u16::try_from(physical_size.height).map_err(|_| FrameError::ViewportTooLarge {
+                width: physical_size.width,
+                height: physical_size.height,
+            })?;
+        self.scene.reset_and_resize(scene_width, scene_height);
+        self.scene.set_transform(Affine::scale(scale_factor));
+        self.scene.set_paint(Color::from_rgb8(250, 250, 250));
+        self.scene.fill_rect(&Rect::new(
+            0.0,
+            0.0,
+            logical_size.width as f64,
+            logical_size.height as f64,
+        ));
+
         for entry in hit_test
             .expect("the revision check requires hit-test data")
             .entries()
@@ -144,8 +174,8 @@ impl SceneState {
                 (entry.location.x + entry.size.width) as f64,
                 (entry.location.y + entry.size.height) as f64,
             );
-            self.scene
-                .fill(Fill::NonZero, transform, color, None, &rect);
+            self.scene.set_paint(color);
+            self.scene.fill_rect(&rect);
         }
         self.source_revision = Some(snapshot.revision());
         Ok(())
@@ -173,9 +203,13 @@ fn element_color(element: &Elements) -> Option<Color> {
 
 /// Window surface, Vello renderer, and computed state owned by MTS.
 pub struct FrameRenderer {
-    context: RenderContext,
-    surface: RenderSurface<'static>,
+    _instance: Instance,
+    surface: Surface<'static>,
+    surface_config: SurfaceConfiguration,
+    device: Device,
+    queue: Queue,
     renderer: Renderer,
+    resources: Resources,
     computed: ComputedState,
     scene: SceneState,
 }
@@ -183,23 +217,53 @@ pub struct FrameRenderer {
 impl FrameRenderer {
     pub async fn new(window: Arc<Window>) -> Result<Self, FrameError> {
         let size = nonzero_size(window.inner_size());
-        let mut context = RenderContext::new();
-        let surface = context
-            .create_surface(window, size.width, size.height, PresentMode::AutoVsync)
+        let instance = Instance::default();
+        let surface = instance.create_surface(window)?;
+        let adapter =
+            wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface)).await?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("burokku-vello-hybrid-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await?;
-        let device = &context.devices[surface.dev_id].device;
-        let renderer = Renderer::new(
-            device,
-            RendererOptions {
-                antialiasing_support: AaSupport::area_only(),
-                ..RendererOptions::default()
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .unwrap_or(capabilities.formats[0]);
+        let surface_config = SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width,
+            height: size.height,
+            present_mode: PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        surface.configure(&device, &surface_config);
+        let (renderer, resources) = Renderer::new(
+            &device,
+            &RenderTargetConfig {
+                format,
+                width: size.width,
+                height: size.height,
             },
-        )?;
+        );
 
         Ok(Self {
-            context,
+            _instance: instance,
             surface,
+            surface_config,
+            device,
+            queue,
             renderer,
+            resources,
             computed: ComputedState::new(),
             scene: SceneState::new(),
         })
@@ -209,11 +273,12 @@ impl FrameRenderer {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        if self.surface.config.width == size.width && self.surface.config.height == size.height {
+        if self.surface_config.width == size.width && self.surface_config.height == size.height {
             return;
         }
-        self.context
-            .resize_surface(&mut self.surface, size.width, size.height);
+        self.surface_config.width = size.width;
+        self.surface_config.height = size.height;
+        self.surface.configure(&self.device, &self.surface_config);
     }
 
     fn render_frame(
@@ -227,13 +292,13 @@ impl FrameRenderer {
         }
         self.resize(physical_size);
 
-        let surface_texture = match self.surface.surface.get_current_texture() {
+        let surface_texture = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => (texture, false),
             CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             CurrentSurfaceTexture::Timeout => return Ok(FrameOutcome::Retry),
             CurrentSurfaceTexture::Occluded => return Ok(FrameOutcome::Occluded),
             CurrentSurfaceTexture::Outdated => {
-                self.context.configure_surface(&self.surface);
+                self.surface.configure(&self.device, &self.surface_config);
                 return Ok(FrameOutcome::Retry);
             }
             CurrentSurfaceTexture::Lost => return Err(FrameError::SurfaceLost),
@@ -245,48 +310,51 @@ impl FrameRenderer {
         let scale_factor = valid_scale_factor(window.scale_factor());
         let logical_width = physical_size.width as f32 / scale_factor as f32;
         let logical_height = physical_size.height as f32 / scale_factor as f32;
+        let logical_size = taffy::geometry::Size {
+            width: logical_width,
+            height: logical_height,
+        };
         self.computed.compute_layout(
             snapshot,
             taffy::geometry::Size {
-                width: taffy::AvailableSpace::Definite(logical_width),
-                height: taffy::AvailableSpace::Definite(logical_height),
+                width: taffy::AvailableSpace::Definite(logical_size.width),
+                height: taffy::AvailableSpace::Definite(logical_size.height),
             },
         );
-        self.scene.rebuild(snapshot, &self.computed, scale_factor)?;
-
-        let device_handle = &self.context.devices[self.surface.dev_id];
-        self.renderer.render_to_texture(
-            &device_handle.device,
-            &device_handle.queue,
-            &self.scene.scene,
-            &self.surface.target_view,
-            &RenderParams {
-                base_color: Color::from_rgb8(250, 250, 250),
-                width: physical_size.width,
-                height: physical_size.height,
-                antialiasing_method: AaConfig::Area,
-            },
+        self.scene.rebuild(
+            snapshot,
+            &self.computed,
+            physical_size,
+            logical_size,
+            scale_factor,
         )?;
 
         let frame = surface_texture.0;
         let frame_view = frame.texture.create_view(&TextureViewDescriptor::default());
-        let mut encoder = device_handle
+        let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("burokku-vello-surface-blit"),
+                label: Some("burokku-vello-hybrid-render"),
             });
-        self.surface.blitter.copy(
-            &device_handle.device,
+        self.renderer.render(
+            &self.scene.scene,
+            &mut self.resources,
+            &self.device,
+            &self.queue,
             &mut encoder,
-            &self.surface.target_view,
+            &RenderSize {
+                width: physical_size.width,
+                height: physical_size.height,
+            },
             &frame_view,
-        );
-        device_handle.queue.submit([encoder.finish()]);
+            &TextureBindings::new(),
+        )?;
+        self.queue.submit([encoder.finish()]);
         window.pre_present_notify();
         frame.present();
 
         if surface_texture.1 {
-            self.context.configure_surface(&self.surface);
+            self.surface.configure(&self.device, &self.surface_config);
         }
         Ok(FrameOutcome::Presented(snapshot.revision()))
     }
@@ -296,7 +364,7 @@ impl std::fmt::Debug for FrameRenderer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("FrameRenderer")
-            .field("surface", &self.surface)
+            .field("surface_config", &self.surface_config)
             .field("computed_revision", &self.computed.source_revision())
             .field("scene_revision", &self.scene.source_revision)
             .finish_non_exhaustive()
@@ -506,8 +574,15 @@ mod tests {
             },
         );
         let mut scene = SceneState::new();
+        let physical_size = PhysicalSize::new(1600, 1200);
+        let logical_size = taffy::geometry::Size {
+            width: 800.0,
+            height: 600.0,
+        };
 
-        scene.rebuild(&snapshot, &computed, 2.0).unwrap();
+        scene
+            .rebuild(&snapshot, &computed, physical_size, logical_size, 2.0)
+            .unwrap();
 
         assert_eq!(scene.source_revision, Some(snapshot.revision()));
         assert_eq!(
@@ -519,7 +594,7 @@ mod tests {
         owner.checkpoint().unwrap();
         let newer = shared.load();
         assert!(matches!(
-            scene.rebuild(&newer, &computed, 2.0),
+            scene.rebuild(&newer, &computed, physical_size, logical_size, 2.0),
             Err(FrameError::RevisionMismatch { .. })
         ));
         assert_eq!(
