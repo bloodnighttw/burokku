@@ -4,6 +4,7 @@ use super::elements::Elements;
 ///
 /// The returned value belongs to MTS computed state and is never published back
 /// through the shared DOM snapshot.
+#[allow(dead_code)] // Used when Phase 3 wires MTS computed state into the app.
 pub fn taffy_style_for(element: &Elements) -> taffy::Style<String> {
     match element {
         Elements::Flex { style } => style.to_taffy_style(),
