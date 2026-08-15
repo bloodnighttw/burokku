@@ -24,15 +24,21 @@ new_key_type! {
 /// handles instead of references into a recursively owned tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Elements {
+    // for <app> tag
     App,
+    // for <window> tag
     Window,
+    // for <div> tag
     Div,
+    // for <flex> tag
     Flex {
         style: Box<FlexStyle>,
     },
+    // for <grid> tag
     Grid {
         style: Box<GridStyle>,
     },
+    // for <text> tag
     Text,
     /// Internal element used for text content. It is not intended to be
     /// constructed directly by application code.
@@ -41,6 +47,7 @@ pub enum Elements {
     },
 }
 
+/// Returns true if `child` is a valid child of `self`.
 impl Elements {
     fn accepts(&self, child: &Self) -> bool {
         match self {
