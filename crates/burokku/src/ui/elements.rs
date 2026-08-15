@@ -3,8 +3,11 @@ use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
 mod iter;
+mod publication;
 
 pub use iter::ElementsIter;
+#[allow(unused_imports)]
+pub use publication::{ BtsDom, CommitError, DomSnapshot, SharedDom, StagingDomMut};
 pub mod styles;
 
 new_key_type! {
