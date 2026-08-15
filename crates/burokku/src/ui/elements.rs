@@ -55,12 +55,25 @@ impl Elements {
     }
 }
 
+/// Revisions for independently cached parts of a node.
+///
+/// Consumers compare these values with the revisions used to build their
+/// computed state. This allows style or content changes to be processed
+/// without treating every DOM update as a complete structural rebuild.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeRevisions {
+    pub structure: u64,
+    pub style: u64,
+    pub content: u64,
+}
+
 /// An arena entry containing an element and its tree relationships.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
     element: Elements,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
+    revisions: NodeRevisions,
 }
 
 impl Node {
@@ -74,6 +87,10 @@ impl Node {
 
     pub fn children(&self) -> &[NodeId] {
         &self.children
+    }
+
+    pub fn revisions(&self) -> NodeRevisions {
+        self.revisions
     }
 }
 
@@ -103,6 +120,7 @@ impl Dom {
             element: Elements::App,
             parent: None,
             children: Vec::new(),
+            revisions: NodeRevisions::default(),
         });
 
         Self {
@@ -146,6 +164,7 @@ impl Dom {
             element,
             parent: None,
             children: Vec::new(),
+            revisions: NodeRevisions::default(),
         });
         self.bump_revision();
         id
@@ -181,7 +200,23 @@ impl Dom {
             return Err(DomError::AppAlreadyHasWindow);
         }
 
-        self.nodes[id].element = element;
+        let revision_kind = ElementRevisionKind::between(&node.element, &element);
+        if revision_kind == ElementRevisionKind::None {
+            return Ok(());
+        }
+
+        let node = &mut self.nodes[id];
+        node.element = element;
+        match revision_kind {
+            ElementRevisionKind::None => unreachable!("no-op replacements return above"),
+            ElementRevisionKind::Style => bump(&mut node.revisions.style),
+            ElementRevisionKind::Content => bump(&mut node.revisions.content),
+            ElementRevisionKind::All => {
+                bump(&mut node.revisions.structure);
+                bump(&mut node.revisions.style);
+                bump(&mut node.revisions.content);
+            }
+        }
         self.bump_revision();
         Ok(())
     }
@@ -241,13 +276,21 @@ impl Dom {
             return Err(DomError::AppAlreadyHasWindow);
         }
 
-        if let Some(old_parent) = child_node.parent {
+        let old_parent = child_node.parent;
+        if let Some(old_parent) = old_parent {
             self.nodes[old_parent]
                 .children
                 .retain(|existing| *existing != child);
+            bump(&mut self.nodes[old_parent].revisions.structure);
         }
         self.nodes[parent].children.insert(index, child);
-        self.nodes[child].parent = Some(parent);
+        if old_parent != Some(parent) {
+            self.nodes[child].parent = Some(parent);
+            bump(&mut self.nodes[child].revisions.structure);
+        }
+        if old_parent != Some(parent) {
+            bump(&mut self.nodes[parent].revisions.structure);
+        }
         self.bump_revision();
         Ok(())
     }
@@ -260,7 +303,9 @@ impl Dom {
         let parent = self.node(id).ok_or(DomError::NodeNotFound(id))?.parent;
         if let Some(parent) = parent {
             self.nodes[parent].children.retain(|child| *child != id);
+            bump(&mut self.nodes[parent].revisions.structure);
             self.nodes[id].parent = None;
+            bump(&mut self.nodes[id].revisions.structure);
             self.bump_revision();
         }
         Ok(())
@@ -274,6 +319,7 @@ impl Dom {
         let parent = self.node(id).ok_or(DomError::NodeNotFound(id))?.parent;
         if let Some(parent) = parent {
             self.nodes[parent].children.retain(|child| *child != id);
+            bump(&mut self.nodes[parent].revisions.structure);
         }
 
         let removed = self
@@ -308,8 +354,37 @@ impl Dom {
     }
 
     fn bump_revision(&mut self) {
-        self.revision = self.revision.saturating_add(1);
+        bump(&mut self.revision);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElementRevisionKind {
+    None,
+    Style,
+    Content,
+    All,
+}
+
+impl ElementRevisionKind {
+    fn between(current: &Elements, replacement: &Elements) -> Self {
+        if current == replacement {
+            return Self::None;
+        }
+
+        match (current, replacement) {
+            (Elements::Flex { .. }, Elements::Flex { .. })
+            | (Elements::Grid { .. }, Elements::Grid { .. }) => Self::Style,
+            (Elements::_String { .. }, Elements::_String { .. }) => Self::Content,
+            _ => Self::All,
+        }
+    }
+}
+
+fn bump(revision: &mut u64) {
+    *revision = revision
+        .checked_add(1)
+        .expect("DOM revision counter overflowed");
 }
 
 impl<'a> IntoIterator for &'a Dom {
@@ -410,6 +485,91 @@ mod tests {
         assert_eq!(dom.parent(div), Some(window));
         assert_eq!(dom.parent(text), Some(div));
         assert_eq!(dom.revision(), revision);
+    }
+
+    #[test]
+    fn tracks_style_and_content_revisions_independently() {
+        let mut dom = Dom::new();
+        let flex = dom.create(Elements::Flex {
+            style: Box::default(),
+        });
+        let string = dom.create(Elements::_String {
+            string: "before".into(),
+        });
+
+        let style = FlexStyle {
+            grow: 1.0,
+            ..FlexStyle::default()
+        };
+        dom.set_element(
+            flex,
+            Elements::Flex {
+                style: Box::new(style),
+            },
+        )
+        .unwrap();
+        dom.set_element(
+            string,
+            Elements::_String {
+                string: "after".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            dom.node(flex).unwrap().revisions(),
+            NodeRevisions {
+                style: 1,
+                ..NodeRevisions::default()
+            }
+        );
+        assert_eq!(
+            dom.node(string).unwrap().revisions(),
+            NodeRevisions {
+                content: 1,
+                ..NodeRevisions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn structural_mutations_mark_only_affected_nodes() {
+        let mut dom = Dom::new();
+        let window = dom.create(Elements::Window);
+        let first = dom.create(Elements::Div);
+        let second = dom.create(Elements::Div);
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, first).unwrap();
+        dom.append_child(window, second).unwrap();
+
+        let window_before = dom.node(window).unwrap().revisions();
+        let first_before = dom.node(first).unwrap().revisions();
+        dom.append_child(first, second).unwrap();
+
+        assert_eq!(
+            dom.node(window).unwrap().revisions().structure,
+            window_before.structure + 1
+        );
+        assert_eq!(
+            dom.node(first).unwrap().revisions().structure,
+            first_before.structure + 1
+        );
+        assert_eq!(dom.node(second).unwrap().revisions().structure, 2);
+        assert_eq!(dom.node(second).unwrap().revisions().style, 0);
+        assert_eq!(dom.node(second).unwrap().revisions().content, 0);
+    }
+
+    #[test]
+    fn no_op_replacement_does_not_advance_revisions() {
+        let mut dom = Dom::new();
+        let div = dom.create(Elements::Div);
+        let dom_revision = dom.revision();
+        let node_revisions = dom.node(div).unwrap().revisions();
+
+        dom.set_element(div, Elements::Div).unwrap();
+
+        assert_eq!(dom.revision(), dom_revision);
+        assert_eq!(dom.node(div).unwrap().revisions(), node_revisions);
     }
 
     #[test]
