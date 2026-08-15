@@ -127,7 +127,15 @@ impl SceneState {
             if !(entry.size.width > 0.0 && entry.size.height > 0.0) {
                 continue;
             }
-            let Some(color) = snapshot.dom().element(entry.node).and_then(element_color) else {
+            let Some(element) = snapshot.dom().element(entry.node) else {
+                continue;
+            };
+            let Some(color) = snapshot
+                .dom()
+                .style(entry.node, "background-color")
+                .and_then(|color| color.parse().ok())
+                .or_else(|| element_color(element))
+            else {
                 continue;
             };
             let rect = Rect::new(

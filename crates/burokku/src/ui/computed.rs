@@ -17,7 +17,7 @@ use taffy::{
     BlockContext, CacheTree,
 };
 
-use super::elements::{DomSnapshot, Elements, NodeId};
+use super::elements::{DomSnapshot, Elements, Node, NodeId};
 
 /// Convert thread-safe authoritative DOM style data into Taffy data on MTS.
 ///
@@ -40,6 +40,90 @@ pub fn taffy_style_for(element: &Elements) -> Style<String> {
             ..Style::default()
         },
     }
+}
+
+/// Apply the normalized inline style properties currently supported by the
+/// MTS layout bridge. Unsupported or invalid CSS values remain authoritative
+/// DOM data but are ignored by layout until their converter is implemented.
+fn taffy_style_for_node(node: &Node) -> Style<String> {
+    let mut style = taffy_style_for(node.element());
+    let styles = node.styles();
+
+    macro_rules! parse_property {
+        ($name:literal, $target:expr) => {
+            if let Some(value) = styles.get($name) {
+                if let Ok(value) = value.parse() {
+                    $target = value;
+                }
+            }
+        };
+    }
+
+    parse_property!("display", style.display);
+    parse_property!("width", style.size.width);
+    parse_property!("height", style.size.height);
+    parse_property!("min-width", style.min_size.width);
+    parse_property!("min-height", style.min_size.height);
+    parse_property!("max-width", style.max_size.width);
+    parse_property!("max-height", style.max_size.height);
+    parse_property!("flex-direction", style.flex_direction);
+    parse_property!("flex-wrap", style.flex_wrap);
+    parse_property!("flex-basis", style.flex_basis);
+    if let Some(value) = styles
+        .get("align-items")
+        .and_then(|value| value.parse().ok())
+    {
+        style.align_items = Some(value);
+    }
+    if let Some(value) = styles
+        .get("align-self")
+        .and_then(|value| value.parse().ok())
+    {
+        style.align_self = Some(value);
+    }
+    if let Some(value) = styles
+        .get("justify-content")
+        .and_then(|value| value.parse().ok())
+    {
+        style.justify_content = Some(value);
+    }
+
+    if let Some(value) = styles.get("flex-grow").and_then(|value| value.parse().ok()) {
+        style.flex_grow = value;
+    }
+    if let Some(value) = styles
+        .get("flex-shrink")
+        .and_then(|value| value.parse().ok())
+    {
+        style.flex_shrink = value;
+    }
+    if let Some(value) = styles.get("gap").and_then(|value| value.parse().ok()) {
+        style.gap = Size {
+            width: value,
+            height: value,
+        };
+    }
+    parse_property!("column-gap", style.gap.width);
+    parse_property!("row-gap", style.gap.height);
+
+    if let Some(value) = styles.get("padding").and_then(|value| value.parse().ok()) {
+        style.padding = taffy::Rect {
+            left: value,
+            right: value,
+            top: value,
+            bottom: value,
+        };
+    }
+    if let Some(value) = styles.get("margin").and_then(|value| value.parse().ok()) {
+        style.margin = taffy::Rect {
+            left: value,
+            right: value,
+            top: value,
+            bottom: value,
+        };
+    }
+
+    style
 }
 
 /// One layout entry prepared for the later hit-testing phase.
@@ -227,12 +311,15 @@ impl LowLevelTree {
         let mut nodes = Vec::new();
         let mut dom_to_taffy = HashMap::new();
 
-        for (dom_id, element) in dom.iter() {
+        for (dom_id, _element) in dom.iter() {
             let taffy_id = TaffyNodeId::from(nodes.len());
             dom_to_taffy.insert(dom_id, taffy_id);
             nodes.push(ComputedNode {
                 dom_id,
-                style: taffy_style_for(element),
+                style: taffy_style_for_node(
+                    dom.node(dom_id)
+                        .expect("reachable DOM nodes remain live during conversion"),
+                ),
                 children: Vec::new(),
                 cache: Cache::new(),
                 unrounded_layout: Layout::new(),
@@ -577,6 +664,51 @@ mod tests {
         assert_eq!(computed.layout(second).unwrap().size.width, 200.0);
         assert_eq!(computed.layout(first).unwrap().size.height, 20.0);
         assert_eq!(computed.layout(second).unwrap().location.x, 100.0);
+    }
+
+    #[test]
+    fn inline_styles_drive_visible_flex_layout() {
+        let shared = SharedDom::new();
+        let mut owner = BtsDom::new(shared.clone());
+        let (first, second, third) = {
+            let mut dom = owner.mutate();
+            let root = dom.root();
+            let window = dom.create(Elements::Window);
+            let row = dom.create(Elements::Flex {
+                style: Box::default(),
+            });
+            let first = dom.create(Elements::Div);
+            let second = dom.create(Elements::Grid {
+                style: Box::default(),
+            });
+            let third = dom.create(Elements::Flex {
+                style: Box::default(),
+            });
+            dom.set_style(row, "height".into(), "120px".into()).unwrap();
+            dom.set_style(row, "gap".into(), "10px".into()).unwrap();
+            for (child, grow) in [(first, "1"), (second, "2"), (third, "1")] {
+                dom.set_style(child, "flex-basis".into(), "0px".into())
+                    .unwrap();
+                dom.set_style(child, "flex-grow".into(), grow.into())
+                    .unwrap();
+            }
+            dom.append_child(root, window).unwrap();
+            dom.append_child(window, row).unwrap();
+            dom.append_child(row, first).unwrap();
+            dom.append_child(row, second).unwrap();
+            dom.append_child(row, third).unwrap();
+            (first, second, third)
+        };
+        owner.checkpoint().unwrap();
+        let snapshot = shared.load();
+        let mut computed = ComputedState::new();
+
+        computed.compute_layout(&snapshot, definite(400.0, 300.0));
+
+        assert_eq!(computed.layout(first).unwrap().size.width, 95.0);
+        assert_eq!(computed.layout(second).unwrap().size.width, 190.0);
+        assert_eq!(computed.layout(third).unwrap().size.width, 95.0);
+        assert_eq!(computed.layout(second).unwrap().size.height, 120.0);
     }
 
     #[test]
