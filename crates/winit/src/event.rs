@@ -53,10 +53,12 @@ pub enum WindowEvent {
     MouseInput {
         state: ElementState,
         button: MouseButton,
+        position: PhysicalPosition<f64>,
     },
     MouseWheel {
         delta_x: f64,
         delta_y: f64,
         precise: bool,
+        position: PhysicalPosition<f64>,
     },
 }

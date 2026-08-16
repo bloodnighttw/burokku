@@ -593,12 +593,14 @@ impl PlatformEventLoop {
                     ElementState::Released
                 },
                 button: mouse_button(event.buttonNumber()),
+                position: cursor_position(event, &state),
             }
         } else if event_type == NSEventType::ScrollWheel {
             WindowEvent::MouseWheel {
                 delta_x: event.scrollingDeltaX(),
                 delta_y: event.scrollingDeltaY(),
                 precise: event.hasPreciseScrollingDeltas(),
+                position: cursor_position(event, &state),
             }
         } else {
             return None;

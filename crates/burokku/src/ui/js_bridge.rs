@@ -89,6 +89,18 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
         }),
     )?;
 
+    let contains_state = state.clone();
+    native.set(
+        "contains",
+        Func::from(
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<bool> {
+                let id = decode(&context, &handle)?;
+                let state = state_lock(&context, &contains_state)?;
+                Ok(state.owner.staging().contains(id))
+            },
+        ),
+    )?;
+
     let node_type_state = state.clone();
     native.set(
         "nodeType",

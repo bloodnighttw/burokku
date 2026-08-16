@@ -161,7 +161,11 @@ Hit testing must use the computed scene associated with the currently presented 
 
 An event target is represented by `NodeId` plus the relevant DOM/presented revision when needed. MTS dispatches the event to the appropriate JavaScript runtime through its bounded macrotask queue. Native callbacks must not synchronously wait for BTS to execute JavaScript.
 
-If a node has been deleted before the event is handled, generation checking detects the stale handle and the event can be ignored or retargeted according to the event policy chosen later.
+The Phase 5 event policy is:
+
+- Pointer and wheel events are hit-tested against the last successfully presented layout, using its display scale and DOM revision. Keyboard and focus events target the presented `Window` node until element focus management is implemented.
+- Each queued event carries the stable target `NodeId` and presented revision. BTS validates the generation immediately before JavaScript dispatch; a stale or deleted target is dropped rather than retargeted.
+- Native callbacks submit with the bounded BTS macrotask queue's non-blocking API. If the queue is full, the newest event is dropped and counted. If the queue is closed, MTS requests application shutdown.
 
 ## Scheduling and responsiveness
 
