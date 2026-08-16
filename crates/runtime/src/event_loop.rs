@@ -132,6 +132,16 @@ impl MacrotaskQueue {
     pub fn capacity(&self) -> usize {
         self.sender.capacity()
     }
+
+    /// Configured bounded capacity of this queue.
+    pub fn max_capacity(&self) -> usize {
+        self.sender.max_capacity()
+    }
+
+    /// Number of macrotasks currently waiting to run.
+    pub fn depth(&self) -> usize {
+        self.max_capacity().saturating_sub(self.capacity())
+    }
 }
 
 fn map_try_send_error<T>(error: mpsc::error::TrySendError<T>) -> MacrotaskQueueError {

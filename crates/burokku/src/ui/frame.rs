@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -23,6 +26,7 @@ use super::{
     computed::{ComputedState, HitTestData},
     elements::{DomSnapshot, Elements, NodeId, SharedDom},
     events::{DispatchOutcome, DomEvent, DomEventData, EventDispatcher, EventModifiers},
+    metrics::{PerformanceMetrics, PerformanceMetricsSnapshot},
 };
 
 const DEFAULT_SCALE_FACTOR: f64 = 1.0;
@@ -57,9 +61,21 @@ pub enum FrameError {
 /// Result of one requested frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum FrameOutcome {
-    Presented { revision: u64, scale_factor: f64 },
+    Presented {
+        revision: u64,
+        scale_factor: f64,
+        timings: FrameTimings,
+    },
     Retry,
     Occluded,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FrameTimings {
+    total: Duration,
+    layout: Duration,
+    scene: Duration,
+    vello: Duration,
 }
 
 /// Immutable targeting data for the frame that actually reached the surface.
@@ -102,6 +118,10 @@ struct FrameScheduler {
     presented_revision: Option<u64>,
 }
 
+fn coalesced_revision_count(previous: Option<u64>, presented: u64) -> u64 {
+    presented.saturating_sub(previous.unwrap_or(0).saturating_add(1))
+}
+
 impl FrameScheduler {
     fn request_redraw(&mut self) -> bool {
         if self.redraw_pending {
@@ -130,20 +150,20 @@ impl FrameScheduler {
 
 /// A retained Vello scene tagged with the immutable DOM revision used to build
 /// it. Scene construction and computed layout are both MTS-only operations.
-struct SceneState {
+pub struct SceneState {
     scene: Scene,
     source_revision: Option<u64>,
 }
 
 impl SceneState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             scene: Scene::new(1, 1),
             source_revision: None,
         }
     }
 
-    fn rebuild(
+    pub fn rebuild(
         &mut self,
         snapshot: &DomSnapshot,
         computed: &ComputedState,
@@ -213,6 +233,16 @@ impl SceneState {
         }
         self.source_revision = Some(snapshot.revision());
         Ok(())
+    }
+
+    pub fn source_revision(&self) -> Option<u64> {
+        self.source_revision
+    }
+}
+
+impl Default for SceneState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -320,6 +350,7 @@ impl FrameRenderer {
         window: &Window,
         snapshot: &Arc<DomSnapshot>,
     ) -> Result<FrameOutcome, FrameError> {
+        let frame_started = Instant::now();
         let physical_size = window.inner_size();
         if physical_size.width == 0 || physical_size.height == 0 {
             return Ok(FrameOutcome::Occluded);
@@ -348,6 +379,7 @@ impl FrameRenderer {
             width: logical_width,
             height: logical_height,
         };
+        let layout_started = Instant::now();
         self.computed.compute_layout(
             snapshot,
             taffy::geometry::Size {
@@ -355,6 +387,9 @@ impl FrameRenderer {
                 height: taffy::AvailableSpace::Definite(logical_size.height),
             },
         );
+        let layout = layout_started.elapsed();
+
+        let scene_started = Instant::now();
         self.scene.rebuild(
             snapshot,
             &self.computed,
@@ -362,7 +397,9 @@ impl FrameRenderer {
             logical_size,
             scale_factor,
         )?;
+        let scene = scene_started.elapsed();
 
+        let vello_started = Instant::now();
         let frame = surface_texture.0;
         let frame_view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self
@@ -393,6 +430,12 @@ impl FrameRenderer {
         Ok(FrameOutcome::Presented {
             revision: snapshot.revision(),
             scale_factor,
+            timings: FrameTimings {
+                total: frame_started.elapsed(),
+                layout,
+                scene,
+                vello: vello_started.elapsed(),
+            },
         })
     }
 }
@@ -422,7 +465,7 @@ pub struct UiApplication {
     modifiers: Modifiers,
     mouse_buttons: u16,
     primary_press_target: Option<NodeId>,
-    dropped_events: u64,
+    metrics: PerformanceMetrics,
     occluded: bool,
     close_sender: Option<oneshot::Sender<()>>,
     external_exit: Arc<AtomicBool>,
@@ -439,6 +482,7 @@ impl UiApplication {
         external_exit: Arc<AtomicBool>,
     ) -> Self {
         let commits = shared_dom.subscribe();
+        let metrics = shared_dom.metrics();
         Self {
             window,
             shared_dom,
@@ -450,7 +494,7 @@ impl UiApplication {
             modifiers: Modifiers::default(),
             mouse_buttons: 0,
             primary_press_target: None,
-            dropped_events: 0,
+            metrics,
             occluded: false,
             close_sender: Some(close_sender),
             external_exit,
@@ -462,9 +506,18 @@ impl UiApplication {
         self.error.take()
     }
 
+    pub fn metrics(&self) -> PerformanceMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
     fn schedule_redraw(&mut self) {
-        if !self.occluded && self.scheduler.request_redraw() {
+        if self.occluded {
+            return;
+        }
+        if self.scheduler.request_redraw() {
             self.window.request_redraw();
+        } else {
+            self.metrics.record_coalesced_redraw();
         }
     }
 
@@ -496,10 +549,12 @@ impl UiApplication {
             DispatchOutcome::DroppedBackpressure => {
                 // Native callbacks never wait for BTS. Keep a metric and drop
                 // the newest event when the bounded queue is saturated.
-                self.dropped_events = self.dropped_events.saturating_add(1);
+                self.metrics.record_dropped_event();
             }
             DispatchOutcome::RuntimeClosed => self.request_exit(event_loop),
         }
+        self.metrics
+            .observe_bts_queue_depth(self.event_dispatcher.queue_depth());
     }
 
     fn pointer_event(
@@ -564,11 +619,14 @@ impl UiApplication {
         // This Arc is retained until scene construction, GPU submission, and
         // presentation have all completed. A concurrent BTS commit can only be
         // considered for a subsequent frame.
+        let previous_revision = self.scheduler.presented_revision();
         let snapshot = self.shared_dom.load();
+        self.metrics.record_frame_attempt();
         match self.renderer.render_frame(&self.window, &snapshot) {
             Ok(FrameOutcome::Presented {
                 revision,
                 scale_factor,
+                timings,
             }) => {
                 let hit_test = self
                     .renderer
@@ -577,6 +635,16 @@ impl UiApplication {
                     .expect("a presented frame has computed hit-test data")
                     .clone();
                 debug_assert_eq!(hit_test.source_revision(), revision);
+                let commit_to_present = snapshot.published_at().elapsed();
+                let coalesced_revisions = coalesced_revision_count(previous_revision, revision);
+                self.metrics.record_presented_frame(
+                    timings.total,
+                    timings.layout,
+                    timings.scene,
+                    timings.vello,
+                    commit_to_present,
+                    coalesced_revisions,
+                );
                 self.presented = Some(PresentedFrame {
                     snapshot,
                     hit_test,
@@ -789,6 +857,9 @@ mod tests {
     fn scheduler_coalesces_requests_and_tracks_presented_revision() {
         let mut scheduler = FrameScheduler::default();
 
+        assert_eq!(coalesced_revision_count(None, 0), 0);
+        assert_eq!(coalesced_revision_count(None, 4), 3);
+        assert_eq!(coalesced_revision_count(Some(4), 7), 2);
         assert!(scheduler.request_redraw());
         assert!(!scheduler.request_redraw());
         assert!(scheduler.begin_frame());

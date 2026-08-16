@@ -106,6 +106,11 @@ impl EventDispatcher {
             Err(MacrotaskQueueError::Closed) => DispatchOutcome::RuntimeClosed,
         }
     }
+
+    /// Current number of native events and other macrotasks waiting on BTS.
+    pub fn queue_depth(&self) -> usize {
+        self.queue.depth()
+    }
 }
 
 fn dispatch_event(context: &Ctx<'_>, event: DomEvent) -> RuntimeResult<()> {
