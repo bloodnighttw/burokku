@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use self::styles::{flex::FlexStyle, grid::GridStyle};
 use slotmap::{new_key_type, SlotMap};
@@ -124,7 +124,9 @@ impl Node {
 /// the tree unchanged.
 #[derive(Clone, Debug)]
 pub struct Dom {
-    nodes: SlotMap<NodeId, Node>,
+    // Cloning the arena for publication only clones these pointers. Node data
+    // is copied lazily by `node_mut` when a published node is changed.
+    nodes: SlotMap<NodeId, Arc<Node>>,
     root: NodeId,
     revision: u64,
 }
@@ -138,14 +140,14 @@ impl Default for Dom {
 impl Dom {
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
-        let root = nodes.insert(Node {
+        let root = nodes.insert(Arc::new(Node {
             element: Elements::App,
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
             styles: BTreeMap::new(),
             revisions: NodeRevisions::default(),
-        });
+        }));
 
         Self {
             nodes,
@@ -167,7 +169,7 @@ impl Dom {
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(id)
+        self.nodes.get(id).map(Arc::as_ref)
     }
 
     pub fn element(&self, id: NodeId) -> Option<&Elements> {
@@ -192,14 +194,14 @@ impl Dom {
 
     /// Allocates a detached element and returns its stable handle.
     pub fn create(&mut self, element: Elements) -> NodeId {
-        let id = self.nodes.insert(Node {
+        let id = self.nodes.insert(Arc::new(Node {
             element,
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
             styles: BTreeMap::new(),
             revisions: NodeRevisions::default(),
-        });
+        }));
         self.bump_revision();
         id
     }
@@ -212,10 +214,11 @@ impl Dom {
         name: String,
         value: String,
     ) -> Result<(), DomError> {
-        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
         if node.attributes.get(&name) == Some(&value) {
             return Ok(());
         }
+        let node = self.node_mut(id)?;
         node.attributes.insert(name, value);
         bump(&mut node.revisions.content);
         self.bump_revision();
@@ -223,21 +226,24 @@ impl Dom {
     }
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
-        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
-        let removed = node.attributes.remove(name);
-        if removed.is_some() {
-            bump(&mut node.revisions.content);
-            self.bump_revision();
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        if !node.attributes.contains_key(name) {
+            return Ok(None);
         }
+        let node = self.node_mut(id)?;
+        let removed = node.attributes.remove(name);
+        bump(&mut node.revisions.content);
+        self.bump_revision();
         Ok(removed)
     }
 
     /// Stores a normalized CSS property in authoritative DOM data.
     pub fn set_style(&mut self, id: NodeId, name: String, value: String) -> Result<(), DomError> {
-        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
         if node.styles.get(&name) == Some(&value) {
             return Ok(());
         }
+        let node = self.node_mut(id)?;
         node.styles.insert(name, value);
         bump(&mut node.revisions.style);
         self.bump_revision();
@@ -245,12 +251,14 @@ impl Dom {
     }
 
     pub fn remove_style(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
-        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
-        let removed = node.styles.remove(name);
-        if removed.is_some() {
-            bump(&mut node.revisions.style);
-            self.bump_revision();
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        if !node.styles.contains_key(name) {
+            return Ok(None);
         }
+        let node = self.node_mut(id)?;
+        let removed = node.styles.remove(name);
+        bump(&mut node.revisions.style);
+        self.bump_revision();
         Ok(removed)
     }
 
@@ -289,7 +297,7 @@ impl Dom {
             return Ok(());
         }
 
-        let node = &mut self.nodes[id];
+        let node = self.node_mut(id)?;
         node.element = element;
         match revision_kind {
             ElementRevisionKind::None => unreachable!("no-op replacements return above"),
@@ -343,6 +351,13 @@ impl Dom {
         }
 
         let same_parent = child_node.parent == Some(parent);
+        let current_index = same_parent.then(|| {
+            parent_node
+                .children
+                .iter()
+                .position(|existing| *existing == child)
+                .expect("a child's parent contains the child")
+        });
         let final_len = parent_node.children.len() - usize::from(same_parent);
         if index > final_len {
             return Err(DomError::IndexOutOfBounds {
@@ -360,20 +375,32 @@ impl Dom {
             return Err(DomError::AppAlreadyHasWindow);
         }
 
+        if current_index == Some(index) {
+            return Ok(());
+        }
+
         let old_parent = child_node.parent;
-        if let Some(old_parent) = old_parent {
-            self.nodes[old_parent]
-                .children
-                .retain(|existing| *existing != child);
-            bump(&mut self.nodes[old_parent].revisions.structure);
-        }
-        self.nodes[parent].children.insert(index, child);
-        if old_parent != Some(parent) {
-            self.nodes[child].parent = Some(parent);
-            bump(&mut self.nodes[child].revisions.structure);
-        }
-        if old_parent != Some(parent) {
-            bump(&mut self.nodes[parent].revisions.structure);
+        if same_parent {
+            let parent_node = self.node_mut(parent)?;
+            parent_node.children.retain(|existing| *existing != child);
+            parent_node.children.insert(index, child);
+            bump(&mut parent_node.revisions.structure);
+        } else {
+            if let Some(old_parent) = old_parent {
+                let old_parent_node = self.node_mut(old_parent)?;
+                old_parent_node
+                    .children
+                    .retain(|existing| *existing != child);
+                bump(&mut old_parent_node.revisions.structure);
+            }
+
+            let parent_node = self.node_mut(parent)?;
+            parent_node.children.insert(index, child);
+            bump(&mut parent_node.revisions.structure);
+
+            let child_node = self.node_mut(child)?;
+            child_node.parent = Some(parent);
+            bump(&mut child_node.revisions.structure);
         }
         self.bump_revision();
         Ok(())
@@ -386,10 +413,13 @@ impl Dom {
         }
         let parent = self.node(id).ok_or(DomError::NodeNotFound(id))?.parent;
         if let Some(parent) = parent {
-            self.nodes[parent].children.retain(|child| *child != id);
-            bump(&mut self.nodes[parent].revisions.structure);
-            self.nodes[id].parent = None;
-            bump(&mut self.nodes[id].revisions.structure);
+            let parent_node = self.node_mut(parent)?;
+            parent_node.children.retain(|child| *child != id);
+            bump(&mut parent_node.revisions.structure);
+
+            let node = self.node_mut(id)?;
+            node.parent = None;
+            bump(&mut node.revisions.structure);
             self.bump_revision();
         }
         Ok(())
@@ -402,27 +432,42 @@ impl Dom {
         }
         let parent = self.node(id).ok_or(DomError::NodeNotFound(id))?.parent;
         if let Some(parent) = parent {
-            self.nodes[parent].children.retain(|child| *child != id);
-            bump(&mut self.nodes[parent].revisions.structure);
+            let parent_node = self.node_mut(parent)?;
+            parent_node.children.retain(|child| *child != id);
+            bump(&mut parent_node.revisions.structure);
         }
 
         let removed = self
             .nodes
             .remove(id)
             .expect("the node was checked immediately before removal");
-        let mut pending = removed.children;
+        let element = removed.element.clone();
+        let mut pending = removed.children.clone();
         while let Some(descendant) = pending.pop() {
             if let Some(node) = self.nodes.remove(descendant) {
-                pending.extend(node.children);
+                pending.extend(node.children.iter().copied());
             }
         }
         self.bump_revision();
-        Ok(removed.element)
+        Ok(element)
     }
 
     /// Iterates over the reachable tree in pre-order, yielding stable IDs.
     pub fn iter(&self) -> ElementsIter<'_> {
         ElementsIter::new(self)
+    }
+
+    fn node_mut(&mut self, id: NodeId) -> Result<&mut Node, DomError> {
+        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
+        Ok(Arc::make_mut(node))
+    }
+
+    #[cfg(test)]
+    fn shares_node_with(&self, other: &Self, id: NodeId) -> bool {
+        match (self.nodes.get(id), other.nodes.get(id)) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
     }
 
     fn is_ancestor_or_self(&self, possible_ancestor: NodeId, mut id: NodeId) -> bool {
