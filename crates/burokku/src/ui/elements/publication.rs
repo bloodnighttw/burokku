@@ -157,9 +157,12 @@ impl BtsDom {
         Ok(())
     }
 
-    /// Publish one complete clone of the existing DOM at the runtime
-    /// checkpoint. Clean checkpoints and checkpoints inside an explicit batch
-    /// do nothing.
+    /// Publish one complete shallow clone of the existing DOM at the runtime
+    /// checkpoint. The `SlotMap` entries are copied, but their `Arc<Node>`
+    /// values share unchanged node contents with staging. Later staging writes
+    /// copy only the affected nodes through `Arc::make_mut`.
+    ///
+    /// Clean checkpoints and checkpoints inside an explicit batch do nothing.
     pub fn checkpoint(&mut self) -> Result<Option<Arc<DomSnapshot>>, CommitError> {
         if !self.dirty || self.batch_depth != 0 {
             return Ok(None);
@@ -264,6 +267,125 @@ mod tests {
         assert_eq!(new.revision(), 1);
         assert_eq!(new.dom().parent(div), Some(window));
         assert!(!old.dom().contains(window));
+    }
+
+    #[test]
+    fn staging_copies_only_a_node_changed_after_publication() {
+        let shared = SharedDom::new();
+        let mut owner = BtsDom::new(shared);
+        let (window, div) = {
+            let mut dom = owner.mutate();
+            let root = dom.root();
+            let window = dom.create(Elements::Window);
+            let div = dom.create(Elements::Div);
+            dom.append_child(root, window).unwrap();
+            dom.append_child(window, div).unwrap();
+            (window, div)
+        };
+        let old = owner.checkpoint().unwrap().unwrap();
+
+        assert!(owner.staging().shares_node_with(old.dom(), div));
+        assert!(owner.staging().shares_node_with(old.dom(), window));
+        owner
+            .mutate()
+            .set_attribute(div, "state".into(), "new".into())
+            .unwrap();
+
+        assert_eq!(old.dom().attribute(div, "state"), None);
+        assert_eq!(owner.staging().attribute(div, "state"), Some("new"));
+        assert!(!owner.staging().shares_node_with(old.dom(), div));
+        assert!(owner.staging().shares_node_with(old.dom(), window));
+
+        let new = owner.checkpoint().unwrap().unwrap();
+        assert_eq!(old.dom().attribute(div, "state"), None);
+        assert_eq!(new.dom().attribute(div, "state"), Some("new"));
+        assert!(new.dom().shares_node_with(old.dom(), window));
+    }
+
+    #[test]
+    fn structural_changes_preserve_each_snapshots_relationships() {
+        let shared = SharedDom::new();
+        let mut owner = BtsDom::new(shared);
+        let (first_parent, second_parent, child) = {
+            let mut dom = owner.mutate();
+            let root = dom.root();
+            let window = dom.create(Elements::Window);
+            let first_parent = dom.create(Elements::Div);
+            let second_parent = dom.create(Elements::Div);
+            let child = dom.create(Elements::Text);
+            dom.append_child(root, window).unwrap();
+            dom.append_child(window, first_parent).unwrap();
+            dom.append_child(window, second_parent).unwrap();
+            dom.append_child(first_parent, child).unwrap();
+            (first_parent, second_parent, child)
+        };
+        let old = owner.checkpoint().unwrap().unwrap();
+
+        owner.mutate().append_child(second_parent, child).unwrap();
+        let new = owner.checkpoint().unwrap().unwrap();
+
+        assert_eq!(old.dom().parent(child), Some(first_parent));
+        assert_eq!(old.dom().children(first_parent), Some(&[child][..]));
+        assert_eq!(old.dom().children(second_parent), Some(&[][..]));
+        assert_eq!(new.dom().parent(child), Some(second_parent));
+        assert_eq!(new.dom().children(first_parent), Some(&[][..]));
+        assert_eq!(new.dom().children(second_parent), Some(&[child][..]));
+    }
+
+    #[test]
+    fn removing_a_shared_subtree_leaves_old_snapshot_valid() {
+        let shared = SharedDom::new();
+        let mut owner = BtsDom::new(shared);
+        let (parent, child) = {
+            let mut dom = owner.mutate();
+            let parent = dom.create(Elements::Div);
+            let child = dom.create(Elements::Text);
+            dom.append_child(parent, child).unwrap();
+            (parent, child)
+        };
+        let old = owner.checkpoint().unwrap().unwrap();
+
+        assert!(owner.staging().shares_node_with(old.dom(), parent));
+        assert_eq!(
+            owner.mutate().remove_subtree(parent).unwrap(),
+            Elements::Div
+        );
+
+        assert!(!owner.staging().contains(parent));
+        assert!(!owner.staging().contains(child));
+        assert!(old.dom().contains(parent));
+        assert!(old.dom().contains(child));
+        assert_eq!(old.dom().children(parent), Some(&[child][..]));
+        assert_eq!(old.dom().parent(child), Some(parent));
+    }
+
+    #[test]
+    fn validated_no_ops_do_not_copy_shared_nodes() {
+        let shared = SharedDom::new();
+        let mut owner = BtsDom::new(shared);
+        let (window, div) = {
+            let mut dom = owner.mutate();
+            let root = dom.root();
+            let window = dom.create(Elements::Window);
+            let div = dom.create(Elements::Div);
+            dom.set_attribute(div, "state".into(), "same".into())
+                .unwrap();
+            dom.append_child(root, window).unwrap();
+            dom.append_child(window, div).unwrap();
+            (window, div)
+        };
+        let snapshot = owner.checkpoint().unwrap().unwrap();
+
+        {
+            let mut dom = owner.mutate();
+            dom.set_attribute(div, "state".into(), "same".into())
+                .unwrap();
+            dom.append_child(window, div).unwrap();
+        }
+
+        assert!(!owner.is_dirty());
+        assert!(owner.staging().shares_node_with(snapshot.dom(), window));
+        assert!(owner.staging().shares_node_with(snapshot.dom(), div));
     }
 
     #[test]
