@@ -43,13 +43,21 @@ mod tests {
     #[test]
     fn iterates_reachable_elements_in_pre_order_with_stable_ids() {
         let mut dom = Dom::new();
-        let detached = dom.create(Elements::Div);
-        let window = dom.create(Elements::Window);
-        let text = dom.create(Elements::Text);
+        let detached = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let window = dom.create(Elements::Window {
+            style: Box::default(),
+        });
+        let text = dom.create(Elements::Text {
+            style: Box::default(),
+        });
         let string = dom.create(Elements::_String {
             string: "content".into(),
         });
-        let div = dom.create(Elements::Div);
+        let div = dom.create(Elements::Div {
+            style: Box::default(),
+        });
 
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, text).unwrap();
@@ -64,10 +72,10 @@ mod tests {
         );
         assert!(!elements.iter().any(|(id, _)| *id == detached));
         assert!(matches!(elements[0].1, Elements::App));
-        assert!(matches!(elements[1].1, Elements::Window));
-        assert!(matches!(elements[2].1, Elements::Text));
+        assert!(matches!(elements[1].1, Elements::Window { .. }));
+        assert!(matches!(elements[2].1, Elements::Text { .. }));
         assert!(matches!(elements[3].1, Elements::_String { .. }));
-        assert!(matches!(elements[4].1, Elements::Div));
+        assert!(matches!(elements[4].1, Elements::Div { .. }));
     }
 
     #[test]
@@ -80,8 +88,12 @@ mod tests {
     #[test]
     fn app_can_only_have_one_window() {
         let mut dom = Dom::new();
-        let first = dom.create(Elements::Window);
-        let second = dom.create(Elements::Window);
+        let first = dom.create(Elements::Window {
+            style: Box::default(),
+        });
+        let second = dom.create(Elements::Window {
+            style: Box::default(),
+        });
         dom.append_child(dom.root(), first).unwrap();
 
         assert_eq!(

@@ -30,7 +30,9 @@ impl DomPlugin {
         let body = {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let body = dom.create(Elements::Window);
+            let body = dom.create(Elements::Window {
+                style: Box::default(),
+            });
             dom.append_child(root, body)
                 .expect("a new DOM accepts its initial Window");
             body
@@ -231,18 +233,17 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
         ),
     )?;
 
-    let style_state = state.clone();
+    let style_support_state = state.clone();
     native.set(
-        "getStyle",
+        "supportsStyle",
         Func::from(
-            move |context: Ctx<'js>,
-                  handle: String,
-                  name: String|
-                  -> RuntimeResult<Option<String>> {
+            move |context: Ctx<'js>, handle: String, name: String| -> RuntimeResult<bool> {
                 let id = decode(&context, &handle)?;
-                let state = state_lock(&context, &style_state)?;
-                require_element(&context, state.owner.staging(), id)?;
-                Ok(state.owner.staging().style(id, &name).map(str::to_owned))
+                let state = state_lock(&context, &style_support_state)?;
+                map_dom_result(
+                    &context,
+                    state.owner.staging().supports_style_property(id, &name),
+                )
             },
         ),
     )?;
@@ -400,10 +401,10 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
                   handle: String,
                   name: String,
                   value: String|
-                  -> RuntimeResult<()> {
+                  -> RuntimeResult<bool> {
                 let id = decode(&context, &handle)?;
                 let mut state = state_lock(&context, &set_style_state)?;
-                let result = state.owner.mutate().set_style(id, name, value);
+                let result = state.owner.mutate().set_style_property(id, &name, &value);
                 map_dom_result(&context, result)
             },
         ),
@@ -413,11 +414,11 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
     native.set(
         "removeStyle",
         Func::from(
-            move |context: Ctx<'js>, handle: String, name: String| -> RuntimeResult<()> {
+            move |context: Ctx<'js>, handle: String, name: String| -> RuntimeResult<bool> {
                 let id = decode(&context, &handle)?;
                 let mut state = state_lock(&context, &remove_style_state)?;
-                let result = state.owner.mutate().remove_style(id, &name);
-                map_dom_result(&context, result).map(drop)
+                let result = state.owner.mutate().remove_style_property(id, &name);
+                map_dom_result(&context, result)
             },
         ),
     )?;
@@ -461,15 +462,21 @@ fn require_children<'a>(
 
 fn element_for_tag(context: &Ctx<'_>, tag: &str) -> RuntimeResult<Elements> {
     match tag {
-        "window" => Ok(Elements::Window),
-        "div" => Ok(Elements::Div),
+        "window" => Ok(Elements::Window {
+            style: Box::default(),
+        }),
+        "div" => Ok(Elements::Div {
+            style: Box::default(),
+        }),
         "flex" => Ok(Elements::Flex {
             style: Box::default(),
         }),
         "grid" => Ok(Elements::Grid {
             style: Box::default(),
         }),
-        "text" => Ok(Elements::Text),
+        "text" => Ok(Elements::Text {
+            style: Box::default(),
+        }),
         _ => Err(dom_exception(
             context,
             &format!("unsupported element <{tag}>"),
@@ -480,11 +487,11 @@ fn element_for_tag(context: &Ctx<'_>, tag: &str) -> RuntimeResult<Elements> {
 fn element_name(element: &Elements) -> &'static str {
     match element {
         Elements::App => "APP",
-        Elements::Window => "WINDOW",
-        Elements::Div => "DIV",
+        Elements::Window { .. } => "WINDOW",
+        Elements::Div { .. } => "DIV",
         Elements::Flex { .. } => "FLEX",
         Elements::Grid { .. } => "GRID",
-        Elements::Text => "TEXT",
+        Elements::Text { .. } => "TEXT",
         Elements::_String { .. } => "#text",
     }
 }
@@ -585,11 +592,13 @@ fn set_text_content(
     }
 
     let string = owner.mutate().create(Elements::_String { string: text });
-    if matches!(element, Elements::Text) {
+    if matches!(element, Elements::Text { .. }) {
         return map_dom_result(context, owner.mutate().append_child(id, string));
     }
 
-    let text_element = owner.mutate().create(Elements::Text);
+    let text_element = owner.mutate().create(Elements::Text {
+        style: Box::default(),
+    });
     map_dom_result(context, owner.mutate().append_child(text_element, string))?;
     map_dom_result(context, owner.mutate().append_child(id, text_element))
 }
@@ -721,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn attributes_and_styles_are_authoritative_snapshot_data() {
+    async fn attributes_are_authoritative_snapshot_data() {
         let (runtime, shared) = runtime_with_dom().await;
         let mut commits = shared.subscribe();
 
@@ -730,8 +739,6 @@ mod tests {
                 r#"
                 const div = document.createElement("div");
                 div.setAttribute("id", "panel");
-                div.style.flexGrow = 2;
-                div.style.setProperty("background-color", "red");
                 document.body.appendChild(div);
                 "#,
             )
@@ -742,9 +749,103 @@ mod tests {
         let snapshot = shared.load();
         let div = snapshot.dom().children(body(snapshot.dom())).unwrap()[0];
         assert_eq!(snapshot.dom().attribute(div, "id"), Some("panel"));
-        assert_eq!(snapshot.dom().style(div, "flex-grow"), Some("2"));
-        assert_eq!(snapshot.dom().style(div, "background-color"), Some("red"));
-        assert!(snapshot.dom().node(div).unwrap().revisions().style >= 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn supported_styles_update_strong_element_data() {
+        use crate::ui::elements::styles::{Dimension, LengthPercentage, RgbaColor};
+
+        let (runtime, shared) = runtime_with_dom().await;
+        let mut commits = shared.subscribe();
+        runtime
+            .eval::<()>(
+                r##"
+                const row = document.createElement("flex");
+                row.style.width = "100%";
+                row.style.height = "360px";
+                row.style.padding = "20px";
+                row.style.gap = "16px";
+                row.style.alignItems = "stretch";
+                row.style.backgroundColor = "#1f2937";
+                const panel = document.createElement("div");
+                panel.style.flexBasis = "0px";
+                panel.style.flexGrow = "2";
+                panel.style.backgroundColor = "#22c55e";
+                row.appendChild(panel);
+                document.body.appendChild(row);
+                "##,
+            )
+            .await
+            .unwrap();
+
+        commits.changed().await.unwrap();
+        let snapshot = shared.load();
+        let row = snapshot.dom().children(body(snapshot.dom())).unwrap()[0];
+        let panel = snapshot.dom().children(row).unwrap()[0];
+
+        let Some(Elements::Flex { style }) = snapshot.dom().element(row) else {
+            panic!("row should remain a strongly typed flex element");
+        };
+        assert_eq!(style.common.size.width, Dimension::Percent(1.0));
+        assert_eq!(style.common.size.height, Dimension::Length(360.0));
+        assert_eq!(style.common.padding.left, LengthPercentage::Length(20.0));
+        assert_eq!(style.gap.width, LengthPercentage::Length(16.0));
+        assert_eq!(
+            style.common.background_color,
+            Some(RgbaColor::rgb(31, 41, 55))
+        );
+
+        let Some(Elements::Div { style }) = snapshot.dom().element(panel) else {
+            panic!("panel should remain a strongly typed div element");
+        };
+        assert_eq!(style.flex_basis, Dimension::Length(0.0));
+        assert_eq!(style.flex_grow, 2.0);
+        assert_eq!(style.background_color, Some(RgbaColor::rgb(34, 197, 94)));
+
+        let mut computed = crate::ui::computed::ComputedState::new();
+        computed.compute_layout(
+            &snapshot,
+            taffy::geometry::Size {
+                width: taffy::AvailableSpace::Definite(800.0),
+                height: taffy::AvailableSpace::Definite(600.0),
+            },
+        );
+        let row_layout = computed.layout(row).unwrap();
+        let panel_layout = computed.layout(panel).unwrap();
+        assert!(row_layout.size.width > 0.0 && row_layout.size.height > 0.0);
+        assert!(panel_layout.size.width > 0.0 && panel_layout.size.height > 0.0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_style_properties_warn_and_are_ignored() {
+        let (runtime, shared) = runtime_with_dom().await;
+        let mut commits = shared.subscribe();
+        let ignored: bool = runtime
+            .eval(
+                r#"
+                const warnings = [];
+                globalThis.console = { warn(message) { warnings.push(String(message)); } };
+                const div = document.createElement("div");
+                div.style.notDefined = "value";
+                const value = div.style.notDefined;
+                div.style.setProperty("also-not-defined", "value");
+                const removed = div.style.removeProperty("still-not-defined");
+                document.body.appendChild(div);
+                warnings.length === 4 &&
+                  warnings.every(message => message.includes("was ignored")) &&
+                  value === "" && removed === "";
+                "#,
+            )
+            .await
+            .unwrap();
+
+        commits.changed().await.unwrap();
+        assert!(ignored);
+        let snapshot = shared.load();
+        assert_eq!(
+            snapshot.dom().children(body(snapshot.dom())).unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -773,7 +874,7 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert!(matches!(
             snapshot.dom().element(children[0]),
-            Some(Elements::Div)
+            Some(Elements::Div { .. })
         ));
     }
 

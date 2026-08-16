@@ -5,34 +5,57 @@
   const construct = Symbol("Burokku DOM node");
   const cache = new Map();
 
+  function requireNode(value, label = "node") {
+    if (!(value instanceof Node)) throw new TypeError(`${label} must be a Node`);
+    return value;
+  }
+
   function cssName(name) {
     name = String(name);
     if (name.startsWith("--") || name.includes("-")) return name.toLowerCase();
     return name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`).toLowerCase();
   }
 
-  function requireNode(value, label = "node") {
-    if (!(value instanceof Node)) throw new TypeError(`${label} must be a Node`);
-    return value;
+  function warnUnsupportedStyle(name) {
+    const message = `Unsupported or invalid style property "${String(name)}" was ignored.`;
+    if (globalThis.console && typeof globalThis.console.warn === "function") {
+      globalThis.console.warn(message);
+    }
   }
 
   class CSSStyleDeclaration {
     constructor(node) {
       this._node = node;
+      this._values = new Map();
     }
 
     getPropertyValue(name) {
-      return native.getStyle(this._node._handle, cssName(name)) ?? "";
+      const normalized = cssName(name);
+      if (!native.supportsStyle(this._node._handle, normalized)) {
+        warnUnsupportedStyle(normalized);
+        return "";
+      }
+      return this._values.get(normalized) ?? "";
     }
 
     setProperty(name, value) {
-      native.setStyle(this._node._handle, cssName(name), String(value));
+      const normalized = cssName(name);
+      const stringValue = String(value);
+      if (!native.setStyle(this._node._handle, normalized, stringValue)) {
+        warnUnsupportedStyle(normalized);
+        return;
+      }
+      this._values.set(normalized, stringValue);
     }
 
     removeProperty(name) {
       const normalized = cssName(name);
-      const previous = native.getStyle(this._node._handle, normalized) ?? "";
-      native.removeStyle(this._node._handle, normalized);
+      const previous = this._values.get(normalized) ?? "";
+      if (!native.removeStyle(this._node._handle, normalized)) {
+        warnUnsupportedStyle(normalized);
+        return "";
+      }
+      this._values.delete(normalized);
       return previous;
     }
   }
@@ -51,8 +74,7 @@
         if (typeof property !== "string" || property in target) {
           return Reflect.set(target, property, value, receiver);
         }
-        if (value === undefined || value === null) target.removeProperty(property);
-        else target.setProperty(property, value);
+        target.setProperty(property, value);
         return true;
       }
     });
