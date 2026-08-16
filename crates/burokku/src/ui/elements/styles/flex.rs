@@ -1,8 +1,6 @@
-use taffy::{
-    geometry::Size, AlignContent, AlignItems, AlignSelf, FlexDirection, FlexWrap, JustifyContent,
-};
+use taffy::{geometry::Size, AlignContent, AlignItems, FlexDirection, FlexWrap, JustifyContent};
 
-use super::{Dimension, LengthPercentage};
+use super::{parse_length_percentage, CommonStyle, LengthPercentage};
 
 /// Thread-safe properties used to lay out a flex container and its flex items.
 ///
@@ -10,25 +8,19 @@ use super::{Dimension, LengthPercentage};
 /// MTS converts it to [`taffy::Style`] immediately before updating layout state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlexStyle {
-    // Container properties
+    pub common: CommonStyle,
     pub direction: FlexDirection,
     pub wrap: FlexWrap,
     pub gap: Size<LengthPercentage>,
     pub align_content: Option<AlignContent>,
     pub align_items: Option<AlignItems>,
     pub justify_content: Option<JustifyContent>,
-
-    // Item properties
-    pub basis: Dimension,
-    pub grow: f32,
-    pub shrink: f32,
-    pub align_self: Option<AlignSelf>,
 }
 
 impl FlexStyle {
     /// Build the Taffy value consumed only by MTS computed/layout state.
     pub fn to_taffy_style(self) -> taffy::Style<String> {
-        taffy::Style {
+        let mut style = taffy::Style {
             display: taffy::Display::Flex,
             flex_direction: self.direction,
             flex_wrap: self.wrap,
@@ -39,18 +31,98 @@ impl FlexStyle {
             align_content: self.align_content,
             align_items: self.align_items,
             justify_content: self.justify_content,
-            flex_basis: self.basis.to_taffy(),
-            flex_grow: self.grow,
-            flex_shrink: self.shrink,
-            align_self: self.align_self,
             ..taffy::Style::default()
+        };
+        self.common.apply_to_taffy(&mut style);
+        style
+    }
+
+    pub(crate) fn supports(name: &str) -> bool {
+        CommonStyle::supports(name)
+            || matches!(
+                name,
+                "flex-direction"
+                    | "flex-wrap"
+                    | "gap"
+                    | "column-gap"
+                    | "row-gap"
+                    | "align-content"
+                    | "align-items"
+                    | "justify-content"
+            )
+    }
+
+    pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
+        if CommonStyle::supports(name) {
+            return self.common.set_property(name, value);
         }
+        match name {
+            "flex-direction" => value.parse().ok().is_some_and(|value| {
+                self.direction = value;
+                true
+            }),
+            "flex-wrap" => value.parse().ok().is_some_and(|value| {
+                self.wrap = value;
+                true
+            }),
+            "gap" => parse_length_percentage(value).is_some_and(|value| {
+                self.gap = Size {
+                    width: value,
+                    height: value,
+                };
+                true
+            }),
+            "column-gap" => parse_length_percentage(value).is_some_and(|value| {
+                self.gap.width = value;
+                true
+            }),
+            "row-gap" => parse_length_percentage(value).is_some_and(|value| {
+                self.gap.height = value;
+                true
+            }),
+            "align-content" => value.parse().ok().is_some_and(|value| {
+                self.align_content = Some(value);
+                true
+            }),
+            "align-items" => value.parse().ok().is_some_and(|value| {
+                self.align_items = Some(value);
+                true
+            }),
+            "justify-content" => value.parse().ok().is_some_and(|value| {
+                self.justify_content = Some(value);
+                true
+            }),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn remove_property(&mut self, name: &str) -> bool {
+        if CommonStyle::supports(name) {
+            return self.common.remove_property(name);
+        }
+        if !Self::supports(name) {
+            return false;
+        }
+        let defaults = Self::default();
+        match name {
+            "flex-direction" => self.direction = defaults.direction,
+            "flex-wrap" => self.wrap = defaults.wrap,
+            "gap" => self.gap = defaults.gap,
+            "column-gap" => self.gap.width = defaults.gap.width,
+            "row-gap" => self.gap.height = defaults.gap.height,
+            "align-content" => self.align_content = defaults.align_content,
+            "align-items" => self.align_items = defaults.align_items,
+            "justify-content" => self.justify_content = defaults.justify_content,
+            _ => unreachable!("support was checked above"),
+        }
+        true
     }
 }
 
 impl Default for FlexStyle {
     fn default() -> Self {
         Self {
+            common: CommonStyle::default(),
             direction: FlexDirection::Row,
             wrap: FlexWrap::NoWrap,
             gap: Size {
@@ -60,10 +132,6 @@ impl Default for FlexStyle {
             align_content: None,
             align_items: None,
             justify_content: None,
-            basis: Dimension::Auto,
-            grow: 0.0,
-            shrink: 1.0,
-            align_self: None,
         }
     }
 }
@@ -97,8 +165,11 @@ mod tests {
                 width: LengthPercentage::length(8.0),
                 height: LengthPercentage::percent(0.1),
             },
-            basis: Dimension::percent(0.5),
-            grow: 2.0,
+            common: CommonStyle {
+                flex_basis: crate::ui::elements::styles::Dimension::percent(0.5),
+                flex_grow: 2.0,
+                ..CommonStyle::default()
+            },
             ..FlexStyle::default()
         };
         let taffy = style.to_taffy_style();

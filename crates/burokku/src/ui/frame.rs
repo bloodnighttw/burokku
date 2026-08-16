@@ -214,12 +214,7 @@ impl SceneState {
             let Some(element) = snapshot.dom().element(entry.node) else {
                 continue;
             };
-            let Some(color) = snapshot
-                .dom()
-                .style(entry.node, "background-color")
-                .and_then(|color| color.parse().ok())
-                .or_else(|| element_color(element))
-            else {
+            let Some(color) = element_color(element) else {
                 continue;
             };
             let rect = Rect::new(
@@ -256,12 +251,21 @@ impl std::fmt::Debug for SceneState {
 }
 
 fn element_color(element: &Elements) -> Option<Color> {
+    if let Some(color) = element.background_color() {
+        return Some(Color::from_rgba8(
+            color.red,
+            color.green,
+            color.blue,
+            color.alpha,
+        ));
+    }
+
     match element {
-        Elements::App | Elements::Window | Elements::_String { .. } => None,
-        Elements::Div => Some(Color::from_rgb8(225, 228, 232)),
+        Elements::App | Elements::Window { .. } | Elements::_String { .. } => None,
+        Elements::Div { .. } => Some(Color::from_rgb8(225, 228, 232)),
         Elements::Flex { .. } => Some(Color::from_rgb8(203, 224, 255)),
         Elements::Grid { .. } => Some(Color::from_rgb8(207, 238, 215)),
-        Elements::Text => Some(Color::from_rgb8(45, 48, 54)),
+        Elements::Text { .. } => Some(Color::from_rgb8(45, 48, 54)),
     }
 }
 
@@ -878,8 +882,12 @@ mod tests {
         {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let window = dom.create(Elements::Window);
-            let div = dom.create(Elements::Div);
+            let window = dom.create(Elements::Window {
+                style: Box::default(),
+            });
+            let div = dom.create(Elements::Div {
+                style: Box::default(),
+            });
             dom.append_child(root, window).unwrap();
             dom.append_child(window, div).unwrap();
         }
@@ -910,7 +918,9 @@ mod tests {
             snapshot.revision()
         );
 
-        owner.mutate().create(Elements::Div);
+        owner.mutate().create(Elements::Div {
+            style: Box::default(),
+        });
         owner.checkpoint().unwrap();
         let newer = shared.load();
         assert!(matches!(
@@ -931,7 +941,9 @@ mod tests {
         let window = {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let window = dom.create(Elements::Window);
+            let window = dom.create(Elements::Window {
+                style: Box::default(),
+            });
             dom.append_child(root, window).unwrap();
             window
         };
@@ -951,7 +963,9 @@ mod tests {
             scale_factor: 2.0,
         };
 
-        owner.mutate().create(Elements::Div);
+        owner.mutate().create(Elements::Div {
+            style: Box::default(),
+        });
         owner.checkpoint().unwrap();
         assert!(shared.load().revision() > presented.revision());
 

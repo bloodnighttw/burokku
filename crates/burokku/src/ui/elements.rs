@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use self::styles::{flex::FlexStyle, grid::GridStyle};
+use self::styles::{flex::FlexStyle, grid::GridStyle, CommonStyle, RgbaColor};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
@@ -32,9 +32,13 @@ pub enum Elements {
     // for <app> tag
     App,
     // for <window> tag
-    Window,
+    Window {
+        style: Box<CommonStyle>,
+    },
     // for <div> tag
-    Div,
+    Div {
+        style: Box<CommonStyle>,
+    },
     // for <flex> tag
     Flex {
         style: Box<FlexStyle>,
@@ -44,7 +48,9 @@ pub enum Elements {
         style: Box<GridStyle>,
     },
     // for <text> tag
-    Text,
+    Text {
+        style: Box<CommonStyle>,
+    },
     /// Internal element used for text content. It is not intended to be
     /// constructed directly by application code.
     _String {
@@ -56,13 +62,59 @@ pub enum Elements {
 impl Elements {
     fn accepts(&self, child: &Self) -> bool {
         match self {
-            Self::App => matches!(child, Self::Window),
-            Self::Window | Self::Div | Self::Flex { .. } | Self::Grid { .. } => matches!(
-                child,
-                Self::Div | Self::Flex { .. } | Self::Grid { .. } | Self::Text
-            ),
-            Self::Text => matches!(child, Self::Text | Self::_String { .. }),
+            Self::App => matches!(child, Self::Window { .. }),
+            Self::Window { .. } | Self::Div { .. } | Self::Flex { .. } | Self::Grid { .. } => {
+                matches!(
+                    child,
+                    Self::Div { .. } | Self::Flex { .. } | Self::Grid { .. } | Self::Text { .. }
+                )
+            }
+            Self::Text { .. } => matches!(child, Self::Text { .. } | Self::_String { .. }),
             Self::_String { .. } => false,
+        }
+    }
+
+    fn supports_style_property(&self, name: &str) -> bool {
+        match self {
+            Self::Window { .. } | Self::Div { .. } | Self::Text { .. } => {
+                CommonStyle::supports(name)
+            }
+            Self::Flex { .. } => FlexStyle::supports(name),
+            Self::Grid { .. } => GridStyle::supports(name),
+            Self::App | Self::_String { .. } => false,
+        }
+    }
+
+    fn set_style_property(&mut self, name: &str, value: &str) -> bool {
+        match self {
+            Self::Window { style } | Self::Div { style } | Self::Text { style } => {
+                style.set_property(name, value)
+            }
+            Self::Flex { style } => style.set_property(name, value),
+            Self::Grid { style } => style.set_property(name, value),
+            Self::App | Self::_String { .. } => false,
+        }
+    }
+
+    fn remove_style_property(&mut self, name: &str) -> bool {
+        match self {
+            Self::Window { style } | Self::Div { style } | Self::Text { style } => {
+                style.remove_property(name)
+            }
+            Self::Flex { style } => style.remove_property(name),
+            Self::Grid { style } => style.remove_property(name),
+            Self::App | Self::_String { .. } => false,
+        }
+    }
+
+    pub fn background_color(&self) -> Option<RgbaColor> {
+        match self {
+            Self::Window { style } | Self::Div { style } | Self::Text { style } => {
+                style.background_color
+            }
+            Self::Flex { style } => style.common.background_color,
+            Self::Grid { style } => style.common.background_color,
+            Self::App | Self::_String { .. } => None,
         }
     }
 }
@@ -86,7 +138,6 @@ pub struct Node {
     parent: Option<NodeId>,
     children: Vec<NodeId>,
     attributes: BTreeMap<String, String>,
-    styles: BTreeMap<String, String>,
     revisions: NodeRevisions,
 }
 
@@ -105,10 +156,6 @@ impl Node {
 
     pub fn attributes(&self) -> &BTreeMap<String, String> {
         &self.attributes
-    }
-
-    pub fn styles(&self) -> &BTreeMap<String, String> {
-        &self.styles
     }
 
     pub fn revisions(&self) -> NodeRevisions {
@@ -145,7 +192,6 @@ impl Dom {
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
-            styles: BTreeMap::new(),
             revisions: NodeRevisions::default(),
         }));
 
@@ -180,16 +226,40 @@ impl Dom {
         self.node(id)?.attributes.get(name).map(String::as_str)
     }
 
-    pub fn style(&self, id: NodeId, name: &str) -> Option<&str> {
-        self.node(id)?.styles.get(name).map(String::as_str)
-    }
-
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).and_then(Node::parent)
     }
 
     pub fn children(&self, id: NodeId) -> Option<&[NodeId]> {
         self.node(id).map(Node::children)
+    }
+
+    pub fn supports_style_property(&self, id: NodeId, name: &str) -> Result<bool, DomError> {
+        let element = self.element(id).ok_or(DomError::NodeNotFound(id))?;
+        Ok(element.supports_style_property(name))
+    }
+
+    pub fn set_style_property(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        value: &str,
+    ) -> Result<bool, DomError> {
+        let mut element = self.element(id).ok_or(DomError::NodeNotFound(id))?.clone();
+        if !element.set_style_property(name, value) {
+            return Ok(false);
+        }
+        self.set_element(id, element)?;
+        Ok(true)
+    }
+
+    pub fn remove_style_property(&mut self, id: NodeId, name: &str) -> Result<bool, DomError> {
+        let mut element = self.element(id).ok_or(DomError::NodeNotFound(id))?.clone();
+        if !element.remove_style_property(name) {
+            return Ok(false);
+        }
+        self.set_element(id, element)?;
+        Ok(true)
     }
 
     /// Allocates a detached element and returns its stable handle.
@@ -199,7 +269,6 @@ impl Dom {
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
-            styles: BTreeMap::new(),
             revisions: NodeRevisions::default(),
         }));
         self.bump_revision();
@@ -233,31 +302,6 @@ impl Dom {
         let node = self.node_mut(id)?;
         let removed = node.attributes.remove(name);
         bump(&mut node.revisions.content);
-        self.bump_revision();
-        Ok(removed)
-    }
-
-    /// Stores a normalized CSS property in authoritative DOM data.
-    pub fn set_style(&mut self, id: NodeId, name: String, value: String) -> Result<(), DomError> {
-        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-        if node.styles.get(&name) == Some(&value) {
-            return Ok(());
-        }
-        let node = self.node_mut(id)?;
-        node.styles.insert(name, value);
-        bump(&mut node.revisions.style);
-        self.bump_revision();
-        Ok(())
-    }
-
-    pub fn remove_style(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
-        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-        if !node.styles.contains_key(name) {
-            return Ok(None);
-        }
-        let node = self.node_mut(id)?;
-        let removed = node.styles.remove(name);
-        bump(&mut node.revisions.style);
         self.bump_revision();
         Ok(removed)
     }
@@ -502,8 +546,11 @@ impl ElementRevisionKind {
         }
 
         match (current, replacement) {
-            (Elements::Flex { .. }, Elements::Flex { .. })
-            | (Elements::Grid { .. }, Elements::Grid { .. }) => Self::Style,
+            (Elements::Window { .. }, Elements::Window { .. })
+            | (Elements::Div { .. }, Elements::Div { .. })
+            | (Elements::Flex { .. }, Elements::Flex { .. })
+            | (Elements::Grid { .. }, Elements::Grid { .. })
+            | (Elements::Text { .. }, Elements::Text { .. }) => Self::Style,
             (Elements::_String { .. }, Elements::_String { .. }) => Self::Content,
             _ => Self::All,
         }
@@ -560,38 +607,64 @@ mod tests {
     #[test]
     fn handles_survive_moves_updates_and_snapshot_clones() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window);
-        let first_parent = dom.create(Elements::Div);
-        let second_parent = dom.create(Elements::Div);
-        let child = dom.create(Elements::Text);
+        let window = dom.create(Elements::Window {
+            style: Box::default(),
+        });
+        let first_parent = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let second_parent = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let child = dom.create(Elements::Text {
+            style: Box::default(),
+        });
 
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, first_parent).unwrap();
         dom.append_child(window, second_parent).unwrap();
         dom.append_child(first_parent, child).unwrap();
         dom.append_child(second_parent, child).unwrap();
-        dom.set_element(child, Elements::Text).unwrap();
+        dom.set_element(
+            child,
+            Elements::Text {
+                style: Box::default(),
+            },
+        )
+        .unwrap();
 
         assert_eq!(dom.parent(child), Some(second_parent));
-        assert!(matches!(dom.element(child), Some(Elements::Text)));
+        assert!(matches!(dom.element(child), Some(Elements::Text { .. })));
 
         let snapshot = dom.clone();
-        assert!(matches!(snapshot.element(child), Some(Elements::Text)));
+        assert!(matches!(
+            snapshot.element(child),
+            Some(Elements::Text { .. })
+        ));
         assert_eq!(snapshot.parent(child), Some(second_parent));
     }
 
     #[test]
     fn removed_handles_never_refer_to_reused_slots() {
         let mut dom = Dom::new();
-        let stale = dom.create(Elements::Div);
+        let stale = dom.create(Elements::Div {
+            style: Box::default(),
+        });
         dom.remove_subtree(stale).unwrap();
-        let replacement = dom.create(Elements::Div);
+        let replacement = dom.create(Elements::Div {
+            style: Box::default(),
+        });
 
         assert_ne!(stale, replacement);
         assert!(!dom.contains(stale));
         assert!(dom.contains(replacement));
         assert_eq!(
-            dom.set_element(stale, Elements::Div),
+            dom.set_element(
+                stale,
+                Elements::Div {
+                    style: Box::default(),
+                },
+            ),
             Err(DomError::NodeNotFound(stale))
         );
     }
@@ -599,9 +672,15 @@ mod tests {
     #[test]
     fn invalid_mutations_leave_the_tree_unchanged() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window);
-        let div = dom.create(Elements::Div);
-        let text = dom.create(Elements::Text);
+        let window = dom.create(Elements::Window {
+            style: Box::default(),
+        });
+        let div = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let text = dom.create(Elements::Text {
+            style: Box::default(),
+        });
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, div).unwrap();
         dom.append_child(div, text).unwrap();
@@ -627,7 +706,10 @@ mod tests {
         });
 
         let style = FlexStyle {
-            grow: 1.0,
+            common: CommonStyle {
+                flex_grow: 1.0,
+                ..CommonStyle::default()
+            },
             ..FlexStyle::default()
         };
         dom.set_element(
@@ -664,9 +746,15 @@ mod tests {
     #[test]
     fn structural_mutations_mark_only_affected_nodes() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window);
-        let first = dom.create(Elements::Div);
-        let second = dom.create(Elements::Div);
+        let window = dom.create(Elements::Window {
+            style: Box::default(),
+        });
+        let first = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let second = dom.create(Elements::Div {
+            style: Box::default(),
+        });
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, first).unwrap();
         dom.append_child(window, second).unwrap();
@@ -691,11 +779,19 @@ mod tests {
     #[test]
     fn no_op_replacement_does_not_advance_revisions() {
         let mut dom = Dom::new();
-        let div = dom.create(Elements::Div);
+        let div = dom.create(Elements::Div {
+            style: Box::default(),
+        });
         let dom_revision = dom.revision();
         let node_revisions = dom.node(div).unwrap().revisions();
 
-        dom.set_element(div, Elements::Div).unwrap();
+        dom.set_element(
+            div,
+            Elements::Div {
+                style: Box::default(),
+            },
+        )
+        .unwrap();
 
         assert_eq!(dom.revision(), dom_revision);
         assert_eq!(dom.node(div).unwrap().revisions(), node_revisions);
@@ -704,8 +800,12 @@ mod tests {
     #[test]
     fn removing_a_subtree_invalidates_descendants() {
         let mut dom = Dom::new();
-        let parent = dom.create(Elements::Div);
-        let child = dom.create(Elements::Text);
+        let parent = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let child = dom.create(Elements::Text {
+            style: Box::default(),
+        });
         dom.append_child(parent, child).unwrap();
 
         dom.remove_subtree(parent).unwrap();

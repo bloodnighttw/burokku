@@ -274,8 +274,12 @@ mod tests {
         let (window, div) = {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let window = dom.create(Elements::Window);
-            let div = dom.create(Elements::Div);
+            let window = dom.create(Elements::Window {
+                style: Box::default(),
+            });
+            let div = dom.create(Elements::Div {
+                style: Box::default(),
+            });
             dom.append_child(root, window).unwrap();
             dom.append_child(window, div).unwrap();
             (window, div)
@@ -300,8 +304,12 @@ mod tests {
         let (window, div) = {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let window = dom.create(Elements::Window);
-            let div = dom.create(Elements::Div);
+            let window = dom.create(Elements::Window {
+                style: Box::default(),
+            });
+            let div = dom.create(Elements::Div {
+                style: Box::default(),
+            });
             dom.append_child(root, window).unwrap();
             dom.append_child(window, div).unwrap();
             (window, div)
@@ -333,10 +341,18 @@ mod tests {
         let (first_parent, second_parent, child) = {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let window = dom.create(Elements::Window);
-            let first_parent = dom.create(Elements::Div);
-            let second_parent = dom.create(Elements::Div);
-            let child = dom.create(Elements::Text);
+            let window = dom.create(Elements::Window {
+                style: Box::default(),
+            });
+            let first_parent = dom.create(Elements::Div {
+                style: Box::default(),
+            });
+            let second_parent = dom.create(Elements::Div {
+                style: Box::default(),
+            });
+            let child = dom.create(Elements::Text {
+                style: Box::default(),
+            });
             dom.append_child(root, window).unwrap();
             dom.append_child(window, first_parent).unwrap();
             dom.append_child(window, second_parent).unwrap();
@@ -362,8 +378,12 @@ mod tests {
         let mut owner = BtsDom::new(shared);
         let (parent, child) = {
             let mut dom = owner.mutate();
-            let parent = dom.create(Elements::Div);
-            let child = dom.create(Elements::Text);
+            let parent = dom.create(Elements::Div {
+                style: Box::default(),
+            });
+            let child = dom.create(Elements::Text {
+                style: Box::default(),
+            });
             dom.append_child(parent, child).unwrap();
             (parent, child)
         };
@@ -372,7 +392,9 @@ mod tests {
         assert!(owner.staging().shares_node_with(old.dom(), parent));
         assert_eq!(
             owner.mutate().remove_subtree(parent).unwrap(),
-            Elements::Div
+            Elements::Div {
+                style: Box::default(),
+            }
         );
 
         assert!(!owner.staging().contains(parent));
@@ -390,8 +412,12 @@ mod tests {
         let (window, div) = {
             let mut dom = owner.mutate();
             let root = dom.root();
-            let window = dom.create(Elements::Window);
-            let div = dom.create(Elements::Div);
+            let window = dom.create(Elements::Window {
+                style: Box::default(),
+            });
+            let div = dom.create(Elements::Div {
+                style: Box::default(),
+            });
             dom.set_attribute(div, "state".into(), "same".into())
                 .unwrap();
             dom.append_child(root, window).unwrap();
@@ -420,8 +446,12 @@ mod tests {
 
         {
             let mut dom = owner.mutate();
-            dom.create(Elements::Div);
-            dom.create(Elements::Text);
+            dom.create(Elements::Div {
+                style: Box::default(),
+            });
+            dom.create(Elements::Text {
+                style: Box::default(),
+            });
             dom.create(Elements::_String {
                 string: "content".into(),
             });
@@ -442,7 +472,14 @@ mod tests {
 
         {
             let mut dom = owner.mutate();
-            assert!(dom.set_element(missing, Elements::Div).is_err());
+            assert!(dom
+                .set_element(
+                    missing,
+                    Elements::Div {
+                        style: Box::default(),
+                    },
+                )
+                .is_err());
             let root = dom.root();
             dom.set_element(root, Elements::App).unwrap();
         }
@@ -457,7 +494,9 @@ mod tests {
         let mut owner = BtsDom::new(shared.clone());
         owner.begin_batch().unwrap();
         owner.begin_batch().unwrap();
-        owner.mutate().create(Elements::Div);
+        owner.mutate().create(Elements::Div {
+            style: Box::default(),
+        });
 
         assert!(owner.checkpoint().unwrap().is_none());
         owner.end_batch().unwrap();
@@ -473,7 +512,9 @@ mod tests {
         let mut owner = BtsDom::new(shared.clone());
         let stale = {
             let mut dom = owner.mutate();
-            let stale = dom.create(Elements::Div);
+            let stale = dom.create(Elements::Div {
+                style: Box::default(),
+            });
             dom.remove_subtree(stale).unwrap();
             stale
         };

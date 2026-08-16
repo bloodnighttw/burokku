@@ -1,9 +1,9 @@
 use taffy::{
     geometry::{Line, MinMax, Size},
-    AlignContent, AlignItems, AlignSelf, GridAutoFlow, JustifyContent, JustifyItems, JustifySelf,
+    AlignContent, AlignItems, GridAutoFlow, JustifyContent, JustifyItems, JustifySelf,
 };
 
-use super::LengthPercentage;
+use super::{parse_length_percentage, CommonStyle, LengthPercentage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GridTemplateArea {
@@ -204,6 +204,8 @@ impl GridTemplateComponent {
 /// Thread-safe properties used to lay out a grid container and its grid items.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridStyle {
+    pub common: CommonStyle,
+
     // Container properties
     pub template_rows: Vec<GridTemplateComponent>,
     pub template_columns: Vec<GridTemplateComponent>,
@@ -222,14 +224,13 @@ pub struct GridStyle {
     // Item properties
     pub row: Line<GridPlacement>,
     pub column: Line<GridPlacement>,
-    pub align_self: Option<AlignSelf>,
     pub justify_self: Option<JustifySelf>,
 }
 
 impl GridStyle {
     /// Build the Taffy value consumed only by MTS computed/layout state.
     pub fn to_taffy_style(&self) -> taffy::Style<String> {
-        taffy::Style {
+        let mut style = taffy::Style {
             display: taffy::Display::Grid,
             grid_template_rows: self
                 .template_rows
@@ -277,16 +278,99 @@ impl GridStyle {
                 start: self.column.start.to_taffy(),
                 end: self.column.end.to_taffy(),
             },
-            align_self: self.align_self,
             justify_self: self.justify_self,
             ..taffy::Style::default()
+        };
+        self.common.apply_to_taffy(&mut style);
+        style
+    }
+
+    pub(crate) fn supports(name: &str) -> bool {
+        CommonStyle::supports(name)
+            || matches!(
+                name,
+                "gap"
+                    | "column-gap"
+                    | "row-gap"
+                    | "align-content"
+                    | "align-items"
+                    | "justify-content"
+                    | "justify-items"
+                    | "justify-self"
+            )
+    }
+
+    pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
+        if CommonStyle::supports(name) {
+            return self.common.set_property(name, value);
         }
+        match name {
+            "gap" => parse_length_percentage(value).is_some_and(|value| {
+                self.gap = Size {
+                    width: value,
+                    height: value,
+                };
+                true
+            }),
+            "column-gap" => parse_length_percentage(value).is_some_and(|value| {
+                self.gap.width = value;
+                true
+            }),
+            "row-gap" => parse_length_percentage(value).is_some_and(|value| {
+                self.gap.height = value;
+                true
+            }),
+            "align-content" => value.parse().ok().is_some_and(|value| {
+                self.align_content = Some(value);
+                true
+            }),
+            "align-items" => value.parse().ok().is_some_and(|value| {
+                self.align_items = Some(value);
+                true
+            }),
+            "justify-content" => value.parse().ok().is_some_and(|value| {
+                self.justify_content = Some(value);
+                true
+            }),
+            "justify-items" => value.parse().ok().is_some_and(|value| {
+                self.justify_items = Some(value);
+                true
+            }),
+            "justify-self" => value.parse().ok().is_some_and(|value| {
+                self.justify_self = Some(value);
+                true
+            }),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn remove_property(&mut self, name: &str) -> bool {
+        if CommonStyle::supports(name) {
+            return self.common.remove_property(name);
+        }
+        if !Self::supports(name) {
+            return false;
+        }
+        let defaults = Self::default();
+        match name {
+            "gap" => self.gap = defaults.gap,
+            "column-gap" => self.gap.width = defaults.gap.width,
+            "row-gap" => self.gap.height = defaults.gap.height,
+            "align-content" => self.align_content = defaults.align_content,
+            "align-items" => self.align_items = defaults.align_items,
+            "justify-content" => self.justify_content = defaults.justify_content,
+            "justify-items" => self.justify_items = defaults.justify_items,
+            "justify-self" => self.justify_self = defaults.justify_self,
+            _ => unreachable!("support was checked above"),
+        }
+        true
     }
 }
 
 impl Default for GridStyle {
     fn default() -> Self {
         Self {
+            common: CommonStyle::default(),
             template_rows: Vec::new(),
             template_columns: Vec::new(),
             template_areas: Vec::new(),
@@ -311,7 +395,6 @@ impl Default for GridStyle {
                 start: GridPlacement::Auto,
                 end: GridPlacement::Auto,
             },
-            align_self: None,
             justify_self: None,
         }
     }

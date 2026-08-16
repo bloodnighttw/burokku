@@ -2,7 +2,10 @@ use std::{hint::black_box, time::Duration, time::Instant};
 
 use burokku::ui::{
     computed::ComputedState,
-    elements::{BtsDom, Elements, NodeId, SharedDom},
+    elements::{
+        styles::{flex::FlexStyle, CommonStyle},
+        BtsDom, Elements, NodeId, SharedDom,
+    },
     frame::SceneState,
 };
 use runtime::{MacrotaskQueueError, Runtime, RuntimeRole};
@@ -77,11 +80,14 @@ fn build_tree(size: usize) -> (SharedDom, BtsDom, Vec<NodeId>) {
     {
         let mut dom = owner.mutate();
         let root = dom.root();
-        let window = dom.create(Elements::Window);
+        let window = dom.create(Elements::Window {
+            style: Box::default(),
+        });
         dom.append_child(root, window).unwrap();
         for _ in 0..size {
-            let node = dom.create(Elements::Div);
-            dom.set_style(node, "height".into(), "1px".into()).unwrap();
+            let node = dom.create(Elements::Div {
+                style: Box::default(),
+            });
             dom.append_child(window, node).unwrap();
             nodes.push(node);
         }
@@ -174,11 +180,21 @@ fn layout_benchmarks() {
         let mut computed = ComputedState::new();
         measure_recorded("layout_fully_dirty", size, iterations_for(size), || {
             generation = generation.wrapping_add(1);
-            let value = generation.to_string();
             let mut dom = owner.mutate();
             for node in &nodes {
-                dom.set_style(*node, "opacity".into(), value.clone())
-                    .unwrap();
+                dom.set_element(
+                    *node,
+                    Elements::Flex {
+                        style: Box::new(FlexStyle {
+                            common: CommonStyle {
+                                flex_grow: generation as f32,
+                                ..CommonStyle::default()
+                            },
+                            ..FlexStyle::default()
+                        }),
+                    },
+                )
+                .unwrap();
             }
             drop(dom);
             let snapshot = owner.checkpoint().unwrap().unwrap();
