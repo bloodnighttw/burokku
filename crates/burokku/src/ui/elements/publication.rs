@@ -1,6 +1,7 @@
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
+    time::Instant,
 };
 
 use arc_swap::ArcSwap;
@@ -8,6 +9,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use super::Dom;
+use crate::ui::metrics::PerformanceMetrics;
 
 /// One immutable, atomically published DOM revision.
 ///
@@ -17,6 +19,7 @@ use super::Dom;
 pub struct DomSnapshot {
     revision: u64,
     dom: Dom,
+    published_at: Instant,
 }
 
 impl DomSnapshot {
@@ -27,11 +30,17 @@ impl DomSnapshot {
     pub fn dom(&self) -> &Dom {
         &self.dom
     }
+
+    /// Monotonic timestamp captured immediately before atomic publication.
+    pub fn published_at(&self) -> Instant {
+        self.published_at
+    }
 }
 
 struct SharedDomInner {
     committed: ArcSwap<DomSnapshot>,
     commits: watch::Sender<u64>,
+    metrics: PerformanceMetrics,
 }
 
 /// The thread-safe pointer shared by BTS and MTS.
@@ -48,12 +57,14 @@ impl SharedDom {
         let initial = Arc::new(DomSnapshot {
             revision: 0,
             dom: Dom::new(),
+            published_at: Instant::now(),
         });
         let (commits, _) = watch::channel(0);
         Self {
             inner: Arc::new(SharedDomInner {
                 committed: ArcSwap::new(initial),
                 commits,
+                metrics: PerformanceMetrics::default(),
             }),
         }
     }
@@ -67,6 +78,11 @@ impl SharedDom {
     #[allow(dead_code)] // Consumed by tests now and the MTS frame loop in Phase 3.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.commits.subscribe()
+    }
+
+    /// Shared lock-free diagnostic counters for commits and MTS frames.
+    pub fn metrics(&self) -> PerformanceMetrics {
+        self.inner.metrics.clone()
     }
 
     fn publish(&self, snapshot: Arc<DomSnapshot>) {
@@ -172,11 +188,19 @@ impl BtsDom {
             .committed_revision
             .checked_add(1)
             .ok_or(CommitError::RevisionOverflow)?;
+        let snapshot_started = Instant::now();
         let snapshot = Arc::new(DomSnapshot {
             revision,
             dom: self.staging.clone(),
+            published_at: Instant::now(),
         });
+        let snapshot_creation = snapshot_started.elapsed();
+        let publication_started = Instant::now();
         self.shared.publish(snapshot.clone());
+        let publication = publication_started.elapsed();
+        self.shared
+            .metrics()
+            .record_commit(snapshot_creation, publication);
         self.committed_revision = revision;
         self.dirty = false;
         Ok(Some(snapshot))

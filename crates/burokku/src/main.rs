@@ -15,9 +15,8 @@ use runtime::{
 use tokio::sync::oneshot;
 use winit::{EventLoop, Window};
 
-mod ui;
-
-use ui::{
+use burokku::ui::{
+    self,
     events::EventDispatcher,
     frame::{FrameRenderer, UiApplication},
 };
@@ -143,6 +142,9 @@ async fn run_windowed(source: String) -> Result<(), Box<dyn Error>> {
 
     let mut application = native_result?;
     runtime_result?;
+    if std::env::var_os("BUROKKU_PRINT_METRICS").is_some() {
+        eprintln!("Burokku performance metrics: {:#?}", application.metrics());
+    }
     if let Some(error) = application.take_error() {
         return Err(Box::new(error));
     }

@@ -389,8 +389,11 @@ mod tests {
             .unwrap();
         let queue = runtime.macrotask_queue();
 
+        assert_eq!(queue.max_capacity(), 1);
+        assert_eq!(queue.depth(), 0);
         queue.try_enqueue(|_| Ok(())).unwrap();
         assert_eq!(queue.capacity(), 0);
+        assert_eq!(queue.depth(), 1);
         assert_eq!(
             queue.try_enqueue(|_| Ok(())),
             Err(MacrotaskQueueError::Full)
