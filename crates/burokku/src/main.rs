@@ -17,7 +17,10 @@ use winit::{EventLoop, Window};
 
 mod ui;
 
-use ui::frame::{FrameRenderer, UiApplication};
+use ui::{
+    events::EventDispatcher,
+    frame::{FrameRenderer, UiApplication},
+};
 
 const MAIN_SCRIPT: &str = r#"console.log("Hello, world from the main runtime!");"#;
 const BACKGROUND_SCRIPT: &str = r#"console.log("Hello, world from the background runtime!");"#;
@@ -94,12 +97,14 @@ async fn run_windowed(source: String) -> Result<(), Box<dyn Error>> {
         .build()
         .await?;
 
+    let event_dispatcher = EventDispatcher::new(runtime.background().macrotask_queue());
     let (close_sender, close_receiver) = oneshot::channel();
     let external_exit = Arc::new(AtomicBool::new(false));
     let application = UiApplication::new(
         window,
         shared_dom,
         renderer,
+        event_dispatcher,
         close_sender,
         external_exit.clone(),
     );

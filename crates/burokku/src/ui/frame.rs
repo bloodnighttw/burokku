@@ -15,13 +15,14 @@ use wgpu::{
     SurfaceConfiguration, TextureViewDescriptor,
 };
 use winit::{
-    application::ApplicationHandler, ActiveEventLoop, ControlFlow, PhysicalSize, Window,
-    WindowEvent, WindowId,
+    application::ApplicationHandler, ActiveEventLoop, ControlFlow, ElementState, Modifiers,
+    MouseButton, PhysicalPosition, PhysicalSize, Window, WindowEvent, WindowId,
 };
 
 use super::{
-    computed::ComputedState,
-    elements::{DomSnapshot, Elements, SharedDom},
+    computed::{ComputedState, HitTestData},
+    elements::{DomSnapshot, Elements, NodeId, SharedDom},
+    events::{DispatchOutcome, DomEvent, DomEventData, EventDispatcher, EventModifiers},
 };
 
 const DEFAULT_SCALE_FACTOR: f64 = 1.0;
@@ -54,11 +55,44 @@ pub enum FrameError {
 }
 
 /// Result of one requested frame.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum FrameOutcome {
-    Presented(u64),
+    Presented { revision: u64, scale_factor: f64 },
     Retry,
     Occluded,
+}
+
+/// Immutable targeting data for the frame that actually reached the surface.
+/// It is replaced only after a successful present, never merely after layout
+/// or scene construction.
+#[derive(Clone, Debug)]
+struct PresentedFrame {
+    snapshot: Arc<DomSnapshot>,
+    hit_test: HitTestData,
+    scale_factor: f64,
+}
+
+impl PresentedFrame {
+    fn revision(&self) -> u64 {
+        self.snapshot.revision()
+    }
+
+    fn hit_test_physical(&self, position: PhysicalPosition<f64>) -> Option<(NodeId, f64, f64)> {
+        let client_x = position.x / self.scale_factor;
+        let client_y = position.y / self.scale_factor;
+        let target = self.hit_test.hit_test(taffy::geometry::Point {
+            x: client_x as f32,
+            y: client_y as f32,
+        })?;
+        Some((target, client_x, client_y))
+    }
+
+    fn window_target(&self) -> NodeId {
+        let dom = self.snapshot.dom();
+        dom.children(dom.root())
+            .and_then(|children| children.first().copied())
+            .unwrap_or_else(|| dom.root())
+    }
 }
 
 /// Coalesces commit, resize, and native redraw requests into one pending frame.
@@ -356,7 +390,10 @@ impl FrameRenderer {
         if surface_texture.1 {
             self.surface.configure(&self.device, &self.surface_config);
         }
-        Ok(FrameOutcome::Presented(snapshot.revision()))
+        Ok(FrameOutcome::Presented {
+            revision: snapshot.revision(),
+            scale_factor,
+        })
     }
 }
 
@@ -372,13 +409,20 @@ impl std::fmt::Debug for FrameRenderer {
 }
 
 /// Native event handler that owns all window, layout, scene, and GPU state on
-/// MTS. BTS only publishes immutable snapshots and coalescing notifications.
+/// MTS. BTS publishes immutable snapshots and receives owned events through a
+/// bounded macrotask queue.
 pub struct UiApplication {
     window: Arc<Window>,
     shared_dom: SharedDom,
     commits: watch::Receiver<u64>,
     renderer: FrameRenderer,
     scheduler: FrameScheduler,
+    presented: Option<PresentedFrame>,
+    event_dispatcher: EventDispatcher,
+    modifiers: Modifiers,
+    mouse_buttons: u16,
+    primary_press_target: Option<NodeId>,
+    dropped_events: u64,
     occluded: bool,
     close_sender: Option<oneshot::Sender<()>>,
     external_exit: Arc<AtomicBool>,
@@ -390,6 +434,7 @@ impl UiApplication {
         window: Arc<Window>,
         shared_dom: SharedDom,
         renderer: FrameRenderer,
+        event_dispatcher: EventDispatcher,
         close_sender: oneshot::Sender<()>,
         external_exit: Arc<AtomicBool>,
     ) -> Self {
@@ -400,6 +445,12 @@ impl UiApplication {
             commits,
             renderer,
             scheduler: FrameScheduler::default(),
+            presented: None,
+            event_dispatcher,
+            modifiers: Modifiers::default(),
+            mouse_buttons: 0,
+            primary_press_target: None,
+            dropped_events: 0,
             occluded: false,
             close_sender: Some(close_sender),
             external_exit,
@@ -439,6 +490,72 @@ impl UiApplication {
         self.request_exit(event_loop);
     }
 
+    fn dispatch_event(&mut self, event_loop: &ActiveEventLoop, event: DomEvent) {
+        match self.event_dispatcher.try_dispatch(event) {
+            DispatchOutcome::Queued => {}
+            DispatchOutcome::DroppedBackpressure => {
+                // Native callbacks never wait for BTS. Keep a metric and drop
+                // the newest event when the bounded queue is saturated.
+                self.dropped_events = self.dropped_events.saturating_add(1);
+            }
+            DispatchOutcome::RuntimeClosed => self.request_exit(event_loop),
+        }
+    }
+
+    fn pointer_event(
+        &self,
+        event_type: &'static str,
+        position: PhysicalPosition<f64>,
+        button: i16,
+    ) -> Option<DomEvent> {
+        let presented = self.presented.as_ref()?;
+        let (target, client_x, client_y) = presented.hit_test_physical(position)?;
+        Some(DomEvent {
+            target,
+            presented_revision: presented.revision(),
+            data: DomEventData::Pointer {
+                event_type,
+                client_x,
+                client_y,
+                button,
+                buttons: self.mouse_buttons,
+                modifiers: self.modifiers.into(),
+            },
+        })
+    }
+
+    fn wheel_event(
+        &self,
+        position: PhysicalPosition<f64>,
+        delta_x: f64,
+        delta_y: f64,
+        precise: bool,
+    ) -> Option<DomEvent> {
+        let presented = self.presented.as_ref()?;
+        let (target, client_x, client_y) = presented.hit_test_physical(position)?;
+        Some(DomEvent {
+            target,
+            presented_revision: presented.revision(),
+            data: DomEventData::Wheel {
+                client_x,
+                client_y,
+                delta_x,
+                delta_y,
+                precise,
+                modifiers: self.modifiers.into(),
+            },
+        })
+    }
+
+    fn window_targeted_event(&self, data: DomEventData) -> Option<DomEvent> {
+        let presented = self.presented.as_ref()?;
+        Some(DomEvent {
+            target: presented.window_target(),
+            presented_revision: presented.revision(),
+            data,
+        })
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         if !self.scheduler.begin_frame() {
             return;
@@ -449,7 +566,22 @@ impl UiApplication {
         // considered for a subsequent frame.
         let snapshot = self.shared_dom.load();
         match self.renderer.render_frame(&self.window, &snapshot) {
-            Ok(FrameOutcome::Presented(revision)) => {
+            Ok(FrameOutcome::Presented {
+                revision,
+                scale_factor,
+            }) => {
+                let hit_test = self
+                    .renderer
+                    .computed
+                    .hit_test_data()
+                    .expect("a presented frame has computed hit-test data")
+                    .clone();
+                debug_assert_eq!(hit_test.source_revision(), revision);
+                self.presented = Some(PresentedFrame {
+                    snapshot,
+                    hit_test,
+                    scale_factor,
+                });
                 self.scheduler.finish_frame(revision);
                 self.consume_commit_notification();
             }
@@ -494,12 +626,98 @@ impl ApplicationHandler for UiApplication {
                     self.schedule_redraw();
                 }
             }
-            WindowEvent::Focused(_)
-            | WindowEvent::KeyboardInput(_)
-            | WindowEvent::ModifiersChanged(_)
-            | WindowEvent::CursorMoved { .. }
-            | WindowEvent::MouseInput { .. }
-            | WindowEvent::MouseWheel { .. } => {}
+            WindowEvent::Focused(focused) => {
+                if let Some(event) = self.window_targeted_event(DomEventData::Focus { focused }) {
+                    self.dispatch_event(event_loop, event);
+                }
+            }
+            WindowEvent::KeyboardInput(key) => {
+                self.modifiers = key.modifiers;
+                let event_type = match key.state {
+                    ElementState::Pressed => "keydown",
+                    ElementState::Released => "keyup",
+                };
+                if let Some(event) = self.window_targeted_event(DomEventData::Keyboard {
+                    event_type,
+                    key_code: key.key_code,
+                    key: key.text,
+                    repeat: key.repeat,
+                    modifiers: key.modifiers.into(),
+                }) {
+                    self.dispatch_event(event_loop, event);
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            WindowEvent::CursorMoved { position } => {
+                if let Some(event) = self.pointer_event("mousemove", position, -1) {
+                    self.dispatch_event(event_loop, event);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button,
+                position,
+            } => {
+                let mask = mouse_button_mask(button);
+                match state {
+                    ElementState::Pressed => self.mouse_buttons |= mask,
+                    ElementState::Released => self.mouse_buttons &= !mask,
+                }
+                let event_type = match state {
+                    ElementState::Pressed => "mousedown",
+                    ElementState::Released => "mouseup",
+                };
+                if let Some(event) =
+                    self.pointer_event(event_type, position, dom_mouse_button(button))
+                {
+                    let click_target = (button == MouseButton::Left
+                        && state == ElementState::Released
+                        && self.primary_press_target == Some(event.target))
+                    .then_some(event.target);
+                    if button == MouseButton::Left {
+                        self.primary_press_target = match state {
+                            ElementState::Pressed => Some(event.target),
+                            ElementState::Released => None,
+                        };
+                    }
+                    let click_event = click_target.map(|target| {
+                        let DomEventData::Pointer {
+                            client_x, client_y, ..
+                        } = &event.data
+                        else {
+                            unreachable!("pointer_event always creates pointer data")
+                        };
+                        DomEvent {
+                            target,
+                            presented_revision: event.presented_revision,
+                            data: DomEventData::Pointer {
+                                event_type: "click",
+                                client_x: *client_x,
+                                client_y: *client_y,
+                                button: 0,
+                                buttons: self.mouse_buttons,
+                                modifiers: self.modifiers.into(),
+                            },
+                        }
+                    });
+                    self.dispatch_event(event_loop, event);
+                    if let Some(click_event) = click_event {
+                        self.dispatch_event(event_loop, click_event);
+                    }
+                } else if button == MouseButton::Left && state == ElementState::Released {
+                    self.primary_press_target = None;
+                }
+            }
+            WindowEvent::MouseWheel {
+                delta_x,
+                delta_y,
+                precise,
+                position,
+            } => {
+                if let Some(event) = self.wheel_event(position, delta_x, delta_y, precise) {
+                    self.dispatch_event(event_loop, event);
+                }
+            }
         }
     }
 
@@ -516,6 +734,37 @@ impl ApplicationHandler for UiApplication {
         if let Some(sender) = self.close_sender.take() {
             let _ = sender.send(());
         }
+    }
+}
+
+impl From<Modifiers> for EventModifiers {
+    fn from(modifiers: Modifiers) -> Self {
+        Self {
+            shift: modifiers.shift,
+            control: modifiers.control,
+            alt: modifiers.alt,
+            command: modifiers.command,
+            caps_lock: modifiers.caps_lock,
+        }
+    }
+}
+
+fn dom_mouse_button(button: MouseButton) -> i16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::Other(button) => i16::try_from(button).unwrap_or(i16::MAX),
+    }
+}
+
+fn mouse_button_mask(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 2,
+        MouseButton::Middle => 4,
+        MouseButton::Other(button) if button < 13 => 1 << (button + 3),
+        MouseButton::Other(_) => 0,
     }
 }
 
@@ -602,6 +851,45 @@ mod tests {
             Some(snapshot.revision()),
             "a mismatched snapshot must not replace the last coherent scene"
         );
+    }
+
+    #[test]
+    fn hit_testing_stays_on_the_last_presented_revision() {
+        let shared = SharedDom::new();
+        let mut owner = BtsDom::new(shared.clone());
+        let window = {
+            let mut dom = owner.mutate();
+            let root = dom.root();
+            let window = dom.create(Elements::Window);
+            dom.append_child(root, window).unwrap();
+            window
+        };
+        owner.checkpoint().unwrap();
+        let presented_snapshot = shared.load();
+        let mut computed = ComputedState::new();
+        computed.compute_layout(
+            &presented_snapshot,
+            taffy::geometry::Size {
+                width: taffy::AvailableSpace::Definite(800.0),
+                height: taffy::AvailableSpace::Definite(600.0),
+            },
+        );
+        let presented = PresentedFrame {
+            snapshot: presented_snapshot.clone(),
+            hit_test: computed.hit_test_data().unwrap().clone(),
+            scale_factor: 2.0,
+        };
+
+        owner.mutate().create(Elements::Div);
+        owner.checkpoint().unwrap();
+        assert!(shared.load().revision() > presented.revision());
+
+        let (target, client_x, client_y) = presented
+            .hit_test_physical(PhysicalPosition::new(400.0, 300.0))
+            .unwrap();
+        assert_eq!(target, window);
+        assert_eq!((client_x, client_y), (200.0, 150.0));
+        assert_eq!(presented.revision(), presented_snapshot.revision());
     }
 
     #[test]

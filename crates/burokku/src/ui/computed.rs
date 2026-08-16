@@ -1,4 +1,3 @@
-// Phase 4 wires this MTS state into the native frame loop.
 #![allow(dead_code)]
 
 use std::{collections::HashMap, ops::Deref};
@@ -138,10 +137,7 @@ pub struct HitTestEntry {
     pub size: Size<f32>,
 }
 
-/// Revision-tagged geometry consumed by the later event/hit-testing phase.
-///
-/// Phase 3 only prepares coherent geometry. Hit-testing policy and event
-/// targeting are implemented in Phase 5.
+/// Revision-tagged geometry used for scene construction and native hit testing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HitTestData {
     source_revision: u64,
@@ -155,6 +151,26 @@ impl HitTestData {
 
     pub fn entries(&self) -> &[HitTestEntry] {
         &self.entries
+    }
+
+    /// Return the topmost node containing a logical viewport coordinate.
+    ///
+    /// Scene construction paints entries in traversal order, so testing in
+    /// reverse order applies the same last-painted-wins policy. Right and
+    /// bottom edges are exclusive to avoid two adjacent boxes claiming the
+    /// same coordinate.
+    pub fn hit_test(&self, point: Point<f32>) -> Option<NodeId> {
+        self.entries.iter().rev().find_map(|entry| {
+            let right = entry.location.x + entry.size.width;
+            let bottom = entry.location.y + entry.size.height;
+            (entry.size.width > 0.0
+                && entry.size.height > 0.0
+                && point.x >= entry.location.x
+                && point.y >= entry.location.y
+                && point.x < right
+                && point.y < bottom)
+                .then_some(entry.node)
+        })
     }
 }
 
@@ -854,5 +870,43 @@ mod tests {
         assert_eq!(hit_test.source_revision(), snapshot.revision());
         assert_eq!(entry.location.x, 75.0);
         assert_eq!(entry.size, computed.layout(second).unwrap().size);
+    }
+
+    #[test]
+    fn hit_testing_uses_reverse_scene_order_and_half_open_edges() {
+        let mut dom = super::super::elements::Dom::new();
+        let back = dom.create(Elements::Div);
+        let front = dom.create(Elements::Div);
+        let hit_test = HitTestData {
+            source_revision: 9,
+            entries: vec![
+                HitTestEntry {
+                    node: back,
+                    order: 0,
+                    location: Point { x: 0.0, y: 0.0 },
+                    size: Size {
+                        width: 100.0,
+                        height: 100.0,
+                    },
+                },
+                HitTestEntry {
+                    node: front,
+                    order: 1,
+                    location: Point { x: 25.0, y: 25.0 },
+                    size: Size {
+                        width: 50.0,
+                        height: 50.0,
+                    },
+                },
+            ],
+        };
+
+        assert_eq!(hit_test.hit_test(Point { x: 50.0, y: 50.0 }), Some(front));
+        assert_eq!(
+            hit_test.hit_test(Point { x: 75.0, y: 50.0 }),
+            Some(back),
+            "the front box's right edge is exclusive"
+        );
+        assert_eq!(hit_test.hit_test(Point { x: 100.0, y: 50.0 }), None);
     }
 }

@@ -58,6 +58,39 @@
     });
   }
 
+  class Event {
+    constructor(type, init = {}) {
+      if (type === undefined || type === null) throw new TypeError("event.type is required");
+      Object.assign(this, init);
+      this.type = String(type);
+      this.bubbles = Boolean(init.bubbles);
+      this.cancelable = Boolean(init.cancelable);
+      this.defaultPrevented = false;
+      this.target = null;
+      this.currentTarget = null;
+      this._propagationStopped = false;
+      this._immediatePropagationStopped = false;
+      this._path = [];
+    }
+
+    composedPath() {
+      return this._path.slice();
+    }
+
+    preventDefault() {
+      if (this.cancelable) this.defaultPrevented = true;
+    }
+
+    stopPropagation() {
+      this._propagationStopped = true;
+    }
+
+    stopImmediatePropagation() {
+      this._propagationStopped = true;
+      this._immediatePropagationStopped = true;
+    }
+  }
+
   class Node {
     constructor(token, handle) {
       if (token !== construct) throw new TypeError("DOM nodes cannot be constructed directly");
@@ -136,10 +169,24 @@
 
     dispatchEvent(event) {
       if (!event || typeof event.type !== "string") throw new TypeError("event.type is required");
-      if (event.target === undefined) Object.defineProperty(event, "target", { value: this });
-      for (const listener of this._listeners.get(event.type.toLowerCase()) ?? []) {
-        listener.call(this, event);
+      if (event.target === undefined || event.target === null) {
+        Object.defineProperty(event, "target", { value: this, configurable: true });
       }
+      const path = [this];
+      if (event.bubbles) {
+        for (let current = this.parentNode; current; current = current.parentNode) path.push(current);
+        path.push(document);
+      }
+      event._path = path;
+      for (const current of path) {
+        Object.defineProperty(event, "currentTarget", { value: current, configurable: true });
+        for (const listener of current._listeners.get(event.type.toLowerCase()) ?? []) {
+          listener.call(current, event);
+          if (event._immediatePropagationStopped) break;
+        }
+        if (event._propagationStopped) break;
+      }
+      Object.defineProperty(event, "currentTarget", { value: null, configurable: true });
       return !event.defaultPrevented;
     }
   }
@@ -203,6 +250,37 @@
   }
 
   class Document {
+    constructor() {
+      this._listeners = new Map();
+    }
+
+    addEventListener(type, listener) {
+      if (typeof listener !== "function") return;
+      const name = String(type).toLowerCase();
+      let listeners = this._listeners.get(name);
+      if (!listeners) this._listeners.set(name, listeners = new Set());
+      listeners.add(listener);
+    }
+
+    removeEventListener(type, listener) {
+      this._listeners.get(String(type).toLowerCase())?.delete(listener);
+    }
+
+    dispatchEvent(event) {
+      if (!event || typeof event.type !== "string") throw new TypeError("event.type is required");
+      if (event.target === undefined || event.target === null) {
+        Object.defineProperty(event, "target", { value: this, configurable: true });
+      }
+      event._path = [this];
+      Object.defineProperty(event, "currentTarget", { value: this, configurable: true });
+      for (const listener of this._listeners.get(event.type.toLowerCase()) ?? []) {
+        listener.call(this, event);
+        if (event._immediatePropagationStopped) break;
+      }
+      Object.defineProperty(event, "currentTarget", { value: null, configurable: true });
+      return !event.defaultPrevented;
+    }
+
     get nodeType() { return Node.DOCUMENT_NODE; }
     get nodeName() { return "#document"; }
     get documentElement() { return wrap(native.root()); }
@@ -213,6 +291,7 @@
   }
 
   Object.defineProperties(globalThis, {
+    Event: { value: Event, configurable: true, writable: true },
     Node: { value: Node, configurable: true, writable: true },
     Element: { value: Element, configurable: true, writable: true },
     HTMLElement: { value: Element, configurable: true, writable: true },
@@ -221,6 +300,17 @@
     Document: { value: Document, configurable: true, writable: true },
     document: { value: new Document(), configurable: true, writable: true }
   });
+  Object.defineProperty(globalThis, "__burokkuDispatchNativeEvent", {
+    configurable: true,
+    value(handle, init) {
+      // A target selected from the presented revision may be gone by the time
+      // BTS reaches this macrotask. Generation validation makes that a quiet
+      // dropped event rather than dispatching to a reused or deleted node.
+      if (!native.contains(handle)) return false;
+      return wrap(handle).dispatchEvent(new Event(init.type, init));
+    }
+  });
+
   if (globalThis.window === undefined) globalThis.window = globalThis;
   delete globalThis.__burokkuDomNative;
 })();
