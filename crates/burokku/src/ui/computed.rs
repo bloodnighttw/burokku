@@ -16,7 +16,7 @@ use taffy::{
     BlockContext, CacheTree,
 };
 
-use super::elements::{styles::Dimension, DomSnapshot, Elements, NodeId};
+use super::elements::{styles::length::Dimension, DomSnapshot, Elements, NodeId};
 
 /// Convert thread-safe authoritative DOM style data into Taffy data on MTS.
 ///
@@ -537,7 +537,7 @@ mod tests {
     use super::*;
     use crate::ui::elements::{
         BtsDom, SharedDom, styles::{
-            Dimension, LengthPercentage, common::CommonStyle, flex::FlexStyle, grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
+            length::{Dimension, LengthPercentage}, common::CommonStyle, flex::FlexStyle, grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
         },
     };
 

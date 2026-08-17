@@ -753,7 +753,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn supported_styles_update_strong_element_data() {
-        use crate::ui::elements::styles::{Dimension, LengthPercentage, RgbaColor};
+        use crate::ui::elements::styles::{
+            length::{Dimension, LengthPercentage},
+            RgbaColor,
+        };
 
         let (runtime, shared) = runtime_with_dom().await;
         let mut commits = shared.subscribe();
