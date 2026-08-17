@@ -3,7 +3,10 @@ use taffy::{
     AlignContent, AlignItems, GridAutoFlow, JustifyContent, JustifyItems, JustifySelf,
 };
 
-use crate::ui::elements::styles::common::CommonStyle;
+use crate::ui::elements::{
+    styles::common::CommonStyle,
+    traits::{IntoTaffyStyle, Styles},
+};
 
 use super::length::{parse_length_percentage, LengthPercentage};
 
@@ -16,18 +19,6 @@ pub struct GridTemplateArea {
     pub column_end: u16,
 }
 
-impl GridTemplateArea {
-    fn to_taffy(&self) -> taffy::GridTemplateArea<String> {
-        taffy::GridTemplateArea {
-            name: self.name.clone(),
-            row_start: self.row_start,
-            row_end: self.row_end,
-            column_start: self.column_start,
-            column_end: self.column_end,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum GridPlacement {
     #[default]
@@ -36,18 +27,6 @@ pub enum GridPlacement {
     NamedLine(String, i16),
     Span(u16),
     NamedSpan(String, u16),
-}
-
-impl GridPlacement {
-    fn to_taffy(&self) -> taffy::GridPlacement<String> {
-        match self {
-            Self::Auto => taffy::GridPlacement::Auto,
-            Self::Line(index) => taffy::GridPlacement::Line((*index).into()),
-            Self::NamedLine(name, index) => taffy::GridPlacement::NamedLine(name.clone(), *index),
-            Self::Span(span) => taffy::GridPlacement::Span(*span),
-            Self::NamedSpan(name, span) => taffy::GridPlacement::NamedSpan(name.clone(), *span),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -60,8 +39,10 @@ pub enum MinTrackSizingFunction {
     MaxContent,
 }
 
-impl MinTrackSizingFunction {
-    fn to_taffy(self) -> taffy::MinTrackSizingFunction {
+impl IntoTaffyStyle for MinTrackSizingFunction {
+    type Into = taffy::MinTrackSizingFunction;
+
+    fn into_taffy_style(self) -> taffy::MinTrackSizingFunction {
         match self {
             Self::Length(value) => taffy::MinTrackSizingFunction::length(value),
             Self::Percent(value) => taffy::MinTrackSizingFunction::percent(value),
@@ -85,8 +66,10 @@ pub enum MaxTrackSizingFunction {
     Fraction(f32),
 }
 
-impl MaxTrackSizingFunction {
-    fn to_taffy(self) -> taffy::MaxTrackSizingFunction {
+impl IntoTaffyStyle for MaxTrackSizingFunction {
+    type Into = taffy::MaxTrackSizingFunction;
+
+    fn into_taffy_style(self) -> taffy::MaxTrackSizingFunction {
         match self {
             Self::Length(value) => taffy::MaxTrackSizingFunction::length(value),
             Self::Percent(value) => taffy::MaxTrackSizingFunction::percent(value),
@@ -137,8 +120,8 @@ impl TrackSizingFunction {
 
     fn to_taffy(self) -> taffy::TrackSizingFunction {
         MinMax {
-            min: self.min.to_taffy(),
-            max: self.max.to_taffy(),
+            min: self.min.into_taffy_style(),
+            max: self.max.into_taffy_style(),
         }
     }
 }
@@ -173,8 +156,10 @@ pub struct GridTemplateRepetition {
     pub line_names: Vec<Vec<String>>,
 }
 
-impl GridTemplateRepetition {
-    fn to_taffy(&self) -> taffy::GridTemplateRepetition<String> {
+impl IntoTaffyStyle for GridTemplateRepetition {
+    type Into = taffy::GridTemplateRepetition<String>;
+
+    fn into_taffy_style(self) -> taffy::GridTemplateRepetition<String> {
         taffy::GridTemplateRepetition {
             count: self.count.to_taffy(),
             tracks: self
@@ -194,11 +179,15 @@ pub enum GridTemplateComponent {
     Repeat(GridTemplateRepetition),
 }
 
-impl GridTemplateComponent {
-    fn to_taffy(&self) -> taffy::GridTemplateComponent<String> {
+impl IntoTaffyStyle for GridTemplateComponent {
+    type Into = taffy::GridTemplateComponent<String>;
+
+    fn into_taffy_style(self) -> taffy::GridTemplateComponent<String> {
         match self {
             Self::Single(track) => taffy::GridTemplateComponent::Single(track.to_taffy()),
-            Self::Repeat(repetition) => taffy::GridTemplateComponent::Repeat(repetition.to_taffy()),
+            Self::Repeat(repetition) => {
+                taffy::GridTemplateComponent::Repeat(repetition.clone().into_taffy_style())
+            }
         }
     }
 }
@@ -229,68 +218,155 @@ pub struct GridStyle {
     pub justify_self: Option<JustifySelf>,
 }
 
-impl GridStyle {
-    /// Build the Taffy value consumed only by MTS computed/layout state.
-    pub fn to_taffy_style(&self) -> taffy::Style<String> {
-        let mut style = taffy::Style {
-            display: taffy::Display::Grid,
-            grid_template_rows: self
-                .template_rows
-                .iter()
-                .map(GridTemplateComponent::to_taffy)
-                .collect(),
-            grid_template_columns: self
-                .template_columns
-                .iter()
-                .map(GridTemplateComponent::to_taffy)
-                .collect(),
-            grid_template_areas: self
-                .template_areas
-                .iter()
-                .map(GridTemplateArea::to_taffy)
-                .collect(),
-            grid_template_row_names: self.template_row_names.clone(),
-            grid_template_column_names: self.template_column_names.clone(),
-            grid_auto_rows: self
-                .auto_rows
-                .iter()
-                .copied()
-                .map(TrackSizingFunction::to_taffy)
-                .collect(),
-            grid_auto_columns: self
-                .auto_columns
-                .iter()
-                .copied()
-                .map(TrackSizingFunction::to_taffy)
-                .collect(),
-            grid_auto_flow: self.auto_flow,
-            gap: Size {
-                width: self.gap.width.to_taffy(),
-                height: self.gap.height.to_taffy(),
-            },
-            align_content: self.align_content,
-            justify_content: self.justify_content,
-            align_items: self.align_items,
-            justify_items: self.justify_items,
-            grid_row: Line {
-                start: self.row.start.to_taffy(),
-                end: self.row.end.to_taffy(),
-            },
-            grid_column: Line {
-                start: self.column.start.to_taffy(),
-                end: self.column.end.to_taffy(),
-            },
-            justify_self: self.justify_self,
-            ..taffy::Style::default()
-        };
-        self.common.apply_to_taffy(&mut style);
-        style
+// impl GridStyle {
+//     /// Build the Taffy value consumed only by MTS computed/layout state.
+//     pub fn to_taffy_style(&self) -> taffy::Style<String> {
+//         let mut style = taffy::Style {
+//             display: taffy::Display::Grid,
+//             grid_template_rows: self
+//                 .template_rows
+//                 .iter()
+//                 .map(GridTemplateComponent::to_taffy)
+//                 .collect(),
+//             grid_template_columns: self
+//                 .template_columns
+//                 .iter()
+//                 .map(GridTemplateComponent::to_taffy)
+//                 .collect(),
+//             grid_template_areas: self
+//                 .template_areas
+//                 .iter()
+//                 .map(GridTemplateArea::to_taffy)
+//                 .collect(),
+//             grid_template_row_names: self.template_row_names.clone(),
+//             grid_template_column_names: self.template_column_names.clone(),
+//             grid_auto_rows: self
+//                 .auto_rows
+//                 .iter()
+//                 .copied()
+//                 .map(TrackSizingFunction::to_taffy)
+//                 .collect(),
+//             grid_auto_columns: self
+//                 .auto_columns
+//                 .iter()
+//                 .copied()
+//                 .map(TrackSizingFunction::to_taffy)
+//                 .collect(),
+//             grid_auto_flow: self.auto_flow,
+//             gap: Size {
+//                 width: self.gap.width.to_taffy(),
+//                 height: self.gap.height.to_taffy(),
+//             },
+//             align_content: self.align_content,
+//             justify_content: self.justify_content,
+//             align_items: self.align_items,
+//             justify_items: self.justify_items,
+//             grid_row: Line {
+//                 start: self.row.start.to_taffy(),
+//                 end: self.row.end.to_taffy(),
+//             },
+//             grid_column: Line {
+//                 start: self.column.start.to_taffy(),
+//                 end: self.column.end.to_taffy(),
+//             },
+//             justify_self: self.justify_self,
+//             ..taffy::Style::default()
+//         };
+//         self.common.apply_to_taffy(&mut style);
+//         style
+//     }
+
+//     pub(crate) fn supports(name: &str) -> bool {
+//         CommonStyle::supports(name)
+//             || matches!(
+//                 name,
+//                 "gap"
+//                     | "column-gap"
+//                     | "row-gap"
+//                     | "align-content"
+//                     | "align-items"
+//                     | "justify-content"
+//                     | "justify-items"
+//                     | "justify-self"
+//             )
+//     }
+
+//     pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
+//         if CommonStyle::supports(name) {
+//             return self.common.set_property(name, value);
+//         }
+//         match name {
+//             "gap" => parse_length_percentage(value).is_some_and(|value| {
+//                 self.gap = Size {
+//                     width: value,
+//                     height: value,
+//                 };
+//                 true
+//             }),
+//             "column-gap" => parse_length_percentage(value).is_some_and(|value| {
+//                 self.gap.width = value;
+//                 true
+//             }),
+//             "row-gap" => parse_length_percentage(value).is_some_and(|value| {
+//                 self.gap.height = value;
+//                 true
+//             }),
+//             "align-content" => value.parse().ok().is_some_and(|value| {
+//                 self.align_content = Some(value);
+//                 true
+//             }),
+//             "align-items" => value.parse().ok().is_some_and(|value| {
+//                 self.align_items = Some(value);
+//                 true
+//             }),
+//             "justify-content" => value.parse().ok().is_some_and(|value| {
+//                 self.justify_content = Some(value);
+//                 true
+//             }),
+//             "justify-items" => value.parse().ok().is_some_and(|value| {
+//                 self.justify_items = Some(value);
+//                 true
+//             }),
+//             "justify-self" => value.parse().ok().is_some_and(|value| {
+//                 self.justify_self = Some(value);
+//                 true
+//             }),
+//             _ => false,
+//         }
+//     }
+
+//     pub(crate) fn remove_property(&mut self, name: &str) -> bool {
+//         if CommonStyle::supports(name) {
+//             return self.common.remove_property(name);
+//         }
+//         if !Self::supports(name) {
+//             return false;
+//         }
+//         let defaults = Self::default();
+//         match name {
+//             "gap" => self.gap = defaults.gap,
+//             "column-gap" => self.gap.width = defaults.gap.width,
+//             "row-gap" => self.gap.height = defaults.gap.height,
+//             "align-content" => self.align_content = defaults.align_content,
+//             "align-items" => self.align_items = defaults.align_items,
+//             "justify-content" => self.justify_content = defaults.justify_content,
+//             "justify-items" => self.justify_items = defaults.justify_items,
+//             "justify-self" => self.justify_self = defaults.justify_self,
+//             _ => unreachable!("support was checked above"),
+//         }
+//         true
+//     }
+// }
+//
+impl Styles for GridStyle {
+    fn to_taffy_style(self) -> taffy::Style<String> {
+        todo!()
     }
 
-    pub(crate) fn supports(name: &str) -> bool {
-        CommonStyle::supports(name)
+    fn supports_property(property: &str) -> bool {
+        CommonStyle::supports_property(property)
             || matches!(
-                name,
+                property,
                 "gap"
                     | "column-gap"
                     | "row-gap"
@@ -302,11 +378,11 @@ impl GridStyle {
             )
     }
 
-    pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
-        if CommonStyle::supports(name) {
-            return self.common.set_property(name, value);
+    fn set_property(&mut self, property: &str, value: &str) -> bool {
+        if self.common.set_property(property, value) {
+            return true;
         }
-        match name {
+        match property {
             "gap" => parse_length_percentage(value).is_some_and(|value| {
                 self.gap = Size {
                     width: value,
@@ -346,15 +422,14 @@ impl GridStyle {
         }
     }
 
-    pub(crate) fn remove_property(&mut self, name: &str) -> bool {
-        if CommonStyle::supports(name) {
-            return self.common.remove_property(name);
+    fn remove_property(&mut self, property: &str) -> bool {
+        if self.common.remove_property(property) {
+            return true;
         }
-        if !Self::supports(name) {
-            return false;
-        }
+
         let defaults = Self::default();
-        match name {
+
+        match property {
             "gap" => self.gap = defaults.gap,
             "column-gap" => self.gap.width = defaults.gap.width,
             "row-gap" => self.gap.height = defaults.gap.height,
@@ -363,7 +438,7 @@ impl GridStyle {
             "justify-content" => self.justify_content = defaults.justify_content,
             "justify-items" => self.justify_items = defaults.justify_items,
             "justify-self" => self.justify_self = defaults.justify_self,
-            _ => unreachable!("support was checked above"),
+            _ => return false,
         }
         true
     }

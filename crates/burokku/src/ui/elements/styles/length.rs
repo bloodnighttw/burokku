@@ -32,7 +32,6 @@ impl Default for LengthPercentage {
     }
 }
 
-
 /// A thread-safe preferred size used by flex items.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Dimension {
@@ -63,7 +62,6 @@ impl Dimension {
         }
     }
 }
-
 
 pub(crate) fn parse_length_percentage(value: &str) -> Option<LengthPercentage> {
     let value = value.trim();

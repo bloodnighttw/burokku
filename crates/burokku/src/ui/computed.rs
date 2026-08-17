@@ -16,6 +16,8 @@ use taffy::{
     BlockContext, CacheTree,
 };
 
+use crate::ui::elements::traits::Styles;
+
 use super::elements::{styles::length::Dimension, DomSnapshot, Elements, NodeId};
 
 /// Convert thread-safe authoritative DOM style data into Taffy data on MTS.
@@ -25,7 +27,7 @@ use super::elements::{styles::length::Dimension, DomSnapshot, Elements, NodeId};
 pub fn taffy_style_for(element: &Elements) -> Style<String> {
     match element {
         Elements::Flex { style } => style.to_taffy_style(),
-        Elements::Grid { style } => style.to_taffy_style(),
+        Elements::Grid { style } => style.clone().to_taffy_style(),
         Elements::App => Style {
             display: Display::Block,
             size: Size {
@@ -37,9 +39,8 @@ pub fn taffy_style_for(element: &Elements) -> Style<String> {
         Elements::Window { style } => {
             let mut result = Style {
                 display: Display::Block,
-                ..Style::default()
+                ..style.to_taffy_style()
             };
-            style.apply_to_taffy(&mut result);
             if matches!(style.size.width, Dimension::Auto) {
                 result.size.width = taffy::Dimension::percent(1.0);
             }
@@ -49,12 +50,10 @@ pub fn taffy_style_for(element: &Elements) -> Style<String> {
             result
         }
         Elements::Div { style } | Elements::Text { style } => {
-            let mut result = Style {
+            Style {
                 display: Display::Block,
-                ..Style::default()
-            };
-            style.apply_to_taffy(&mut result);
-            result
+                ..style.to_taffy_style()
+            }
         }
         Elements::_String { .. } => Style {
             display: Display::Block,
@@ -536,9 +535,13 @@ impl RoundTree for LayoutTree {
 mod tests {
     use super::*;
     use crate::ui::elements::{
-        BtsDom, SharedDom, styles::{
-            length::{Dimension, LengthPercentage}, common::CommonStyle, flex::FlexStyle, grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
+        styles::{
+            common::CommonStyle,
+            flex::FlexStyle,
+            grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
+            length::{Dimension, LengthPercentage},
         },
+        BtsDom, SharedDom,
     };
 
     fn definite(width: f32, height: f32) -> Size<AvailableSpace> {
