@@ -6,8 +6,11 @@
   "scripts": {
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm build && cargo run --manifest-path Cargo.toml -- --check",
-    "dev": "pnpm build && cargo run --manifest-path Cargo.toml"
+    "check": "pnpm --filter @burokku/runtime build && pnpm typecheck && pnpm build && cargo run --manifest-path Cargo.toml -- --check",
+    "dev": "pnpm --filter @burokku/runtime build && pnpm build && cargo run --manifest-path Cargo.toml"
+  },
+  "dependencies": {
+    "@burokku/runtime": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.0",
