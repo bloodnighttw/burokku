@@ -1,3 +1,5 @@
+//! some shared traits that used in ui/
+
 pub trait Styles {
     // this is for converting to taffy style to calculate layout
     fn to_taffy_style(self) -> taffy::Style<String>;
@@ -12,6 +14,13 @@ pub trait Styles {
     fn remove_property(&mut self, property: &str) -> bool;
 }
 
+/// this is for converting to Taffy style with custom types,
+/// the difference from styles is that it is usually used for custom types of properties.
+///
+/// for example, grid properties type in taffy is not Send+Sync, which can't be
+/// moved across threads, so we use IntoTaffyStyle to convert them to
+/// custom types that have the same layout but are Send+Sync, then implement
+/// this trait for those custom types to convert them into taffy style in main thread.
 pub trait IntoTaffyStyle {
     type Into;
 
