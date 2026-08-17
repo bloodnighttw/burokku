@@ -5,11 +5,14 @@ use taffy::{
     AlignSelf,
 };
 
-use crate::ui::elements::styles::{
-    color::RgbaColor,
-    length::{
-        parse_dimension, parse_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
+use crate::ui::elements::{
+    styles::{
+        color::RgbaColor,
+        length::{
+            parse_dimension, parse_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
+        },
     },
+    traits::Styles,
 };
 
 // Layout and paint properties shared by block, flex, and grid elements.
@@ -25,10 +28,36 @@ pub struct CommonStyle {
     pub align_self: Option<AlignSelf>,
 }
 
-impl CommonStyle {
-    pub(crate) fn supports(name: &str) -> bool {
+impl Styles for CommonStyle {
+    fn to_taffy_style(self) -> taffy::Style<String> {
+        taffy::Style {
+            size: Size {
+                width: self.size.width.to_taffy(),
+                height: self.size.height.to_taffy(),
+            },
+            padding: Rect {
+                left: self.padding.left.to_taffy(),
+                right: self.padding.right.to_taffy(),
+                top: self.padding.top.to_taffy(),
+                bottom: self.padding.bottom.to_taffy(),
+            },
+            margin: Rect {
+                left: to_taffy_auto(self.margin.left),
+                right: to_taffy_auto(self.margin.right),
+                top: to_taffy_auto(self.margin.top),
+                bottom: to_taffy_auto(self.margin.bottom),
+            },
+            flex_basis: self.flex_basis.to_taffy(),
+            flex_grow: self.flex_grow,
+            flex_shrink: self.flex_shrink,
+            align_self: self.align_self,
+            ..Default::default()
+        }
+    }
+
+    fn supports_property(property: &str) -> bool {
         matches!(
-            name,
+            property,
             "width"
                 | "height"
                 | "padding"
@@ -41,8 +70,8 @@ impl CommonStyle {
         )
     }
 
-    pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
-        match name {
+    fn set_property(&mut self, property: &str, value: &str) -> bool {
+        match property {
             "width" => parse_dimension(value).is_some_and(|value| {
                 self.size.width = value;
                 true
@@ -93,12 +122,9 @@ impl CommonStyle {
         }
     }
 
-    pub(crate) fn remove_property(&mut self, name: &str) -> bool {
-        if !Self::supports(name) {
-            return false;
-        }
+    fn remove_property(&mut self, property: &str) -> bool {
         let defaults = Self::default();
-        match name {
+        match property {
             "width" => self.size.width = defaults.size.width,
             "height" => self.size.height = defaults.size.height,
             "padding" => self.padding = defaults.padding,
@@ -108,32 +134,9 @@ impl CommonStyle {
             "flex-grow" => self.flex_grow = defaults.flex_grow,
             "flex-shrink" => self.flex_shrink = defaults.flex_shrink,
             "align-self" => self.align_self = defaults.align_self,
-            _ => unreachable!("support was checked above"),
-        }
+            _ => return false,
+        };
         true
-    }
-
-    pub(crate) fn apply_to_taffy(self, style: &mut taffy::Style<String>) {
-        style.size = Size {
-            width: self.size.width.to_taffy(),
-            height: self.size.height.to_taffy(),
-        };
-        style.padding = Rect {
-            left: self.padding.left.to_taffy(),
-            right: self.padding.right.to_taffy(),
-            top: self.padding.top.to_taffy(),
-            bottom: self.padding.bottom.to_taffy(),
-        };
-        style.margin = Rect {
-            left: to_taffy_auto(self.margin.left),
-            right: to_taffy_auto(self.margin.right),
-            top: to_taffy_auto(self.margin.top),
-            bottom: to_taffy_auto(self.margin.bottom),
-        };
-        style.flex_basis = self.flex_basis.to_taffy();
-        style.flex_grow = self.flex_grow;
-        style.flex_shrink = self.flex_shrink;
-        style.align_self = self.align_self;
     }
 }
 

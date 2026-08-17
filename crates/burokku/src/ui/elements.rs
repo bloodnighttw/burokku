@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use crate::ui::elements::styles::common::CommonStyle;
+use crate::ui::elements::{styles::common::CommonStyle, traits::Styles};
 
-use self::styles::{flex::FlexStyle, grid::GridStyle, color::RgbaColor};
+use self::styles::{color::RgbaColor, flex::FlexStyle, grid::GridStyle};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
@@ -13,6 +13,7 @@ pub use iter::ElementsIter;
 #[allow(unused_imports)]
 pub use publication::{BtsDom, CommitError, DomSnapshot, SharedDom, StagingDomMut};
 pub mod styles;
+pub mod traits;
 
 new_key_type! {
     /// A stable, generation-checked handle to an element in a [`Dom`].
@@ -79,10 +80,10 @@ impl Elements {
     fn supports_style_property(&self, name: &str) -> bool {
         match self {
             Self::Window { .. } | Self::Div { .. } | Self::Text { .. } => {
-                CommonStyle::supports(name)
+                CommonStyle::supports_property(name)
             }
-            Self::Flex { .. } => FlexStyle::supports(name),
-            Self::Grid { .. } => GridStyle::supports(name),
+            Self::Flex { .. } => FlexStyle::supports_property(name),
+            Self::Grid { .. } => GridStyle::supports_property(name),
             Self::App | Self::_String { .. } => false,
         }
     }
@@ -695,6 +696,48 @@ mod tests {
         assert_eq!(dom.parent(div), Some(window));
         assert_eq!(dom.parent(text), Some(div));
         assert_eq!(dom.revision(), revision);
+    }
+
+    #[test]
+    fn reports_supported_style_properties_by_element_type() {
+        let mut dom = Dom::new();
+        let window = dom.create(Elements::Window {
+            style: Box::default(),
+        });
+        let div = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+        let flex = dom.create(Elements::Flex {
+            style: Box::default(),
+        });
+        let grid = dom.create(Elements::Grid {
+            style: Box::default(),
+        });
+        let text = dom.create(Elements::Text {
+            style: Box::default(),
+        });
+        let string = dom.create(Elements::_String {
+            string: String::new(),
+        });
+
+        for id in [window, div, flex, grid, text] {
+            assert_eq!(dom.supports_style_property(id, "width"), Ok(true));
+            assert_eq!(dom.supports_style_property(id, "not-defined"), Ok(false));
+        }
+
+        assert_eq!(dom.supports_style_property(div, "gap"), Ok(false));
+        assert_eq!(dom.supports_style_property(flex, "gap"), Ok(true));
+        assert_eq!(
+            dom.supports_style_property(flex, "justify-items"),
+            Ok(false)
+        );
+        assert_eq!(dom.supports_style_property(grid, "justify-items"), Ok(true));
+        assert_eq!(
+            dom.supports_style_property(grid, "flex-direction"),
+            Ok(false)
+        );
+        assert_eq!(dom.supports_style_property(dom.root(), "width"), Ok(false));
+        assert_eq!(dom.supports_style_property(string, "width"), Ok(false));
     }
 
     #[test]

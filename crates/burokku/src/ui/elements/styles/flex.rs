@@ -1,6 +1,6 @@
 use taffy::{geometry::Size, AlignContent, AlignItems, FlexDirection, FlexWrap, JustifyContent};
 
-use crate::ui::elements::styles::common::CommonStyle;
+use crate::ui::elements::{styles::common::CommonStyle, traits::Styles};
 
 use super::length::{parse_length_percentage, LengthPercentage};
 
@@ -19,10 +19,9 @@ pub struct FlexStyle {
     pub justify_content: Option<JustifyContent>,
 }
 
-impl FlexStyle {
-    /// Build the Taffy value consumed only by MTS computed/layout state.
-    pub fn to_taffy_style(self) -> taffy::Style<String> {
-        let mut style = taffy::Style {
+impl Styles for FlexStyle {
+    fn to_taffy_style(self) -> taffy::Style<String> {
+        taffy::Style {
             display: taffy::Display::Flex,
             flex_direction: self.direction,
             flex_wrap: self.wrap,
@@ -33,16 +32,14 @@ impl FlexStyle {
             align_content: self.align_content,
             align_items: self.align_items,
             justify_content: self.justify_content,
-            ..taffy::Style::default()
-        };
-        self.common.apply_to_taffy(&mut style);
-        style
+            ..self.common.to_taffy_style()
+        }
     }
 
-    pub(crate) fn supports(name: &str) -> bool {
-        CommonStyle::supports(name)
+    fn supports_property(property: &str) -> bool {
+        CommonStyle::supports_property(property)
             || matches!(
-                name,
+                property,
                 "flex-direction"
                     | "flex-wrap"
                     | "gap"
@@ -54,11 +51,11 @@ impl FlexStyle {
             )
     }
 
-    pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
-        if CommonStyle::supports(name) {
-            return self.common.set_property(name, value);
+    fn set_property(&mut self, property: &str, value: &str) -> bool {
+        if self.common.set_property(property, value) {
+            return true;
         }
-        match name {
+        match property {
             "flex-direction" => value.parse().ok().is_some_and(|value| {
                 self.direction = value;
                 true
@@ -98,15 +95,12 @@ impl FlexStyle {
         }
     }
 
-    pub(crate) fn remove_property(&mut self, name: &str) -> bool {
-        if CommonStyle::supports(name) {
-            return self.common.remove_property(name);
-        }
-        if !Self::supports(name) {
-            return false;
+    fn remove_property(&mut self, property: &str) -> bool {
+        if self.common.remove_property(property) {
+            return true;
         }
         let defaults = Self::default();
-        match name {
+        match property {
             "flex-direction" => self.direction = defaults.direction,
             "flex-wrap" => self.wrap = defaults.wrap,
             "gap" => self.gap = defaults.gap,
@@ -115,7 +109,7 @@ impl FlexStyle {
             "align-content" => self.align_content = defaults.align_content,
             "align-items" => self.align_items = defaults.align_items,
             "justify-content" => self.justify_content = defaults.justify_content,
-            _ => unreachable!("support was checked above"),
+            _ => return false,
         }
         true
     }
