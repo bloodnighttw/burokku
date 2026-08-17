@@ -3,7 +3,9 @@ use taffy::{
     AlignContent, AlignItems, GridAutoFlow, JustifyContent, JustifyItems, JustifySelf,
 };
 
-use super::{parse_length_percentage, CommonStyle, LengthPercentage};
+use crate::ui::elements::styles::common::CommonStyle;
+
+use super::{parse_length_percentage, LengthPercentage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GridTemplateArea {

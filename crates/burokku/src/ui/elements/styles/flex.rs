@@ -1,6 +1,8 @@
 use taffy::{geometry::Size, AlignContent, AlignItems, FlexDirection, FlexWrap, JustifyContent};
 
-use super::{parse_length_percentage, CommonStyle, LengthPercentage};
+use crate::ui::elements::styles::common::CommonStyle;
+
+use super::{parse_length_percentage, LengthPercentage};
 
 /// Thread-safe properties used to lay out a flex container and its flex items.
 ///
