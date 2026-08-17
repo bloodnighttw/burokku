@@ -242,10 +242,12 @@ Benchmark at least:
 Optimize snapshot storage or introduce an MTS mirror only after measurements show that complete snapshots are a meaningful bottleneck.
 
 Phase 6 is implemented by the optimized headless harness in `benches/phase6.rs`
-and the production `PerformanceMetrics` instrumentation. Run the CPU suite with
-`cargo bench -p burokku --bench phase6`. Run a real window with
-`BUROKKU_PRINT_METRICS=1` to capture Vello render/present and commit-to-present
-latency, which cannot be represented faithfully by a headless benchmark. The
+and debug-only `PerformanceMetrics` instrumentation. Run the CPU suite with
+`cargo bench -p burokku --bench phase6`; the benchmark profile enables debug
+assertions for the diagnostic counters. Run a debug window with
+`BUROKKU_PRINT_METRICS=1 cargo run -p burokku -- example/counter.js` to capture
+Vello render/present and commit-to-present latency, which cannot be represented
+faithfully by a headless benchmark. The
 full procedure and metric mapping are documented in `benches/README.md`.
 Baseline measurements show snapshot creation and publication remain below layout
 cost at the tested tree sizes, so this phase does not yet introduce an MTS mirror

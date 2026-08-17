@@ -1,9 +1,12 @@
 use std::{hint::black_box, time::Duration, time::Instant};
 
 use burokku::ui::{
-    computed::ComputedState, elements::{
-        BtsDom, Elements, NodeId, SharedDom, styles::{common::CommonStyle, flex::FlexStyle},
-    }, frame::SceneState,
+    computed::ComputedState,
+    elements::{
+        styles::{common::CommonStyle, flex::FlexStyle},
+        BtsDom, Elements, NodeId, SharedDom,
+    },
+    frame::SceneState,
 };
 use runtime::{MacrotaskQueueError, Runtime, RuntimeRole};
 use taffy::{geometry::Size, AvailableSpace};
@@ -117,9 +120,10 @@ fn commit_and_snapshot_benchmarks() {
         });
     }
 
-    // Production instrumentation times the snapshot clone and ArcSwap/watch
+    // Debug instrumentation times the snapshot clone and ArcSwap/watch
     // publication separately, avoiding benchmark-harness overhead in each
-    // reported sub-step.
+    // reported sub-step. The workspace benchmark profile enables debug
+    // assertions so these counters remain available in optimized benchmarks.
     for size in TREE_SIZES {
         let (shared, mut owner, nodes) = build_tree(size);
         let target = nodes[0];

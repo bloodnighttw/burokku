@@ -1,10 +1,10 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+
+#[cfg(debug_assertions)]
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
@@ -26,8 +26,9 @@ use super::{
     computed::{ComputedState, HitTestData},
     elements::{DomSnapshot, Elements, NodeId, SharedDom},
     events::{DispatchOutcome, DomEvent, DomEventData, EventDispatcher, EventModifiers},
-    metrics::{PerformanceMetrics, PerformanceMetricsSnapshot},
 };
+#[cfg(debug_assertions)]
+use crate::debug::metrics::{PerformanceMetrics, PerformanceMetricsSnapshot};
 
 const DEFAULT_SCALE_FACTOR: f64 = 1.0;
 
@@ -64,12 +65,14 @@ enum FrameOutcome {
     Presented {
         revision: u64,
         scale_factor: f64,
+        #[cfg(debug_assertions)]
         timings: FrameTimings,
     },
     Retry,
     Occluded,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct FrameTimings {
     total: Duration,
@@ -118,6 +121,7 @@ struct FrameScheduler {
     presented_revision: Option<u64>,
 }
 
+#[cfg(debug_assertions)]
 fn coalesced_revision_count(previous: Option<u64>, presented: u64) -> u64 {
     presented.saturating_sub(previous.unwrap_or(0).saturating_add(1))
 }
@@ -354,6 +358,7 @@ impl FrameRenderer {
         window: &Window,
         snapshot: &Arc<DomSnapshot>,
     ) -> Result<FrameOutcome, FrameError> {
+        #[cfg(debug_assertions)]
         let frame_started = Instant::now();
         let physical_size = window.inner_size();
         if physical_size.width == 0 || physical_size.height == 0 {
@@ -383,6 +388,7 @@ impl FrameRenderer {
             width: logical_width,
             height: logical_height,
         };
+        #[cfg(debug_assertions)]
         let layout_started = Instant::now();
         self.computed.compute_layout(
             snapshot,
@@ -391,8 +397,10 @@ impl FrameRenderer {
                 height: taffy::AvailableSpace::Definite(logical_size.height),
             },
         );
+        #[cfg(debug_assertions)]
         let layout = layout_started.elapsed();
 
+        #[cfg(debug_assertions)]
         let scene_started = Instant::now();
         self.scene.rebuild(
             snapshot,
@@ -401,8 +409,10 @@ impl FrameRenderer {
             logical_size,
             scale_factor,
         )?;
+        #[cfg(debug_assertions)]
         let scene = scene_started.elapsed();
 
+        #[cfg(debug_assertions)]
         let vello_started = Instant::now();
         let frame = surface_texture.0;
         let frame_view = frame.texture.create_view(&TextureViewDescriptor::default());
@@ -434,6 +444,7 @@ impl FrameRenderer {
         Ok(FrameOutcome::Presented {
             revision: snapshot.revision(),
             scale_factor,
+            #[cfg(debug_assertions)]
             timings: FrameTimings {
                 total: frame_started.elapsed(),
                 layout,
@@ -469,6 +480,7 @@ pub struct UiApplication {
     modifiers: Modifiers,
     mouse_buttons: u16,
     primary_press_target: Option<NodeId>,
+    #[cfg(debug_assertions)]
     metrics: PerformanceMetrics,
     occluded: bool,
     close_sender: Option<oneshot::Sender<()>>,
@@ -486,6 +498,7 @@ impl UiApplication {
         external_exit: Arc<AtomicBool>,
     ) -> Self {
         let commits = shared_dom.subscribe();
+        #[cfg(debug_assertions)]
         let metrics = shared_dom.metrics();
         Self {
             window,
@@ -498,6 +511,7 @@ impl UiApplication {
             modifiers: Modifiers::default(),
             mouse_buttons: 0,
             primary_press_target: None,
+            #[cfg(debug_assertions)]
             metrics,
             occluded: false,
             close_sender: Some(close_sender),
@@ -510,6 +524,7 @@ impl UiApplication {
         self.error.take()
     }
 
+    #[cfg(debug_assertions)]
     pub fn metrics(&self) -> PerformanceMetricsSnapshot {
         self.metrics.snapshot()
     }
@@ -521,6 +536,7 @@ impl UiApplication {
         if self.scheduler.request_redraw() {
             self.window.request_redraw();
         } else {
+            #[cfg(debug_assertions)]
             self.metrics.record_coalesced_redraw();
         }
     }
@@ -551,12 +567,14 @@ impl UiApplication {
         match self.event_dispatcher.try_dispatch(event) {
             DispatchOutcome::Queued => {}
             DispatchOutcome::DroppedBackpressure => {
-                // Native callbacks never wait for BTS. Keep a metric and drop
-                // the newest event when the bounded queue is saturated.
+                // Native callbacks never wait for BTS. Drop the newest event
+                // when the bounded queue is saturated.
+                #[cfg(debug_assertions)]
                 self.metrics.record_dropped_event();
             }
             DispatchOutcome::RuntimeClosed => self.request_exit(event_loop),
         }
+        #[cfg(debug_assertions)]
         self.metrics
             .observe_bts_queue_depth(self.event_dispatcher.queue_depth());
     }
@@ -623,13 +641,16 @@ impl UiApplication {
         // This Arc is retained until scene construction, GPU submission, and
         // presentation have all completed. A concurrent BTS commit can only be
         // considered for a subsequent frame.
+        #[cfg(debug_assertions)]
         let previous_revision = self.scheduler.presented_revision();
         let snapshot = self.shared_dom.load();
+        #[cfg(debug_assertions)]
         self.metrics.record_frame_attempt();
         match self.renderer.render_frame(&self.window, &snapshot) {
             Ok(FrameOutcome::Presented {
                 revision,
                 scale_factor,
+                #[cfg(debug_assertions)]
                 timings,
             }) => {
                 let hit_test = self
@@ -639,15 +660,14 @@ impl UiApplication {
                     .expect("a presented frame has computed hit-test data")
                     .clone();
                 debug_assert_eq!(hit_test.source_revision(), revision);
-                let commit_to_present = snapshot.published_at().elapsed();
-                let coalesced_revisions = coalesced_revision_count(previous_revision, revision);
+                #[cfg(debug_assertions)]
                 self.metrics.record_presented_frame(
                     timings.total,
                     timings.layout,
                     timings.scene,
                     timings.vello,
-                    commit_to_present,
-                    coalesced_revisions,
+                    snapshot.published_at().elapsed(),
+                    coalesced_revision_count(previous_revision, revision),
                 );
                 self.presented = Some(PresentedFrame {
                     snapshot,

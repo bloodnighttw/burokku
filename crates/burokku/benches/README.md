@@ -18,18 +18,20 @@ and 10,000 application nodes. It covers:
   observed depth and dropped submissions in each measured batch.
 
 The custom harness intentionally has no external benchmark dependency, so it
-can compile in offline and restricted build environments. Compare optimized
-results from the same host, power mode, and Rust toolchain. Multiple runs are
-recommended before making an architectural change.
+can compile in offline and restricted build environments. The workspace's
+optimized benchmark profile enables debug assertions to include the diagnostic
+metrics without adding them to production builds. Compare results from the same
+host, power mode, and Rust toolchain. Multiple runs are recommended before
+making an architectural change.
 
 ## Window/GPU measurements
 
 GPU rendering, presentation, and commit-to-present latency require a real
-native surface and are recorded by production instrumentation rather than the
-headless harness. Run an optimized windowed application with metric output:
+native surface and are recorded by debug-only instrumentation rather than the
+headless harness. Run a debug windowed application with metric output:
 
 ```sh
-BUROKKU_PRINT_METRICS=1 cargo run --release -p burokku -- example/counter.js
+BUROKKU_PRINT_METRICS=1 cargo run -p burokku -- example/counter.js
 ```
 
 Exercise the application, then close the window. The final
@@ -43,6 +45,7 @@ Exercise the application, then close the window. The final
 - events dropped by queue backpressure; and
 - the BTS queue depth high-water mark.
 
-These counters use relaxed atomics and do not introduce a DOM lock. Queue depth
+These counters use relaxed atomics and do not introduce a DOM lock. They and
+their timing calls are omitted when `debug_assertions` is disabled. Queue depth
 is also available directly through `MacrotaskQueue::depth()` and
 `MacrotaskQueue::max_capacity()` for MTS/BTS load tests.

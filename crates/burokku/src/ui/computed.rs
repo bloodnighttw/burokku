@@ -49,12 +49,10 @@ pub fn taffy_style_for(element: &Elements) -> Style<String> {
             }
             result
         }
-        Elements::Div { style } | Elements::Text { style } => {
-            Style {
-                display: Display::Block,
-                ..style.to_taffy_style()
-            }
-        }
+        Elements::Div { style } | Elements::Text { style } => Style {
+            display: Display::Block,
+            ..style.to_taffy_style()
+        },
         Elements::_String { .. } => Style {
             display: Display::Block,
             ..Style::default()
