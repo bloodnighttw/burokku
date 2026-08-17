@@ -2,17 +2,18 @@ default:
     @just --list
 
 build:
-    cargo build --workspace
     pnpm --filter './example/*' build
+    cargo build --workspace
 
 check:
-    cargo check --workspace
     env CI=true pnpm --filter './example/*' typecheck
+    env CI=true pnpm --filter './example/*' build
+    cargo check --workspace
 
 test:
-    cargo test --workspace
     env CI=true pnpm --filter @burokku/example-counter check
     env CI=true pnpm --filter @burokku/example-layouts check
+    cargo test --workspace
 
 counter:
     pnpm --filter @burokku/example-counter dev
