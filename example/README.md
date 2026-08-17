@@ -7,7 +7,8 @@ Both example directories are self-contained mixed projects:
 - `package.json`, `vite.config.ts`, and `src/main.ts` define a local Vite
   TypeScript project.
 - `pnpm dev` builds `dist/app.js` with Vite and then runs that directory's own
-  Cargo binary, which loads the bundle and passes it to `Burokku`.
+  Cargo binary. The binary embeds the bundle with `include_str!` and passes it
+  to `Burokku`.
 
 Run either project from the workspace root:
 
