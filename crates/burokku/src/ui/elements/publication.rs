@@ -40,6 +40,7 @@ impl DomSnapshot {
 struct SharedDomInner {
     committed: ArcSwap<DomSnapshot>,
     commits: watch::Sender<u64>,
+    commit_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     metrics: PerformanceMetrics,
 }
 
@@ -54,6 +55,18 @@ pub struct SharedDom {
 
 impl SharedDom {
     pub fn new() -> Self {
+        Self::new_inner(None)
+    }
+
+    /// Create a DOM whose publications promptly wake an external consumer.
+    ///
+    /// The callback runs on BTS after the complete snapshot and revision
+    /// notification have been published. It must not block.
+    pub fn with_commit_waker(wake_up: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::new_inner(Some(Arc::new(wake_up)))
+    }
+
+    fn new_inner(commit_waker: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         let initial = Arc::new(DomSnapshot {
             revision: 0,
             dom: Dom::new(),
@@ -64,6 +77,7 @@ impl SharedDom {
             inner: Arc::new(SharedDomInner {
                 committed: ArcSwap::new(initial),
                 commits,
+                commit_waker,
                 metrics: PerformanceMetrics::default(),
             }),
         }
@@ -89,6 +103,9 @@ impl SharedDom {
         let revision = snapshot.revision;
         self.inner.committed.store(snapshot);
         self.inner.commits.send_replace(revision);
+        if let Some(wake_up) = &self.inner.commit_waker {
+            wake_up();
+        }
     }
 }
 
@@ -436,6 +453,28 @@ mod tests {
         assert!(!owner.is_dirty());
         assert!(owner.staging().shares_node_with(snapshot.dom(), window));
         assert!(owner.staging().shares_node_with(snapshot.dom(), div));
+    }
+
+    #[test]
+    fn publication_wakes_external_consumer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let shared = SharedDom::with_commit_waker({
+            let wakes = wakes.clone();
+            move || {
+                wakes.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let mut owner = BtsDom::new(shared);
+
+        owner.mutate().create(Elements::Div {
+            style: Box::default(),
+        });
+        owner.checkpoint().unwrap();
+        owner.checkpoint().unwrap();
+
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
     }
 
     #[test]

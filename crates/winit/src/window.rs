@@ -4,7 +4,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
-use crate::{LogicalSize, PhysicalSize};
+use crate::{event_loop::EventLoopWaker, LogicalSize, PhysicalSize};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WindowId(pub(crate) u64);
@@ -49,18 +49,25 @@ pub(crate) struct WindowState {
     size: AtomicU64,
     scale_factor: AtomicU64,
     pub(crate) redraw_requested: AtomicBool,
+    event_loop_waker: EventLoopWaker,
 }
 
 // The unsupported placeholder backend does not construct window state, while
 // every native backend uses these shared state transitions.
 impl WindowState {
     #[allow(dead_code)]
-    pub(crate) fn new(id: WindowId, size: PhysicalSize<u32>, scale_factor: f64) -> Self {
+    pub(crate) fn new(
+        id: WindowId,
+        size: PhysicalSize<u32>,
+        scale_factor: f64,
+        event_loop_waker: EventLoopWaker,
+    ) -> Self {
         Self {
             id,
             size: AtomicU64::new(pack_size(size)),
             scale_factor: AtomicU64::new(scale_factor.to_bits()),
             redraw_requested: AtomicBool::new(true),
+            event_loop_waker,
         }
     }
 
@@ -117,7 +124,7 @@ impl Window {
 
     pub fn request_redraw(&self) {
         self.state.redraw_requested.store(true, Ordering::Release);
-
+        self.state.event_loop_waker.wake_up();
         self.platform.request_redraw();
     }
 

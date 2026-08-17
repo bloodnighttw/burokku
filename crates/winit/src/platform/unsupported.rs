@@ -4,7 +4,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
-use crate::{Error, Window, WindowAttributes, WindowEvent, WindowId};
+use crate::{event_loop::EventLoopWaker, Error, Window, WindowAttributes, WindowEvent, WindowId};
 
 pub(crate) struct PlatformEventLoop;
 
@@ -13,7 +13,11 @@ impl PlatformEventLoop {
         Err(Error::UnsupportedPlatform)
     }
 
-    pub(crate) fn create_window(&mut self, _attributes: WindowAttributes) -> crate::Result<Window> {
+    pub(crate) fn create_window(
+        &mut self,
+        _attributes: WindowAttributes,
+        _event_loop_waker: EventLoopWaker,
+    ) -> crate::Result<Window> {
         Err(Error::UnsupportedPlatform)
     }
 

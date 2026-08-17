@@ -1,8 +1,11 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+use tokio::sync::Notify;
 
 use crate::{Window, WindowAttributes, WindowEvent, WindowId};
 
@@ -31,6 +34,33 @@ pub trait ApplicationHandler {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {}
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EventLoopWaker {
+    notified: Arc<Notify>,
+}
+
+impl EventLoopWaker {
+    pub(crate) fn wake_up(&self) {
+        self.notified.notify_one();
+    }
+}
+
+/// A thread-safe handle for promptly waking an idle native event loop.
+///
+/// Waking does not itself dispatch an application event. It causes the loop to
+/// pump native events and invoke `about_to_wait`, where cross-thread state can
+/// be consumed without busy polling.
+#[derive(Clone, Debug)]
+pub struct EventLoopProxy {
+    waker: EventLoopWaker,
+}
+
+impl EventLoopProxy {
+    pub fn wake_up(&self) {
+        self.waker.wake_up();
+    }
 }
 
 struct ActiveEventLoopState {
@@ -63,6 +93,7 @@ impl ActiveEventLoop {
 
 pub struct EventLoop {
     active: ActiveEventLoop,
+    waker: EventLoopWaker,
     has_run: bool,
     platform: crate::platform::PlatformEventLoop,
 }
@@ -78,6 +109,7 @@ impl EventLoop {
                     exiting: Cell::new(false),
                 }),
             },
+            waker: EventLoopWaker::default(),
             has_run: false,
             platform,
         })
@@ -88,7 +120,14 @@ impl EventLoop {
     /// This must be called on the platform event-loop thread, before or during
     /// [`run_app`](Self::run_app). On macOS, that is the process main thread.
     pub fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
-        self.platform.create_window(attributes)
+        self.platform.create_window(attributes, self.waker.clone())
+    }
+
+    /// Return a thread-safe handle that wakes this event loop from `Wait`.
+    pub fn create_proxy(&self) -> EventLoopProxy {
+        EventLoopProxy {
+            waker: self.waker.clone(),
+        }
     }
 
     /// Drive the native event queue as part of the current Tokio runtime.
@@ -132,16 +171,23 @@ impl EventLoop {
 
             match self.active.control_flow() {
                 ControlFlow::Poll => tokio::task::yield_now().await,
-                ControlFlow::Wait => tokio::time::sleep(POLL_INTERVAL).await,
+                ControlFlow::Wait => {
+                    tokio::select! {
+                        _ = self.waker.notified.notified() => {}
+                        _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    }
+                }
                 ControlFlow::WaitUntil(deadline) => {
                     let now = Instant::now();
                     if deadline <= now {
                         tokio::task::yield_now().await;
                     } else {
-                        tokio::time::sleep(
-                            deadline.saturating_duration_since(now).min(POLL_INTERVAL),
-                        )
-                        .await;
+                        tokio::select! {
+                            _ = self.waker.notified.notified() => {}
+                            _ = tokio::time::sleep(
+                                deadline.saturating_duration_since(now).min(POLL_INTERVAL),
+                            ) => {}
+                        }
                     }
                 }
             }

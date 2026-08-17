@@ -86,7 +86,13 @@ async fn run_windowed(source: String) -> Result<(), Box<dyn Error>> {
         Arc::new(event_loop.create_window(Window::default_attributes().with_title("Burokku"))?);
     let renderer = FrameRenderer::new(window.clone()).await?;
 
-    let (dom_plugin, shared_dom) = ui::js_bridge::DomPlugin::with_new_dom();
+    // BTS commits can happen while the demand-driven native loop is waiting.
+    // Wake it at publication time instead of waiting for the fallback poll.
+    let event_loop_proxy = event_loop.create_proxy();
+    let shared_dom = ui::elements::SharedDom::with_commit_waker(move || {
+        event_loop_proxy.wake_up();
+    });
+    let dom_plugin = ui::js_bridge::DomPlugin::new(shared_dom.clone());
     let (runtime, main_driver) = DualRuntime::builder()
         .main_plugin(ConsolePlugin)
         .background_plugin(ConsolePlugin)
