@@ -5,7 +5,7 @@ use taffy::{
 
 use crate::ui::elements::styles::common::CommonStyle;
 
-use super::{parse_length_percentage, LengthPercentage};
+use super::length::{parse_length_percentage, LengthPercentage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GridTemplateArea {

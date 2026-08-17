@@ -2,7 +2,7 @@ use taffy::{geometry::Size, AlignContent, AlignItems, FlexDirection, FlexWrap, J
 
 use crate::ui::elements::styles::common::CommonStyle;
 
-use super::{parse_length_percentage, LengthPercentage};
+use super::length::{parse_length_percentage, LengthPercentage};
 
 /// Thread-safe properties used to lay out a flex container and its flex items.
 ///
@@ -168,7 +168,7 @@ mod tests {
                 height: LengthPercentage::percent(0.1),
             },
             common: CommonStyle {
-                flex_basis: crate::ui::elements::styles::Dimension::percent(0.5),
+                flex_basis: crate::ui::elements::styles::length::Dimension::percent(0.5),
                 flex_grow: 2.0,
                 ..CommonStyle::default()
             },

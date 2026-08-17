@@ -5,7 +5,7 @@ use taffy::{
     AlignSelf,
 };
 
-use crate::ui::elements::styles::{Dimension, LengthPercentage, RgbaColor, parse_dimension, parse_length_percentage, to_taffy_auto};
+use crate::ui::elements::styles::{RgbaColor, length::{Dimension, LengthPercentage, parse_dimension, parse_length_percentage, to_taffy_auto}};
 
 // Layout and paint properties shared by block, flex, and grid elements.
 #[derive(Clone, Copy, Debug, PartialEq)]
