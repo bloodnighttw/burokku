@@ -2,11 +2,12 @@ default:
     @just --list
 
 build:
+    pnpm typecheck
     pnpm --filter './example/*' build
     cargo build --workspace
 
 check:
-    env CI=true pnpm --filter './example/*' typecheck
+    env CI=true pnpm typecheck
     env CI=true pnpm --filter './example/*' build
     cargo check --workspace
 
