@@ -19,6 +19,20 @@ pub struct GridTemplateArea {
     pub column_end: u16,
 }
 
+impl IntoTaffyStyle for GridTemplateArea {
+    type Into = taffy::GridTemplateArea<String>;
+
+    fn into_taffy_style(self) -> Self::Into {
+        taffy::GridTemplateArea {
+            name: self.name,
+            row_start: self.row_start,
+            row_end: self.row_end,
+            column_start: self.column_start,
+            column_end: self.column_end,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum GridPlacement {
     #[default]
@@ -27,6 +41,20 @@ pub enum GridPlacement {
     NamedLine(String, i16),
     Span(u16),
     NamedSpan(String, u16),
+}
+
+impl IntoTaffyStyle for GridPlacement {
+    type Into = taffy::GridPlacement<String>;
+
+    fn into_taffy_style(self) -> Self::Into {
+        match self {
+            Self::Auto => taffy::GridPlacement::Auto,
+            Self::Line(index) => taffy::GridPlacement::Line(index.into()),
+            Self::NamedLine(name, index) => taffy::GridPlacement::NamedLine(name, index),
+            Self::Span(tracks) => taffy::GridPlacement::Span(tracks),
+            Self::NamedSpan(name, occurrence) => taffy::GridPlacement::NamedSpan(name, occurrence),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -360,7 +388,55 @@ pub struct GridStyle {
 //
 impl Styles for GridStyle {
     fn to_taffy_style(self) -> taffy::Style<String> {
-        todo!()
+        taffy::Style {
+            display: taffy::Display::Grid,
+            grid_template_rows: self
+                .template_rows
+                .into_iter()
+                .map(IntoTaffyStyle::into_taffy_style)
+                .collect(),
+            grid_template_columns: self
+                .template_columns
+                .into_iter()
+                .map(IntoTaffyStyle::into_taffy_style)
+                .collect(),
+            grid_template_areas: self
+                .template_areas
+                .into_iter()
+                .map(IntoTaffyStyle::into_taffy_style)
+                .collect(),
+            grid_template_row_names: self.template_row_names,
+            grid_template_column_names: self.template_column_names,
+            grid_auto_rows: self
+                .auto_rows
+                .into_iter()
+                .map(TrackSizingFunction::to_taffy)
+                .collect(),
+            grid_auto_columns: self
+                .auto_columns
+                .into_iter()
+                .map(TrackSizingFunction::to_taffy)
+                .collect(),
+            grid_auto_flow: self.auto_flow,
+            gap: Size {
+                width: self.gap.width.to_taffy(),
+                height: self.gap.height.to_taffy(),
+            },
+            align_content: self.align_content,
+            justify_content: self.justify_content,
+            align_items: self.align_items,
+            justify_items: self.justify_items,
+            grid_row: Line {
+                start: self.row.start.into_taffy_style(),
+                end: self.row.end.into_taffy_style(),
+            },
+            grid_column: Line {
+                start: self.column.start.into_taffy_style(),
+                end: self.column.end.into_taffy_style(),
+            },
+            justify_self: self.justify_self,
+            ..self.common.to_taffy_style()
+        }
     }
 
     fn supports_property(property: &str) -> bool {

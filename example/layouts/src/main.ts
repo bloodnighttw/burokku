@@ -1,5 +1,4 @@
-// Run with:
-//   cargo run -p burokku -- example/layout.js
+// Build and run with: pnpm --filter @burokku/example-layouts dev
 //
 // The three colored panels are laid out by Taffy's flexbox algorithm. Their
 // flex-grow values are 1 : 2 : 1, so the center panel receives twice as much
@@ -17,7 +16,7 @@ row.style.gap = "16px";
 row.style.alignItems = "stretch";
 row.style.backgroundColor = "#1f2937";
 
-function panel(tag, grow, color) {
+function panel(tag: string, grow: number, color: string): HTMLElement {
   const node = document.createElement(tag);
   node.style.flexBasis = "0px";
   node.style.flexGrow = String(grow);

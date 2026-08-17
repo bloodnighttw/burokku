@@ -245,7 +245,8 @@ Phase 6 is implemented by the optimized headless harness in `benches/phase6.rs`
 and debug-only `PerformanceMetrics` instrumentation. Run the CPU suite with
 `cargo bench -p burokku --bench phase6`; the benchmark profile enables debug
 assertions for the diagnostic counters. Run a debug window with
-`BUROKKU_PRINT_METRICS=1 cargo run -p burokku -- example/counter.js` to capture
+`pnpm --filter @burokku/example-counter build` followed by
+`BUROKKU_PRINT_METRICS=1 cargo run -p burokku-example-counter` to capture
 Vello render/present and commit-to-present latency, which cannot be represented
 faithfully by a headless benchmark. The
 full procedure and metric mapping are documented in `benches/README.md`.

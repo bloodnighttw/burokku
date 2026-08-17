@@ -31,7 +31,8 @@ native surface and are recorded by debug-only instrumentation rather than the
 headless harness. Run a debug windowed application with metric output:
 
 ```sh
-BUROKKU_PRINT_METRICS=1 cargo run -p burokku -- example/counter.js
+pnpm --filter @burokku/example-counter build
+BUROKKU_PRINT_METRICS=1 cargo run -p burokku-example-counter
 ```
 
 Exercise the application, then close the window. The final

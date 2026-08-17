@@ -1,5 +1,4 @@
-// Run with:
-//   cargo run -p burokku -- example/counter.js
+// Build and run with: pnpm --filter @burokku/example-counter dev
 //
 // Click the purple plus button. Each click increments the counter, updates the
 // label, grows the colored counter bar, and cycles its color.
@@ -54,19 +53,19 @@ for (const rowPattern of [
   [true, true, true],
   [false, true, false],
 ]) {
-  const row = document.createElement("flex");
-  row.style.width = "48px";
-  row.style.height = "14px";
-  row.style.gap = "2px";
+  const iconRow = document.createElement("flex");
+  iconRow.style.width = "48px";
+  iconRow.style.height = "14px";
+  iconRow.style.gap = "2px";
 
   for (const filled of rowPattern) {
     const cell = document.createElement("div");
     cell.style.width = "14px";
     cell.style.height = "14px";
     cell.style.backgroundColor = filled ? "#ffffff" : "#7c3aed";
-    row.appendChild(cell);
+    iconRow.appendChild(cell);
   }
-  plusButton.appendChild(row);
+  plusButton.appendChild(iconRow);
 }
 
 const hint = document.createElement("text");
@@ -74,7 +73,7 @@ hint.textContent = "Press + to increment";
 hint.style.color = "#c4b5fd";
 hint.style.fontSize = "18px";
 
-function renderCounter() {
+function renderCounter(): void {
   counterLabel.textContent = `Count: ${count}`;
   counterBar.style.width = `${180 + Math.min(count, 10) * 20}px`;
   counterBar.style.backgroundColor = colors[count % colors.length];

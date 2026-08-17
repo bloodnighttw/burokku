@@ -2,7 +2,7 @@
 name = "burokku"
 version = "0.1.0"
 edition = "2021"
-description = "Burokku JavaScript runtime application"
+description = "A builder-based native UI crate with pluggable dual JavaScript runtimes"
 license = "MIT"
 
 [dependencies]

@@ -2,7 +2,9 @@
 members = [
     "crates/runtime",
     "crates/winit",
-    "crates/burokku"
+    "crates/burokku",
+    "example/counter",
+    "example/layouts"
 ]
 resolver = "2"
 
