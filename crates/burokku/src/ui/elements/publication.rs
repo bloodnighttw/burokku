@@ -1,15 +1,18 @@
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
-    time::Instant,
 };
+
+#[cfg(debug_assertions)]
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
 use tokio::sync::watch;
 
 use super::Dom;
-use crate::ui::metrics::PerformanceMetrics;
+#[cfg(debug_assertions)]
+use crate::debug::metrics::PerformanceMetrics;
 
 /// One immutable, atomically published DOM revision.
 ///
@@ -19,6 +22,7 @@ use crate::ui::metrics::PerformanceMetrics;
 pub struct DomSnapshot {
     revision: u64,
     dom: Dom,
+    #[cfg(debug_assertions)]
     published_at: Instant,
 }
 
@@ -32,6 +36,7 @@ impl DomSnapshot {
     }
 
     /// Monotonic timestamp captured immediately before atomic publication.
+    #[cfg(debug_assertions)]
     pub fn published_at(&self) -> Instant {
         self.published_at
     }
@@ -41,6 +46,7 @@ struct SharedDomInner {
     committed: ArcSwap<DomSnapshot>,
     commits: watch::Sender<u64>,
     commit_waker: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(debug_assertions)]
     metrics: PerformanceMetrics,
 }
 
@@ -70,6 +76,7 @@ impl SharedDom {
         let initial = Arc::new(DomSnapshot {
             revision: 0,
             dom: Dom::new(),
+            #[cfg(debug_assertions)]
             published_at: Instant::now(),
         });
         let (commits, _) = watch::channel(0);
@@ -78,6 +85,7 @@ impl SharedDom {
                 committed: ArcSwap::new(initial),
                 commits,
                 commit_waker,
+                #[cfg(debug_assertions)]
                 metrics: PerformanceMetrics::default(),
             }),
         }
@@ -95,6 +103,7 @@ impl SharedDom {
     }
 
     /// Shared lock-free diagnostic counters for commits and MTS frames.
+    #[cfg(debug_assertions)]
     pub fn metrics(&self) -> PerformanceMetrics {
         self.inner.metrics.clone()
     }
@@ -205,19 +214,23 @@ impl BtsDom {
             .committed_revision
             .checked_add(1)
             .ok_or(CommitError::RevisionOverflow)?;
+        #[cfg(debug_assertions)]
         let snapshot_started = Instant::now();
         let snapshot = Arc::new(DomSnapshot {
             revision,
             dom: self.staging.clone(),
+            #[cfg(debug_assertions)]
             published_at: Instant::now(),
         });
+        #[cfg(debug_assertions)]
         let snapshot_creation = snapshot_started.elapsed();
+        #[cfg(debug_assertions)]
         let publication_started = Instant::now();
         self.shared.publish(snapshot.clone());
-        let publication = publication_started.elapsed();
+        #[cfg(debug_assertions)]
         self.shared
             .metrics()
-            .record_commit(snapshot_creation, publication);
+            .record_commit(snapshot_creation, publication_started.elapsed());
         self.committed_revision = revision;
         self.dirty = false;
         Ok(Some(snapshot))

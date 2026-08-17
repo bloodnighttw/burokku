@@ -5,3 +5,7 @@ members = [
     "crates/burokku"
 ]
 resolver = "2"
+
+# Performance counters are debug-only, including in optimized benchmarks.
+[profile.bench]
+debug-assertions = true

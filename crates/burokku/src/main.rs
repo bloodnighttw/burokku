@@ -148,6 +148,7 @@ async fn run_windowed(source: String) -> Result<(), Box<dyn Error>> {
 
     let mut application = native_result?;
     runtime_result?;
+    #[cfg(debug_assertions)]
     if std::env::var_os("BUROKKU_PRINT_METRICS").is_some() {
         eprintln!("Burokku performance metrics: {:#?}", application.metrics());
     }
