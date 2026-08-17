@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use self::styles::{flex::FlexStyle, grid::GridStyle, CommonStyle, RgbaColor};
+use crate::ui::elements::styles::common::CommonStyle;
+
+use self::styles::{flex::FlexStyle, grid::GridStyle, RgbaColor};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 

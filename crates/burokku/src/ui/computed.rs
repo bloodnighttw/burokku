@@ -536,12 +536,9 @@ impl RoundTree for LayoutTree {
 mod tests {
     use super::*;
     use crate::ui::elements::{
-        styles::{
-            flex::FlexStyle,
-            grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
-            CommonStyle, Dimension, LengthPercentage,
+        BtsDom, SharedDom, styles::{
+            Dimension, LengthPercentage, common::CommonStyle, flex::FlexStyle, grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
         },
-        BtsDom, SharedDom,
     };
 
     fn definite(width: f32, height: f32) -> Size<AvailableSpace> {
