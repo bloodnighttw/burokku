@@ -755,7 +755,7 @@ mod tests {
     async fn supported_styles_update_strong_element_data() {
         use crate::ui::elements::styles::{
             length::{Dimension, LengthPercentage},
-            RgbaColor,
+            color::RgbaColor,
         };
 
         let (runtime, shared) = runtime_with_dom().await;

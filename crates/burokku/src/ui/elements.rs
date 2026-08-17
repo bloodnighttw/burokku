@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::ui::elements::styles::common::CommonStyle;
 
-use self::styles::{flex::FlexStyle, grid::GridStyle, RgbaColor};
+use self::styles::{flex::FlexStyle, grid::GridStyle, color::RgbaColor};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
