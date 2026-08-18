@@ -237,11 +237,11 @@
     set className(value) { this.setAttribute("class", value); }
 
     getAttribute(name) {
-      return native.getAttribute(this._handle, String(name).toLowerCase()) ?? null;
+      return native.getAttribute(this._handle, String(name).toLowerCase());
     }
 
     hasAttribute(name) {
-      return native.getAttribute(this._handle, String(name).toLowerCase()) !== undefined;
+      return this.getAttribute(name) !== null;
     }
 
     setAttribute(name, value) {

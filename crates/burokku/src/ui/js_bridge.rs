@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use runtime::{
     rquickjs::{prelude::Func, Ctx, Exception, Object},
-    Plugin, Result as RuntimeResult, RuntimeRole,
+    JsOptions, Plugin, Result as RuntimeResult, RuntimeRole,
 };
 use slotmap::{Key, KeyData};
 
@@ -220,15 +220,14 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
             move |context: Ctx<'js>,
                   handle: String,
                   name: String|
-                  -> RuntimeResult<Option<String>> {
+                  -> RuntimeResult<JsOptions<String>> {
                 let id = decode(&context, &handle)?;
                 let state = state_lock(&context, &attribute_state)?;
                 require_element(&context, state.owner.staging(), id)?;
-                Ok(state
-                    .owner
-                    .staging()
-                    .attribute(id, &name)
-                    .map(str::to_owned))
+                Ok(match state.owner.staging().attribute(id, &name) {
+                    Some(value) => JsOptions::Some(value.to_owned()),
+                    None => JsOptions::Null,
+                })
             },
         ),
     )?;
@@ -750,6 +749,31 @@ mod tests {
             snapshot.dom().attribute(div, "data-state"),
             Some("before-error")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn attributes_use_dom_null_and_presence_semantics() {
+        let (runtime, _shared) = runtime_with_dom().await;
+
+        let states: Vec<bool> = runtime
+            .eval(
+                r#"
+                const button = document.createElement("div");
+                const initiallyAbsent = button.getAttribute("disabled") === null &&
+                  button.hasAttribute("disabled") === false;
+                button.setAttribute("disabled", "");
+                const present = button.getAttribute("disabled") === "" &&
+                  button.hasAttribute("disabled") === true;
+                button.removeAttribute("disabled");
+                const removed = button.getAttribute("disabled") === null &&
+                  button.hasAttribute("disabled") === false;
+                [initiallyAbsent, present, removed];
+                "#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(states, [true, true, true]);
     }
 
     #[tokio::test(flavor = "current_thread")]
