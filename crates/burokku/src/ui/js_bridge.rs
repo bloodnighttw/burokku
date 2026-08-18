@@ -537,12 +537,35 @@ fn replace_children(
     parent: NodeId,
     children: &[NodeId],
 ) -> RuntimeResult<()> {
-    let existing = require_children(context, owner.staging(), parent)?.to_vec();
+    // Run the exact replacement against a cheap copy-on-write clone first. A
+    // later child can invalidate the whole operation (for example, when it is
+    // `parent` itself), so validating each append while mutating staging would
+    // expose a partially detached/replaced tree at the next checkpoint.
+    let mut validation = owner.staging().clone();
+    map_dom_result(
+        context,
+        apply_replace_children(&mut validation, parent, children),
+    )?;
+
+    apply_replace_children(&mut owner.mutate(), parent, children)
+        .expect("replaceChildren was validated against identical staging state");
+    Ok(())
+}
+
+fn apply_replace_children(
+    dom: &mut Dom,
+    parent: NodeId,
+    children: &[NodeId],
+) -> Result<(), DomError> {
+    let existing = dom
+        .children(parent)
+        .ok_or(DomError::NodeNotFound(parent))?
+        .to_vec();
     for child in existing {
-        map_dom_result(context, owner.mutate().detach(child))?;
+        dom.detach(child)?;
     }
     for child in children {
-        map_dom_result(context, owner.mutate().append_child(parent, *child))?;
+        dom.append_child(parent, *child)?;
     }
     Ok(())
 }
@@ -872,6 +895,50 @@ mod tests {
 
         commits.changed().await.unwrap();
         assert!(rejected);
+        let snapshot = shared.load();
+        let children = snapshot.dom().children(body(snapshot.dom())).unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(matches!(
+            snapshot.dom().element(children[0]),
+            Some(Elements::Div { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_replace_children_leaves_every_node_unchanged() {
+        let (runtime, shared) = runtime_with_dom().await;
+        let mut commits = shared.subscribe();
+        let unchanged: bool = runtime
+            .eval(
+                r#"
+                const original = document.createElement("div");
+                const firstReplacement = document.createElement("flex");
+                document.body.appendChild(original);
+
+                let cycleRejected = false;
+                try { document.body.replaceChildren(firstReplacement, document.body); }
+                catch (_) { cycleRejected = true; }
+                const cycleWasAtomic = document.body.firstChild === original &&
+                  original.parentNode === document.body &&
+                  firstReplacement.parentNode === null;
+
+                const invalidText = document.createTextNode("invalid");
+                let relationshipRejected = false;
+                try { document.body.replaceChildren(firstReplacement, invalidText); }
+                catch (_) { relationshipRejected = true; }
+
+                cycleRejected && cycleWasAtomic && relationshipRejected &&
+                  document.body.firstChild === original &&
+                  original.parentNode === document.body &&
+                  firstReplacement.parentNode === null &&
+                  invalidText.parentNode === null;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        commits.changed().await.unwrap();
+        assert!(unchanged);
         let snapshot = shared.load();
         let children = snapshot.dom().children(body(snapshot.dom())).unwrap();
         assert_eq!(children.len(), 1);
