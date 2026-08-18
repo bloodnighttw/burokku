@@ -137,11 +137,14 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
     native.set(
         "parent",
         Func::from(
-            move |context: Ctx<'js>, handle: String| -> RuntimeResult<Option<String>> {
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<JsOptions<String>> {
                 let id = decode(&context, &handle)?;
                 let state = state_lock(&context, &parent_state)?;
                 require_element(&context, state.owner.staging(), id)?;
-                Ok(state.owner.staging().parent(id).map(encode))
+                Ok(match state.owner.staging().parent(id) {
+                    Some(parent) => JsOptions::Some(encode(parent)),
+                    None => JsOptions::Null,
+                })
             },
         ),
     )?;
@@ -150,11 +153,14 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
     native.set(
         "firstChild",
         Func::from(
-            move |context: Ctx<'js>, handle: String| -> RuntimeResult<Option<String>> {
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<JsOptions<String>> {
                 let id = decode(&context, &handle)?;
                 let state = state_lock(&context, &first_child_state)?;
                 let children = require_children(&context, state.owner.staging(), id)?;
-                Ok(children.first().copied().map(encode))
+                Ok(match children.first().copied() {
+                    Some(child) => JsOptions::Some(encode(child)),
+                    None => JsOptions::Null,
+                })
             },
         ),
     )?;
@@ -163,13 +169,13 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
     native.set(
         "nextSibling",
         Func::from(
-            move |context: Ctx<'js>, handle: String| -> RuntimeResult<Option<String>> {
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<JsOptions<String>> {
                 let id = decode(&context, &handle)?;
                 let state = state_lock(&context, &next_sibling_state)?;
                 let dom = state.owner.staging();
                 require_element(&context, dom, id)?;
                 let Some(parent) = dom.parent(id) else {
-                    return Ok(None);
+                    return Ok(JsOptions::Null);
                 };
                 let children = require_children(&context, dom, parent)?;
                 let index = children
@@ -178,7 +184,10 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
                     .ok_or_else(|| {
                         dom_exception(&context, "node is absent from its parent's children")
                     })?;
-                Ok(children.get(index + 1).copied().map(encode))
+                Ok(match children.get(index + 1).copied() {
+                    Some(sibling) => JsOptions::Some(encode(sibling)),
+                    None => JsOptions::Null,
+                })
             },
         ),
     )?;
