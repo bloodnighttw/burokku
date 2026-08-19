@@ -66,7 +66,17 @@
   class CSSStyleDeclaration {
     constructor(node) {
       this._node = node;
-      this._values = new Map();
+      // Most style use is write-only. Load authored declarations lazily so
+      // newly created wrappers pay no extra native bridge call unless a style
+      // is read, while recreated wrappers still recover their prior values.
+      this._values = null;
+    }
+
+    _declarations() {
+      if (this._values === null) {
+        this._values = new Map(native.styleDeclarations(this._node._handle));
+      }
+      return this._values;
     }
 
     getPropertyValue(name) {
@@ -75,7 +85,7 @@
         warnUnsupportedStyle(normalized);
         return "";
       }
-      return this._values.get(normalized) ?? "";
+      return this._declarations().get(normalized) ?? "";
     }
 
     setProperty(name, value) {
@@ -85,17 +95,18 @@
         warnUnsupportedStyle(normalized);
         return;
       }
-      this._values.set(normalized, stringValue);
+      this._values?.set(normalized, stringValue);
     }
 
     removeProperty(name) {
       const normalized = cssName(name);
-      const previous = this._values.get(normalized) ?? "";
+      const declarations = this._declarations();
+      const previous = declarations.get(normalized) ?? "";
       if (!native.removeStyle(this._node._handle, normalized)) {
         warnUnsupportedStyle(normalized);
         return "";
       }
-      this._values.delete(normalized);
+      declarations.delete(normalized);
       return previous;
     }
   }

@@ -141,6 +141,10 @@ pub struct Node {
     parent: Option<NodeId>,
     children: Vec<NodeId>,
     attributes: BTreeMap<String, String>,
+    // Preserve authored values in addition to the parsed, strongly typed
+    // element style. CSSStyleDeclaration must be able to distinguish an
+    // absent declaration from a property explicitly set to its default.
+    style_declarations: BTreeMap<String, String>,
     revisions: NodeRevisions,
 }
 
@@ -159,6 +163,10 @@ impl Node {
 
     pub fn attributes(&self) -> &BTreeMap<String, String> {
         &self.attributes
+    }
+
+    pub fn style_declarations(&self) -> &BTreeMap<String, String> {
+        &self.style_declarations
     }
 
     pub fn revisions(&self) -> NodeRevisions {
@@ -195,6 +203,7 @@ impl Dom {
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
+            style_declarations: BTreeMap::new(),
             revisions: NodeRevisions::default(),
         }));
 
@@ -240,6 +249,10 @@ impl Dom {
         self.node(id)?.attributes.get(name).map(String::as_str)
     }
 
+    pub fn style_declarations(&self, id: NodeId) -> Option<&BTreeMap<String, String>> {
+        self.node(id).map(Node::style_declarations)
+    }
+
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).and_then(Node::parent)
     }
@@ -259,20 +272,44 @@ impl Dom {
         name: &str,
         value: &str,
     ) -> Result<bool, DomError> {
-        let mut element = self.element(id).ok_or(DomError::NodeNotFound(id))?.clone();
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        let mut element = node.element.clone();
         if !element.set_style_property(name, value) {
             return Ok(false);
         }
-        self.set_element(id, element)?;
+        if element == node.element
+            && node
+                .style_declarations
+                .get(name)
+                .is_some_and(|current| current == value)
+        {
+            return Ok(true);
+        }
+
+        let node = self.node_mut(id)?;
+        node.element = element;
+        node.style_declarations
+            .insert(name.to_owned(), value.to_owned());
+        bump(&mut node.revisions.style);
+        self.bump_revision();
         Ok(true)
     }
 
     pub fn remove_style_property(&mut self, id: NodeId, name: &str) -> Result<bool, DomError> {
-        let mut element = self.element(id).ok_or(DomError::NodeNotFound(id))?.clone();
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        let mut element = node.element.clone();
         if !element.remove_style_property(name) {
             return Ok(false);
         }
-        self.set_element(id, element)?;
+        if element == node.element && !node.style_declarations.contains_key(name) {
+            return Ok(true);
+        }
+
+        let node = self.node_mut(id)?;
+        node.element = element;
+        node.style_declarations.remove(name);
+        bump(&mut node.revisions.style);
+        self.bump_revision();
         Ok(true)
     }
 
@@ -283,6 +320,7 @@ impl Dom {
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
+            style_declarations: BTreeMap::new(),
             revisions: NodeRevisions::default(),
         }));
         self.bump_revision();
@@ -359,9 +397,13 @@ impl Dom {
         node.element = element;
         match revision_kind {
             ElementRevisionKind::None => unreachable!("no-op replacements return above"),
-            ElementRevisionKind::Style => bump(&mut node.revisions.style),
+            ElementRevisionKind::Style => {
+                node.style_declarations.clear();
+                bump(&mut node.revisions.style);
+            }
             ElementRevisionKind::Content => bump(&mut node.revisions.content),
             ElementRevisionKind::All => {
+                node.style_declarations.clear();
                 bump(&mut node.revisions.structure);
                 bump(&mut node.revisions.style);
                 bump(&mut node.revisions.content);
@@ -749,6 +791,29 @@ mod tests {
         );
         assert_eq!(dom.supports_style_property(dom.root(), "width"), Ok(false));
         assert_eq!(dom.supports_style_property(string, "width"), Ok(false));
+    }
+
+    #[test]
+    fn preserves_authored_style_declarations() {
+        let mut dom = Dom::new();
+        let div = dom.create(Elements::Div {
+            style: Box::default(),
+        });
+
+        assert_eq!(dom.set_style_property(div, "flex-grow", "0.00"), Ok(true));
+        assert_eq!(
+            dom.style_declarations(div)
+                .unwrap()
+                .get("flex-grow")
+                .map(String::as_str),
+            Some("0.00")
+        );
+
+        assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(true));
+        assert!(!dom
+            .style_declarations(div)
+            .unwrap()
+            .contains_key("flex-grow"));
     }
 
     #[test]
