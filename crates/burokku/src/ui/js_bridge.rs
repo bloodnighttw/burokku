@@ -618,13 +618,19 @@ fn insert_before(
     child: NodeId,
     before: Option<NodeId>,
 ) -> RuntimeResult<()> {
-    if before == Some(child) {
-        return Ok(());
-    }
     let index = {
         let dom = owner.staging();
         require_element(context, dom, child)?;
         let children = require_children(context, dom, parent)?;
+        if before == Some(child) {
+            if dom.parent(child) != Some(parent) {
+                return Err(dom_exception(
+                    context,
+                    "the reference node is not a child of this parent",
+                ));
+            }
+            return Ok(());
+        }
         match before {
             Some(before) => {
                 if dom.parent(before) != Some(parent) {
@@ -1072,6 +1078,54 @@ mod tests {
             snapshot.dom().element(children[0]),
             Some(Elements::Div { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn insert_before_self_still_validates_the_requested_parent() {
+        let (runtime, shared) = runtime_with_dom().await;
+        let mut commits = shared.subscribe();
+        let validated: bool = runtime
+            .eval(
+                r#"
+                const actualParent = document.createElement("div");
+                const unrelatedParent = document.createElement("div");
+                const child = document.createElement("div");
+                actualParent.appendChild(child);
+                document.body.appendChild(actualParent);
+                document.body.appendChild(unrelatedParent);
+
+                let unrelatedRejected = false;
+                try { unrelatedParent.insertBefore(child, child); }
+                catch (error) {
+                  unrelatedRejected = String(error).includes(
+                    "reference node is not a child of this parent"
+                  );
+                }
+
+                const detached = document.createElement("div");
+                let detachedRejected = false;
+                try { unrelatedParent.insertBefore(detached, detached); }
+                catch (error) {
+                  detachedRejected = String(error).includes(
+                    "reference node is not a child of this parent"
+                  );
+                }
+
+                let validSelfInsert = true;
+                try { actualParent.insertBefore(child, child); }
+                catch (_) { validSelfInsert = false; }
+
+                unrelatedRejected && detachedRejected && validSelfInsert &&
+                  child.parentNode === actualParent &&
+                  actualParent.firstChild === child &&
+                  unrelatedParent.firstChild === null;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        commits.changed().await.unwrap();
+        assert!(validated);
     }
 
     #[tokio::test(flavor = "current_thread")]
