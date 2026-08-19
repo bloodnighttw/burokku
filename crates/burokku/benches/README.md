@@ -24,6 +24,20 @@ metrics without adding them to production builds. Compare results from the same
 host, power mode, and Rust toolchain. Multiple runs are recommended before
 making an architectural change.
 
+## DOM lifecycle reclamation
+
+Measure JavaScript DOM checkpoint overhead with 100, 1,000, and 10,000 live
+wrappers:
+
+```sh
+cargo bench -p burokku --bench dom_lifecycle
+```
+
+`clean_checkpoint` isolates the cost of a macrotask that does not mutate the
+DOM. `attribute_checkpoint` includes an ordinary content mutation and snapshot
+publication. This makes an accidental full DOM reclamation scan at every
+checkpoint visible as tree size increases.
+
 ## Window/GPU measurements
 
 GPU rendering, presentation, and commit-to-present latency require a real
