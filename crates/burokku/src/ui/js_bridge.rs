@@ -1255,6 +1255,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn connected_nodes_keep_listeners_after_application_references_are_collected() {
+        let (runtime, _shared) = runtime_with_dom().await;
+
+        runtime
+            .eval::<()>(
+                r#"
+                globalThis.connectedButtonClicks = 0;
+                (() => {
+                  const button = document.createElement("div");
+                  button.addEventListener("click", () => connectedButtonClicks++);
+                  document.body.appendChild(button);
+                  globalThis.connectedButtonHandle = button._handle;
+                })();
+                "#,
+            )
+            .await
+            .unwrap();
+        collect_garbage(&runtime).await;
+
+        let handled: bool = runtime
+            .eval(
+                r#"
+                __burokkuDispatchNativeEvent(connectedButtonHandle, { type: "click" });
+                connectedButtonClicks === 1;
+                "#,
+            )
+            .await
+            .unwrap();
+        assert!(handled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn a_live_descendant_wrapper_retains_its_detached_component() {
         let (runtime, dom_plugin, _shared) = runtime_with_tracked_dom().await;
 

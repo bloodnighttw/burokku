@@ -4,6 +4,12 @@
   const native = globalThis.__burokkuDomNative;
   const construct = Symbol("Burokku DOM node");
   const cache = new Map();
+  // Native tree edges do not keep their JavaScript wrappers alive. Pin every
+  // wrapper that is part of the connected tree so listener state and wrapper
+  // identity survive even when application code drops its last direct
+  // reference. Detaching a subtree removes these pins, allowing wrapper
+  // cycles (including listeners that capture their node) to be collected.
+  const connectedWrappers = new Map();
   const finalizers = new FinalizationRegistry(handle => {
     // A replacement wrapper can be created after the old WeakRef is cleared
     // but before its finalizer runs. Keep that newer cache entry while still
@@ -16,6 +22,32 @@
   function requireNode(value, label = "node") {
     if (!(value instanceof Node)) throw new TypeError(`${label} must be a Node`);
     return value;
+  }
+
+  function isConnectedHandle(handle) {
+    if (!native.contains(handle)) return false;
+    const root = native.root();
+    for (let current = handle; current !== undefined && current !== null; current = native.parent(current)) {
+      if (current === root) return true;
+    }
+    return false;
+  }
+
+  function pinConnectedSubtree(handle) {
+    const node = cache.get(handle)?.deref();
+    if (node) connectedWrappers.set(handle, node);
+    for (const child of native.children(handle)) pinConnectedSubtree(child);
+  }
+
+  function unpinSubtree(handle) {
+    connectedWrappers.delete(handle);
+    if (!native.contains(handle)) return;
+    for (const child of native.children(handle)) unpinSubtree(child);
+  }
+
+  function syncSubtreeConnection(handle) {
+    if (isConnectedHandle(handle)) pinConnectedSubtree(handle);
+    else unpinSubtree(handle);
   }
 
   function cssName(name) {
@@ -140,17 +172,18 @@
     get childNodes() { return native.children(this._handle).map(wrap); }
     get children() { return this.childNodes.filter(node => node.nodeType === Node.ELEMENT_NODE); }
     get firstElementChild() { return this.children[0] ?? null; }
-    get isConnected() {
-      let current = this;
-      while (current.parentNode) current = current.parentNode;
-      return current === document.documentElement;
-    }
+    get isConnected() { return isConnectedHandle(this._handle); }
     get textContent() { return native.textContent(this._handle); }
-    set textContent(value) { native.setTextContent(this._handle, value == null ? "" : String(value)); }
+    set textContent(value) {
+      const previousChildren = native.children(this._handle);
+      native.setTextContent(this._handle, value == null ? "" : String(value));
+      for (const child of previousChildren) unpinSubtree(child);
+    }
 
     appendChild(node) {
       requireNode(node);
       native.append(this._handle, node._handle);
+      syncSubtreeConnection(node._handle);
       return node;
     }
 
@@ -158,18 +191,23 @@
       requireNode(node);
       if (before !== null && before !== undefined) requireNode(before, "before");
       native.insertBefore(this._handle, node._handle, before?._handle);
+      syncSubtreeConnection(node._handle);
       return node;
     }
 
     removeChild(node) {
       requireNode(node);
       native.removeChild(this._handle, node._handle);
+      unpinSubtree(node._handle);
       return node;
     }
 
     replaceChildren(...nodes) {
       for (const node of nodes) requireNode(node);
+      const previousChildren = native.children(this._handle);
       native.replaceChildren(this._handle, nodes.map(node => node._handle));
+      for (const child of previousChildren) syncSubtreeConnection(child);
+      for (const node of nodes) syncSubtreeConnection(node._handle);
     }
 
     remove() {
@@ -278,6 +316,7 @@
     native.retain(handle);
     cache.set(handle, new WeakRef(node));
     finalizers.register(node, handle);
+    if (isConnectedHandle(handle)) connectedWrappers.set(handle, node);
     return node;
   }
 
