@@ -164,6 +164,16 @@
     }
   }
 
+  function prepareEventForDispatch(event, target) {
+    Object.defineProperties(event, {
+      target: { value: target, configurable: true },
+      currentTarget: { value: null, configurable: true }
+    });
+    event._propagationStopped = false;
+    event._immediatePropagationStopped = false;
+    event._path = [];
+  }
+
   class Node {
     constructor(token, handle) {
       if (token !== construct) throw new TypeError("DOM nodes cannot be constructed directly");
@@ -248,9 +258,7 @@
 
     dispatchEvent(event) {
       if (!event || typeof event.type !== "string") throw new TypeError("event.type is required");
-      if (event.target === undefined || event.target === null) {
-        Object.defineProperty(event, "target", { value: this, configurable: true });
-      }
+      prepareEventForDispatch(event, this);
       const path = [this];
       if (event.bubbles) {
         for (let current = this.parentNode; current; current = current.parentNode) path.push(current);
@@ -350,9 +358,7 @@
 
     dispatchEvent(event) {
       if (!event || typeof event.type !== "string") throw new TypeError("event.type is required");
-      if (event.target === undefined || event.target === null) {
-        Object.defineProperty(event, "target", { value: this, configurable: true });
-      }
+      prepareEventForDispatch(event, this);
       event._path = [this];
       Object.defineProperty(event, "currentTarget", { value: this, configurable: true });
       for (const listener of this._listeners.get(event.type.toLowerCase()) ?? []) {

@@ -860,6 +860,76 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn redispatching_an_event_resets_node_dispatch_state() {
+        let (runtime, _shared) = runtime_with_dom().await;
+
+        let calls: Vec<String> = runtime
+            .eval(
+                r#"
+                const first = document.createElement("div");
+                const parent = document.createElement("div");
+                const second = document.createElement("div");
+                parent.appendChild(second);
+                const event = new Event("ping", { bubbles: true });
+                const calls = [];
+
+                first.addEventListener("ping", dispatched => {
+                    calls.push(`first:${dispatched.target === first}`);
+                    dispatched.stopImmediatePropagation();
+                });
+                first.addEventListener("ping", () => calls.push("first-skipped"));
+                second.addEventListener("ping", dispatched => {
+                    calls.push(`second:${dispatched.target === second}`);
+                });
+                second.addEventListener("ping", () => calls.push("second-again"));
+                parent.addEventListener("ping", () => calls.push("parent"));
+
+                first.dispatchEvent(event);
+                second.dispatchEvent(event);
+                calls;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls,
+            ["first:true", "second:true", "second-again", "parent"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn redispatching_an_event_resets_document_dispatch_state() {
+        let (runtime, _shared) = runtime_with_dom().await;
+
+        let calls: Vec<String> = runtime
+            .eval(
+                r#"
+                const node = document.createElement("div");
+                const event = new Event("ping");
+                const calls = [];
+
+                node.addEventListener("ping", dispatched => {
+                    calls.push(`node:${dispatched.target === node}`);
+                    dispatched.stopImmediatePropagation();
+                });
+                document.addEventListener("ping", dispatched => {
+                    calls.push(`document:${dispatched.target === document}`);
+                });
+                document.addEventListener("ping", () => calls.push("document-again"));
+
+                node.dispatchEvent(event);
+                document.dispatchEvent(event);
+                calls;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(calls, ["node:true", "document:true", "document-again"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn nested_microtasks_publish_one_complete_revision() {
         let (runtime, shared) = runtime_with_dom().await;
         let old = shared.load();
