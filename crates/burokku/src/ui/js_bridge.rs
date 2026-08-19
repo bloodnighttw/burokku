@@ -317,6 +317,26 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
         ),
     )?;
 
+    let style_declarations_state = state.clone();
+    native.set(
+        "styleDeclarations",
+        Func::from(
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<Vec<Vec<String>>> {
+                let id = decode(&context, &handle)?;
+                let state = state_lock(&context, &style_declarations_state)?;
+                require_element(&context, state.owner.staging(), id)?;
+                Ok(state
+                    .owner
+                    .staging()
+                    .style_declarations(id)
+                    .expect("a required element has a DOM node")
+                    .iter()
+                    .map(|(name, value)| vec![name.clone(), value.clone()])
+                    .collect())
+            },
+        ),
+    )?;
+
     Ok(())
 }
 
@@ -1221,6 +1241,51 @@ mod tests {
         let state = dom_plugin.state.lock().unwrap();
         // App + Window + the final Text and string nodes.
         assert_eq!(state.owner.staging().node_count(), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recreated_wrappers_restore_authored_style_values() {
+        let (runtime, dom_plugin, _shared) = runtime_with_tracked_dom().await;
+
+        runtime
+            .eval::<()>(
+                r#"
+                globalThis.styledChild = (() => {
+                  const parent = document.createElement("div");
+                  const child = document.createElement("div");
+                  parent.style.width = "41px";
+                  parent.style.flexGrow = "2.00";
+                  parent.appendChild(child);
+                  return child;
+                })();
+                "#,
+            )
+            .await
+            .unwrap();
+        collect_garbage(&runtime).await;
+
+        // The child lease keeps its detached native component alive, but the
+        // unreachable parent wrapper (and its local style cache) was collected.
+        assert_eq!(dom_plugin.state.lock().unwrap().wrapper_leases.len(), 1);
+
+        let restored: bool = runtime
+            .eval(
+                r#"
+                const recreatedParent = styledChild.parentNode;
+                const valuesRestored =
+                  recreatedParent.style.getPropertyValue("width") === "41px" &&
+                  recreatedParent.style.flexGrow === "2.00";
+                recreatedParent.style.flexGrow =
+                  String(Number(recreatedParent.style.flexGrow) + 1);
+                const removed = recreatedParent.style.removeProperty("width");
+                valuesRestored && recreatedParent.style.flexGrow === "3" &&
+                  removed === "41px" && recreatedParent.style.width === "";
+                "#,
+            )
+            .await
+            .unwrap();
+
+        assert!(restored);
     }
 
     #[tokio::test(flavor = "current_thread")]
