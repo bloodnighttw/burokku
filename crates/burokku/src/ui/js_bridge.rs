@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use runtime::{
     rquickjs::{prelude::Func, Ctx, Exception, Object},
@@ -15,6 +18,49 @@ const DOM_SHIM: &str = include_str!("scripts/dom.js");
 struct DomState {
     owner: BtsDom,
     body: NodeId,
+    // you can treat it as a reference counting mechanism
+    wrapper_leases: HashMap<NodeId, usize>,
+}
+
+impl DomState {
+    fn release_wrapper(&mut self, id: NodeId) {
+        let Some(count) = self.wrapper_leases.get_mut(&id) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+        } else {
+            self.wrapper_leases.remove(&id);
+        }
+    }
+
+    fn reclaim_unreachable(&mut self) {
+        let reclaimable_roots = {
+            let dom = self.owner.staging();
+            let retained_roots: HashSet<_> = self
+                .wrapper_leases
+                .keys()
+                .copied()
+                .filter(|id| dom.contains(*id))
+                .map(|mut id| {
+                    while let Some(parent) = dom.parent(id) {
+                        id = parent;
+                    }
+                    id
+                })
+                .collect();
+            dom.detached_roots()
+                .filter(|root| !retained_roots.contains(root))
+                .collect::<Vec<_>>()
+        };
+
+        for root in reclaimable_roots {
+            self.owner
+                .mutate()
+                .remove_subtree(root)
+                .expect("a detached garbage root remains removable");
+        }
+    }
 }
 
 /// Owns BTS staging state, exposes DOM host operations, and publishes the
@@ -38,7 +84,11 @@ impl DomPlugin {
             body
         };
         Self {
-            state: Arc::new(Mutex::new(DomState { owner, body })),
+            state: Arc::new(Mutex::new(DomState {
+                owner,
+                body,
+                wrapper_leases: HashMap::new(),
+            })),
         }
     }
 
@@ -65,7 +115,12 @@ impl Plugin for DomPlugin {
     }
 
     fn checkpoint<'js>(&mut self, context: &Ctx<'js>) -> RuntimeResult<()> {
-        state_lock(context, &self.state)?
+        let mut state = state_lock(context, &self.state)?;
+        // Finalizer jobs have released their wrapper leases by this point.
+        // Sweeping once per checkpoint also catches nodes that were finalized
+        // while connected and detached by a later mutation.
+        state.reclaim_unreachable();
+        state
             .owner
             .checkpoint()
             .map_err(|error| Exception::throw_message(context, &error.to_string()))?;
@@ -260,6 +315,36 @@ fn install_queries<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> R
 }
 
 fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) -> RuntimeResult<()> {
+    let retain_state = state.clone();
+    native.set(
+        "retain",
+        Func::from(
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<()> {
+                let id = decode(&context, &handle)?;
+                let mut state = state_lock(&context, &retain_state)?;
+                require_element(&context, state.owner.staging(), id)?;
+                let count = state.wrapper_leases.entry(id).or_default();
+                // increment the reference counting
+                *count = count.checked_add(1).ok_or_else(|| {
+                    dom_exception(&context, "DOM node wrapper lease count overflowed")
+                })?;
+                Ok(())
+            },
+        ),
+    )?;
+
+    let release_state = state.clone();
+    native.set(
+        "release",
+        Func::from(
+            move |context: Ctx<'js>, handle: String| -> RuntimeResult<()> {
+                let id = decode(&context, &handle)?;
+                state_lock(&context, &release_state)?.release_wrapper(id);
+                Ok(())
+            },
+        ),
+    )?;
+
     let create_element_state = state.clone();
     native.set(
         "createElement",
@@ -658,6 +743,36 @@ mod tests {
         (runtime, shared)
     }
 
+    async fn runtime_with_tracked_dom() -> (Runtime, DomPlugin, SharedDom) {
+        let (dom_plugin, shared) = DomPlugin::with_new_dom();
+        let runtime = Runtime::builder()
+            .role(RuntimeRole::Background)
+            .plugin(dom_plugin.clone())
+            .build()
+            .await
+            .unwrap();
+        (runtime, dom_plugin, shared)
+    }
+
+    async fn collect_garbage(runtime: &Runtime) {
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        runtime
+            .macrotask_queue()
+            .enqueue(move |context| {
+                context.run_gc();
+                let _ = completed.send(());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        completion.await.unwrap();
+
+        // The event loop drains finalizer jobs and runs plugin checkpoints
+        // after the GC macrotask. A following macrotask starts only once both
+        // phases have completed.
+        runtime.eval::<()>("void 0").await.unwrap();
+    }
+
     fn body(dom: &Dom) -> NodeId {
         dom.children(dom.root()).unwrap()[0]
     }
@@ -1007,6 +1122,114 @@ mod tests {
         assert_eq!(
             snapshot.dom().children(body(snapshot.dom())).unwrap().len(),
             1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_text_content_reclaims_replaced_native_nodes() {
+        let (runtime, dom_plugin, shared) = runtime_with_tracked_dom().await;
+        let mut commits = shared.subscribe();
+
+        runtime
+            .eval::<()>(
+                r#"
+                for (let index = 0; index < 250; index++) {
+                  document.body.textContent = `value ${index}`;
+                }
+                "#,
+            )
+            .await
+            .unwrap();
+
+        commits.changed().await.unwrap();
+        let state = dom_plugin.state.lock().unwrap();
+        // App + Window + the final Text and string nodes.
+        assert_eq!(state.owner.staging().node_count(), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreachable_wrappers_release_detached_native_subtrees() {
+        let (runtime, dom_plugin, _shared) = runtime_with_tracked_dom().await;
+
+        runtime
+            .eval::<()>(
+                r#"
+                (() => {
+                  for (let index = 0; index < 250; index++) {
+                    const node = document.createElement("div");
+                    node.style.width = `${index}px`;
+                    node.addEventListener("unused", () => node.className);
+                    document.body.appendChild(node);
+                    node.remove();
+                  }
+                })();
+                "#,
+            )
+            .await
+            .unwrap();
+        collect_garbage(&runtime).await;
+
+        let state = dom_plugin.state.lock().unwrap();
+        // Only the permanently connected App and Window remain.
+        assert_eq!(state.owner.staging().node_count(), 2);
+        assert!(state
+            .wrapper_leases
+            .keys()
+            .all(|id| state.owner.staging().contains(*id)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_live_descendant_wrapper_retains_its_detached_component() {
+        let (runtime, dom_plugin, _shared) = runtime_with_tracked_dom().await;
+
+        runtime
+            .eval::<()>(
+                r#"
+                globalThis.keptContent = (() => {
+                  const text = document.createElement("text");
+                  const content = document.createTextNode("kept");
+                  text.appendChild(content);
+                  document.body.appendChild(text);
+                  text.remove();
+                  return content;
+                })();
+                "#,
+            )
+            .await
+            .unwrap();
+        collect_garbage(&runtime).await;
+
+        assert!(runtime
+            .eval::<bool>(
+                "keptContent.data === 'kept' && keptContent.parentNode.nodeName === 'TEXT'",
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            dom_plugin
+                .state
+                .lock()
+                .unwrap()
+                .owner
+                .staging()
+                .node_count(),
+            4
+        );
+
+        runtime
+            .eval::<()>("delete globalThis.keptContent; void 0")
+            .await
+            .unwrap();
+        collect_garbage(&runtime).await;
+        assert_eq!(
+            dom_plugin
+                .state
+                .lock()
+                .unwrap()
+                .owner
+                .staging()
+                .node_count(),
+            2
         );
     }
 }
