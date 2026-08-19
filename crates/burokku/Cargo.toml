@@ -20,3 +20,7 @@ winit = { package = "burokku-winit", path = "../winit" }
 [[bench]]
 name = "phase6"
 harness = false
+
+[[bench]]
+name = "dom_lifecycle"
+harness = false

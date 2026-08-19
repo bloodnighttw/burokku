@@ -18,8 +18,9 @@ const DOM_SHIM: &str = include_str!("scripts/dom.js");
 struct DomState {
     owner: BtsDom,
     body: NodeId,
-    // you can treat it as a reference counting mechanism
+    // Counts live JavaScript wrappers, not references to the wrapper in JS.
     wrapper_leases: HashMap<NodeId, usize>,
+    needs_reclaim: bool,
 }
 
 impl DomState {
@@ -32,6 +33,7 @@ impl DomState {
         } else {
             self.wrapper_leases.remove(&id);
         }
+        self.needs_reclaim = true;
     }
 
     fn reclaim_unreachable(&mut self) {
@@ -88,6 +90,7 @@ impl DomPlugin {
                 owner,
                 body,
                 wrapper_leases: HashMap::new(),
+                needs_reclaim: false,
             })),
         }
     }
@@ -117,9 +120,12 @@ impl Plugin for DomPlugin {
     fn checkpoint<'js>(&mut self, context: &Ctx<'js>) -> RuntimeResult<()> {
         let mut state = state_lock(context, &self.state)?;
         // Finalizer jobs have released their wrapper leases by this point.
-        // Sweeping once per checkpoint also catches nodes that were finalized
-        // while connected and detached by a later mutation.
-        state.reclaim_unreachable();
+        // Only scan after a lease release or an operation that can leave a
+        // detached component; ordinary checkpoints stay O(1) here.
+        if state.needs_reclaim {
+            state.reclaim_unreachable();
+            state.needs_reclaim = false;
+        }
         state
             .owner
             .checkpoint()
@@ -324,7 +330,6 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
                 let mut state = state_lock(&context, &retain_state)?;
                 require_element(&context, state.owner.staging(), id)?;
                 let count = state.wrapper_leases.entry(id).or_default();
-                // increment the reference counting
                 *count = count.checked_add(1).ok_or_else(|| {
                     dom_exception(&context, "DOM node wrapper lease count overflowed")
                 })?;
@@ -353,6 +358,9 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
                 let element = element_for_tag(&context, &tag)?;
                 let mut state = state_lock(&context, &create_element_state)?;
                 let id = state.owner.mutate().create(element);
+                // If wrapper construction fails after this host call, the new
+                // detached native node has no lease and must still be swept.
+                state.needs_reclaim = true;
                 Ok(encode(id))
             },
         ),
@@ -368,6 +376,7 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
                     .owner
                     .mutate()
                     .create(Elements::_String { string: text });
+                state.needs_reclaim = true;
                 Ok(encode(id))
             },
         ),
@@ -423,6 +432,9 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
                     ));
                 }
                 let result = state.owner.mutate().detach(child);
+                if result.is_ok() {
+                    state.needs_reclaim = true;
+                }
                 map_dom_result(&context, result)
             },
         ),
@@ -439,7 +451,9 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
                     .map(|handle| decode(&context, handle))
                     .collect::<RuntimeResult<Vec<_>>>()?;
                 let mut state = state_lock(&context, &replace_state)?;
-                replace_children(&context, &mut state.owner, parent, &children)
+                replace_children(&context, &mut state.owner, parent, &children)?;
+                state.needs_reclaim = true;
+                Ok(())
             },
         ),
     )?;
@@ -451,7 +465,15 @@ fn install_mutations<'js>(native: &Object<'js>, state: &Arc<Mutex<DomState>>) ->
             move |context: Ctx<'js>, handle: String, text: String| -> RuntimeResult<()> {
                 let id = decode(&context, &handle)?;
                 let mut state = state_lock(&context, &text_state)?;
-                set_text_content(&context, &mut state.owner, id, text)
+                let can_detach_children = !matches!(
+                    state.owner.staging().element(id),
+                    Some(Elements::_String { .. })
+                );
+                set_text_content(&context, &mut state.owner, id, text)?;
+                if can_detach_children {
+                    state.needs_reclaim = true;
+                }
+                Ok(())
             },
         ),
     )?;

@@ -186,14 +186,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "burokku-example-solid"
-version = "0.1.0"
-dependencies = [
- "burokku",
- "tokio",
-]
-
-[[package]]
 name = "burokku-winit"
 version = "0.1.0"
 dependencies = [
