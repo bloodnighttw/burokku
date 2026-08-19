@@ -4,6 +4,14 @@
   const native = globalThis.__burokkuDomNative;
   const construct = Symbol("Burokku DOM node");
   const cache = new Map();
+  const finalizers = new FinalizationRegistry(handle => {
+    // A replacement wrapper can be created after the old WeakRef is cleared
+    // but before its finalizer runs. Keep that newer cache entry while still
+    // releasing the old wrapper's native lease.
+    const reference = cache.get(handle);
+    if (!reference || reference.deref() === undefined) cache.delete(handle);
+    native.release(handle);
+  });
 
   function requireNode(value, label = "node") {
     if (!(value instanceof Node)) throw new TypeError(`${label} must be a Node`);
@@ -262,12 +270,14 @@
 
   function wrap(handle) {
     if (handle === undefined || handle === null) return null;
-    let node = cache.get(handle);
+    let node = cache.get(handle)?.deref();
     if (node) return node;
     node = native.nodeType(handle) === Node.TEXT_NODE
       ? new Text(construct, handle)
       : new Element(construct, handle);
-    cache.set(handle, node);
+    native.retain(handle);
+    cache.set(handle, new WeakRef(node));
+    finalizers.register(node, handle);
     return node;
   }
 
