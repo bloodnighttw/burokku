@@ -16,8 +16,8 @@ Primary implementation reviewed:
 The current implementation is a useful tree arena, but it is not yet a usable
 DOM pipeline. Stable handles, structural validation, detached construction,
 and copy-on-write nodes are a good foundation. The main blockers are incorrect
-layout defaults, an undefined document root, missing publication, missing
-JavaScript bindings, incomplete text handling, and no layout/render/event
+layout defaults, an undefined application mount root, missing publication,
+missing JavaScript bindings, incomplete text handling, and no layout/render/event
 integration.
 
 ## Major findings
@@ -72,31 +72,32 @@ BTS staging Dom
 Only publish when the staging DOM is dirty, and publish once after a complete
 JavaScript macrotask plus its microtasks.
 
-### 3. The document and root-element contract is undefined
+### 3. The application mount-root contract -- DECIDED, PENDING IMPLEMENTATION
 
-`Dom::new()` creates only an internal `App` node. `App` accepts only one
-`Window`, but current consumers immediately access and style `document.body`
-without creating a window.
-
-Recommended bootstrap tree:
+`Dom::new()` creates the internal `NodeKind::App` root. The host must expose a
+stable JavaScript wrapper for that exact node as `globalThis.app`:
 
 ```text
-App
-└── Window       native host and viewport
-    └── Body      regular Div exposed as document.body
+AppNode             host-created, permanent mount root
+└── Window          script/framework-created native host and viewport
+    └── content     regular elements
 ```
 
-This keeps native window state separate from content layout. It also allows the
-existing examples to apply common properties such as padding and background
-color to `document.body`.
+`AppNode` extends the JavaScript `Node` facade directly; it is not an element.
+It therefore has no tag, attributes, layout style, or paint style. Script
+cannot create another app node. UI frameworks mount a `Window` under `app`, and
+`window` remains a supported `BurokkuTagName`. The current native tree contract
+allows one attached window.
 
-The contract must define:
+Implementation must still define and enforce:
 
-- whether `Window` is host-created or script-created;
-- whether `window` belongs in `BurokkuTagName`;
-- which node `document.body` references;
-- whether removing or replacing the body/window is permitted;
-- how native window size constrains the body layout root.
+- the stable `globalThis.app: AppNode` wrapper;
+- native-window creation and teardown when a `Window` is inserted or removed;
+- behavior when the user closes the native window;
+- how native window size constrains the window's content layout root.
+
+See `docs/dom_node_model.md` for the complete node hierarchy and mount-root
+contract.
 
 ### 4. `WindowStyle` is internally inconsistent -- OK
 
@@ -105,16 +106,10 @@ The contract must define:
 `Element::background_color()` reads it. However, `supports_property`,
 `set_property`, and `remove_property` only implement width and height.
 
-Consequences:
-
-- `background-color` cannot be assigned through the DOM style API;
-- the field can only be changed by constructing and replacing the complete
-  Rust element;
-- mapping `document.body` directly to `Window` would make the examples' body
-  padding and background styles fail.
-
-Prefer a separate body element. If window paint remains supported, implement
-its style operations consistently.
+This inconsistency has been corrected: `supports_property`, `set_property`, and
+`remove_property` now handle `background-color`. `Window` intentionally remains
+a specialized native-host element rather than a general content container;
+regular layout and paint styling belongs on its child elements.
 
 ### 5. `NodeId` does not identify its owning DOM lineage -- Not a critical issue since we never create separate DOMs
 
@@ -124,11 +119,11 @@ another can therefore resolve to an unrelated node instead of producing
 `DomError::NodeNotFound`.
 
 This matters when handles are moved through runtime messages or when more than
-one document can exist.
+one independent app lineage can exist.
 
 Possible solutions:
 
-- include a stable document/lineage ID alongside the SlotMap key;
+- include a stable app/lineage ID alongside the SlotMap key;
 - wrap IDs in a handle carrying and validating its owner;
 - make construction and all cross-thread APIs enforce a single DOM lineage.
 
@@ -175,7 +170,7 @@ missing:
 The examples already require assignments such as:
 
 ```ts
-const title = createElement("text");
+const title = app.createElement("text");
 title.textContent = "Click counter";
 ```
 
@@ -242,7 +237,7 @@ enum StyleError {
 All accepted numeric values should be finite and satisfy property-specific
 constraints.
 
-### 10. Taffy conversion consumes authoritative style values
+### 10. Taffy conversion consumes authoritative style values -- OK
 
 `Styles::to_taffy_style(self)` takes ownership of the style. A renderer reading
 an immutable snapshot cannot move style values out of it, so it must clone them
@@ -255,13 +250,13 @@ strings, but unchanged DOM styles should not be repeatedly cloned and parsed.
 
 ### 11. Detached-node ownership and garbage collection are undefined
 
-`create_element` and `create_text` allocate detached nodes immediately. If a
-JavaScript wrapper becomes unreachable before insertion, the arena retains the
-node unless something explicitly calls `remove_subtree`.
+`app.createElement` and `app.createTextNode` allocate detached nodes
+immediately. If a JavaScript wrapper becomes unreachable before insertion, the
+arena retains the node unless something explicitly calls `remove_subtree`.
 
 The JS integration must distinguish:
 
-- detaching a node from the document while keeping it valid for live JS
+- detaching a node from the app tree while keeping it valid for live JS
   references;
 - permanently reclaiming an unreachable detached subtree;
 - removing an attached subtree from rendering without invalidating wrappers;
@@ -276,11 +271,13 @@ them.
 QuickJS does not provide browser DOM classes. The project needs a DOM plugin
 that creates and maintains at least:
 
-- `document` and `document.body`;
-- `Node`, `Element`, `HTMLElement`, and `Text` behavior;
+- `globalThis.app` backed by the permanent `AppNode` wrapper;
+- `app.createElement` and `app.createTextNode` as the only script-facing node
+  factories;
+- `Node`, `AppNode`, `Element`, and `TextNode` behavior;
 - a stable `NodeId -> JS wrapper` identity cache so repeated access preserves
   `===` identity;
-- `createElement` and `createTextNode`;
+- detached-node creation through the two `app` factory methods;
 - `parentNode`, `childNodes`, `firstChild`, `nextSibling`, and connectedness;
 - `appendChild`, `insertBefore`, `removeChild`, and replacement operations;
 - `textContent`, `nodeValue`, and text data;
@@ -354,10 +351,11 @@ runtimes.
    - move grid-item properties into shared item data;
    - validate style values and return typed errors.
 
-2. **Define and bootstrap the document tree**
-   - create `App -> Window -> Body(Div)`;
-   - specify script permissions for window/body mutation;
-   - add tag-name constructors and getters.
+2. **Expose the application mount root**
+   - expose the existing `NodeKind::App` root as `globalThis.app: AppNode`;
+   - allow scripts and UI frameworks to mount a `Window` under `app`;
+   - define window insertion, removal, native-close, and viewport behavior;
+   - add tag-name constructors and getters for element nodes.
 
 3. **Implement immutable publication**
    - staging DOM owner;
@@ -417,7 +415,7 @@ At the time of this review:
 - `cargo check --workspace --all-targets` fails because the examples import the
   currently absent `burokku::Burokku` API.
 
-The highest-priority fixes are the incorrect `Div` display mode, the document
-bootstrap contract, the shared/item/text style model, and immutable DOM
+The highest-priority fixes are the incorrect `Div` display mode, the application
+mount-root contract, the shared/item/text style model, and immutable DOM
 publication. Those should be resolved before building rendering on top of the
 current representation.

@@ -461,7 +461,7 @@ Text rendering is complete for the initial contract when this program works
 end to end:
 
 ```ts
-const title = createElement("text");
+const title = app.createElement("text");
 title.textContent = "Click counter";
 setStyles(title, {
   fontFamily: "sans-serif",
@@ -471,7 +471,9 @@ setStyles(title, {
   lineHeight: 1.2,
   textWrap: "wrap",
 });
-document.body.appendChild(title);
+const mainWindow = app.createElement("window");
+mainWindow.appendChild(title);
+app.appendChild(mainWindow);
 ```
 
 The committed text must be collected into styled runs, measured by Parley from

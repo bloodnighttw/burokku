@@ -43,7 +43,8 @@ Node
 
 - `Node` provides behavior shared by every node, including identity, parent and
   child traversal, insertion, and removal.
-- `AppNode` represents `NodeKind::App` and extends `Node` directly.
+- `AppNode` represents `NodeKind::App`, extends `Node` directly, and owns the
+  node factory methods `createElement` and `createTextNode`.
 - `TextNode` represents `NodeKind::Text` and adds text data operations.
 - `Element` represents `NodeKind::Element` and provides tag, attribute, style,
   and element-specific behavior.
@@ -58,6 +59,11 @@ continue using enums and composition.
 The host exposes the existing app root as:
 
 ```ts
+interface AppNode extends Node {
+  createElement(tag: BurokkuTagName): Element;
+  createTextNode(data: string): TextNode;
+}
+
 declare global {
   var app: AppNode;
 }
@@ -79,6 +85,9 @@ The app node:
 - is not an element;
 - has no element tag, attributes, layout style, or paint style;
 - cannot be created by script;
+- is the sole factory for script-created elements and text nodes through
+  `app.createElement(...)` and `app.createTextNode(...)`;
+- returns newly created nodes detached from the tree;
 - accepts only `Window` element children;
 - currently permits only one attached window;
 - uses the normal inherited `Node` mutation and traversal operations, with its
