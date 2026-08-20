@@ -225,12 +225,6 @@ impl Dom {
         self.nodes.len()
     }
 
-    pub(crate) fn detached_roots(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes
-            .iter()
-            .filter_map(move |(id, node)| (id != self.root && node.parent.is_none()).then_some(id))
-    }
-
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id).map(Arc::as_ref)
     }
