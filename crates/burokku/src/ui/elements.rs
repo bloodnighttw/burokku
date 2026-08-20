@@ -12,77 +12,52 @@ use thiserror::Error;
 mod iter;
 mod publication;
 
-pub use iter::ElementsIter;
+pub use iter::DomIter;
 pub mod styles;
 pub mod traits;
 
 new_key_type! {
-    /// A stable, generation-checked handle to an element in a [`Dom`].
+    /// A stable, generation-checked handle to a node in a [`Dom`].
     ///
-    /// The handle remains valid when the arena grows, when the element moves in
-    /// the tree, and in cloned DOM snapshots. Once its element is removed, the
+    /// The handle remains valid when the arena grows, when the node moves in
+    /// the tree, and in cloned DOM snapshots. Once its node is removed, the
     /// generation prevents the handle from referring to a later allocation that
     /// reuses the same slot.
     pub struct NodeId;
 }
 
-/// The data that determines an element's type and content.
+/// The data belonging to an element node.
 ///
-/// Parent and child relationships deliberately live in [`Node`] rather than in
-/// this enum. This keeps elements in an arena, so callers retain [`NodeId`]
-/// handles instead of references into a recursively owned tree.
+/// This describes tags such as `<div>` and `<text>`. Text content is represented
+/// separately by [`NodeKind::Text`], so an element and a DOM text node cannot be
+/// confused with one another.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Elements {
-    // for <app> tag
-    App,
-    // for <window> tag, currently only supported one window in app,
-    // we will extend this to support multiple windows in the future.
-    Window {
-        style: Box<WindowStyle>,
-    },
-    // for <div> tag
-    Div {
-        style: Box<CommonStyle>,
-    },
-    // for <flex> tag
-    Flex {
-        style: Box<FlexStyle>,
-    },
-    // for <grid> tag
-    Grid {
-        style: Box<GridStyle>,
-    },
-    // for <text> tag
-    Text {
-        style: Box<CommonStyle>,
-    },
-    /// Internal element used for text content. It is not intended to be
-    /// constructed directly by application code.
-    _String {
-        string: String,
-    },
+pub enum Element {
+    /// The `<window>` element. Only one may currently be attached to the app.
+    Window { style: Box<WindowStyle> },
+    /// A block `<div>` element.
+    Div { style: Box<CommonStyle> },
+    /// A flex container element.
+    Flex { style: Box<FlexStyle> },
+    /// A grid container element.
+    Grid { style: Box<GridStyle> },
+    /// A styled `<text>` element, distinct from a DOM text node.
+    Text { style: Box<CommonStyle> },
 }
 
-/// Returns true if `child` is a valid child of `self`.
-impl Elements {
-    fn accepts(&self, child: &Self) -> bool {
-        match self {
-            Self::App => matches!(child, Self::Window { .. }),
-            Self::Window { .. } | Self::Div { .. } | Self::Flex { .. } | Self::Grid { .. } => {
-                matches!(
-                    child,
-                    Self::Div { .. } | Self::Flex { .. } | Self::Grid { .. } | Self::Text { .. }
-                )
-            }
-            Self::Text { .. } => matches!(child, Self::Text { .. } | Self::_String { .. }),
-            Self::_String { .. } => false,
-        }
+impl Element {
+    fn same_tag(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Window { .. }, Self::Window { .. })
+                | (Self::Div { .. }, Self::Div { .. })
+                | (Self::Flex { .. }, Self::Flex { .. })
+                | (Self::Grid { .. }, Self::Grid { .. })
+                | (Self::Text { .. }, Self::Text { .. })
+        )
     }
 
     // TODO: make Styles trait use self.supports_property() instead of static methods
-    // this can be better since we can call it directly on the style field,
-    // and in future, if we introduce more element types with different styles,
-    // we can make it more flexible.
     fn supports_style_property(&self, name: &str) -> bool {
         match self {
             Self::Div { .. } => CommonStyle::supports_property(name),
@@ -90,7 +65,6 @@ impl Elements {
             Self::Flex { .. } => FlexStyle::supports_property(name),
             Self::Grid { .. } => GridStyle::supports_property(name),
             Self::Text { .. } => CommonStyle::supports_property(name),
-            Self::App | Self::_String { .. } => false,
         }
     }
 
@@ -100,7 +74,6 @@ impl Elements {
             Self::Window { style } => style.set_property(name, value),
             Self::Flex { style } => style.set_property(name, value),
             Self::Grid { style } => style.set_property(name, value),
-            Self::App | Self::_String { .. } => false,
         }
     }
 
@@ -110,7 +83,6 @@ impl Elements {
             Self::Window { style } => style.remove_property(name),
             Self::Flex { style } => style.remove_property(name),
             Self::Grid { style } => style.remove_property(name),
-            Self::App | Self::_String { .. } => false,
         }
     }
 
@@ -120,7 +92,61 @@ impl Elements {
             Self::Div { style } | Self::Text { style } => style.background_color,
             Self::Flex { style } => style.common.background_color,
             Self::Grid { style } => style.common.background_color,
-            Self::App | Self::_String { .. } => None,
+        }
+    }
+}
+
+/// The immutable kind of a DOM node.
+///
+/// Parent and child relationships deliberately live in [`Node`] rather than in
+/// this enum. The app root is created internally by [`Dom::new`]; callers create
+/// only element and text nodes through the corresponding typed constructors.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NodeKind {
+    App,
+    Element(Element),
+    Text(String),
+}
+
+impl NodeKind {
+    /// Returns true if `child` is a valid child of `self`.
+    fn accepts(&self, child: &Self) -> bool {
+        match self {
+            Self::App => matches!(child, Self::Element(Element::Window { .. })),
+            Self::Element(
+                Element::Window { .. }
+                | Element::Div { .. }
+                | Element::Flex { .. }
+                | Element::Grid { .. },
+            ) => matches!(
+                child,
+                Self::Element(
+                    Element::Div { .. }
+                        | Element::Flex { .. }
+                        | Element::Grid { .. }
+                        | Element::Text { .. }
+                ) | Self::Text(_)
+            ),
+            // A styled <text> is a rich-text container: raw text nodes hold its
+            // content, while nested <text> elements introduce styled text runs.
+            Self::Element(Element::Text { .. }) => {
+                matches!(child, Self::Text(_) | Self::Element(Element::Text { .. }))
+            }
+            Self::Text(_) => false,
+        }
+    }
+
+    pub fn as_element(&self) -> Option<&Element> {
+        match self {
+            Self::Element(element) => Some(element),
+            Self::App | Self::Text(_) => None,
+        }
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::App | Self::Element(_) => None,
         }
     }
 }
@@ -137,10 +163,10 @@ pub struct NodeRevisions {
     pub content: u64,
 }
 
-/// An arena entry containing an element and its tree relationships.
+/// An arena entry containing a node kind and its tree relationships.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
-    element: Elements,
+    kind: NodeKind,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
     attributes: BTreeMap<String, String>,
@@ -148,8 +174,16 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn element(&self) -> &Elements {
-        &self.element
+    pub fn kind(&self) -> &NodeKind {
+        &self.kind
+    }
+
+    pub fn element(&self) -> Option<&Element> {
+        self.kind.as_element()
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        self.kind.as_text()
     }
 
     pub fn parent(&self) -> Option<NodeId> {
@@ -194,7 +228,7 @@ impl Dom {
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(Arc::new(Node {
-            element: Elements::App,
+            kind: NodeKind::App,
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
@@ -229,8 +263,16 @@ impl Dom {
         self.nodes.get(id).map(Arc::as_ref)
     }
 
-    pub fn element(&self, id: NodeId) -> Option<&Elements> {
-        self.node(id).map(Node::element)
+    pub fn kind(&self, id: NodeId) -> Option<&NodeKind> {
+        self.node(id).map(Node::kind)
+    }
+
+    pub fn element(&self, id: NodeId) -> Option<&Element> {
+        self.node(id)?.element()
+    }
+
+    pub fn text(&self, id: NodeId) -> Option<&str> {
+        self.node(id)?.text()
     }
 
     pub fn attribute(&self, id: NodeId, name: &str) -> Option<&str> {
@@ -246,8 +288,10 @@ impl Dom {
     }
 
     pub fn supports_style_property(&self, id: NodeId, name: &str) -> Result<bool, DomError> {
-        let element = self.element(id).ok_or(DomError::NodeNotFound(id))?;
-        Ok(element.supports_style_property(name))
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        Ok(node
+            .element()
+            .is_some_and(|element| element.supports_style_property(name)))
     }
 
     pub fn set_style_property(
@@ -257,13 +301,19 @@ impl Dom {
         value: &str,
     ) -> Result<bool, DomError> {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-        let mut element = node.element.clone();
+        let Some(current) = node.element() else {
+            return Ok(false);
+        };
+        let mut element = current.clone();
         if !element.set_style_property(name, value) {
             return Ok(false);
         }
+        if &element == current {
+            return Ok(true);
+        }
 
         let node = self.node_mut(id)?;
-        node.element = element;
+        node.kind = NodeKind::Element(element);
         bump(&mut node.revisions.style);
         self.bump_revision();
         Ok(true)
@@ -271,21 +321,37 @@ impl Dom {
 
     pub fn remove_style_property(&mut self, id: NodeId, name: &str) -> Result<bool, DomError> {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-        let mut element = node.element.clone();
+        let Some(current) = node.element() else {
+            return Ok(false);
+        };
+        let mut element = current.clone();
         if !element.remove_style_property(name) {
             return Ok(false);
         }
+        if &element == current {
+            return Ok(true);
+        }
+
         let node = self.node_mut(id)?;
-        node.element = element;
+        node.kind = NodeKind::Element(element);
         bump(&mut node.revisions.style);
         self.bump_revision();
         Ok(true)
     }
 
-    /// Allocates a detached element and returns its stable handle.
-    pub fn create(&mut self, element: Elements) -> NodeId {
+    /// Allocates a detached element node and returns its stable handle.
+    pub fn create_element(&mut self, element: Element) -> NodeId {
+        self.create_node(NodeKind::Element(element))
+    }
+
+    /// Allocates a detached DOM text node and returns its stable handle.
+    pub fn create_text(&mut self, text: impl Into<String>) -> NodeId {
+        self.create_node(NodeKind::Text(text.into()))
+    }
+
+    fn create_node(&mut self, kind: NodeKind) -> NodeId {
         let id = self.nodes.insert(Arc::new(Node {
-            element,
+            kind,
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
@@ -304,6 +370,9 @@ impl Dom {
         value: String,
     ) -> Result<(), DomError> {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        if node.element().is_none() {
+            return Err(DomError::NodeNotElement(id));
+        }
         if node.attributes.get(&name) == Some(&value) {
             return Ok(());
         }
@@ -316,6 +385,9 @@ impl Dom {
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        if node.element().is_none() {
+            return Err(DomError::NodeNotElement(id));
+        }
         if !node.attributes.contains_key(name) {
             return Ok(None);
         }
@@ -326,55 +398,36 @@ impl Dom {
         Ok(removed)
     }
 
-    /// Replaces an element's data without changing its stable handle.
-    ///
-    /// The replacement must remain valid for both its parent and its existing
-    /// children. The root must always remain an `App`.
-    pub fn set_element(&mut self, id: NodeId, element: Elements) -> Result<(), DomError> {
+    /// Replaces an element's data without changing its tag or stable handle.
+    pub fn set_element(&mut self, id: NodeId, element: Element) -> Result<(), DomError> {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-
-        if id == self.root && !matches!(element, Elements::App) {
-            return Err(DomError::RootMustBeApp);
+        let current = node.element().ok_or(DomError::NodeNotElement(id))?;
+        if !current.same_tag(&element) {
+            return Err(DomError::ElementTagMismatch(id));
         }
-        if id != self.root && matches!(element, Elements::App) {
-            return Err(DomError::AppMustBeRoot);
-        }
-        if let Some(parent) = node.parent {
-            let parent_element = &self.nodes[parent].element;
-            if !parent_element.accepts(&element) {
-                return Err(DomError::InvalidRelationship { parent, child: id });
-            }
-        }
-        if node
-            .children
-            .iter()
-            .any(|child| !element.accepts(&self.nodes[*child].element))
-        {
-            return Err(DomError::InvalidChildren(id));
-        }
-        if matches!(element, Elements::App) && node.children.len() > 1 {
-            return Err(DomError::AppAlreadyHasWindow);
-        }
-
-        let revision_kind = ElementRevisionKind::between(&node.element, &element);
-        if revision_kind == ElementRevisionKind::None {
+        if current == &element {
             return Ok(());
         }
 
         let node = self.node_mut(id)?;
-        node.element = element;
-        match revision_kind {
-            ElementRevisionKind::None => unreachable!("no-op replacements return above"),
-            ElementRevisionKind::Style => {
-                bump(&mut node.revisions.style);
-            }
-            ElementRevisionKind::Content => bump(&mut node.revisions.content),
-            ElementRevisionKind::All => {
-                bump(&mut node.revisions.structure);
-                bump(&mut node.revisions.style);
-                bump(&mut node.revisions.content);
-            }
+        node.kind = NodeKind::Element(element);
+        bump(&mut node.revisions.style);
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Replaces a text node's content without changing its stable handle.
+    pub fn set_text(&mut self, id: NodeId, text: impl Into<String>) -> Result<(), DomError> {
+        let text = text.into();
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        let current = node.text().ok_or(DomError::NodeNotText(id))?;
+        if current == text {
+            return Ok(());
         }
+
+        let node = self.node_mut(id)?;
+        node.kind = NodeKind::Text(text);
+        bump(&mut node.revisions.content);
         self.bump_revision();
         Ok(())
     }
@@ -406,10 +459,10 @@ impl Dom {
         let parent_node = self.node(parent).ok_or(DomError::NodeNotFound(parent))?;
         let child_node = self.node(child).ok_or(DomError::NodeNotFound(child))?;
 
-        if child == self.root || matches!(child_node.element, Elements::App) {
+        if child == self.root || matches!(child_node.kind, NodeKind::App) {
             return Err(DomError::AppMustBeRoot);
         }
-        if !parent_node.element.accepts(&child_node.element) {
+        if !parent_node.kind.accepts(&child_node.kind) {
             return Err(DomError::InvalidRelationship { parent, child });
         }
         if self.is_ancestor_or_self(child, parent) {
@@ -432,7 +485,7 @@ impl Dom {
                 len: final_len,
             });
         }
-        if matches!(parent_node.element, Elements::App)
+        if matches!(parent_node.kind, NodeKind::App)
             && parent_node
                 .children
                 .iter()
@@ -492,7 +545,7 @@ impl Dom {
     }
 
     /// Removes a node and all descendants, invalidating all of their handles.
-    pub fn remove_subtree(&mut self, id: NodeId) -> Result<Elements, DomError> {
+    pub fn remove_subtree(&mut self, id: NodeId) -> Result<NodeKind, DomError> {
         if id == self.root {
             return Err(DomError::CannotRemoveRoot);
         }
@@ -507,7 +560,7 @@ impl Dom {
             .nodes
             .remove(id)
             .expect("the node was checked immediately before removal");
-        let element = removed.element.clone();
+        let kind = removed.kind.clone();
         let mut pending = removed.children.clone();
         while let Some(descendant) = pending.pop() {
             if let Some(node) = self.nodes.remove(descendant) {
@@ -515,12 +568,12 @@ impl Dom {
             }
         }
         self.bump_revision();
-        Ok(element)
+        Ok(kind)
     }
 
     /// Iterates over the reachable tree in pre-order, yielding stable IDs.
-    pub fn iter(&self) -> ElementsIter<'_> {
-        ElementsIter::new(self)
+    pub fn iter(&self) -> DomIter<'_> {
+        DomIter::new(self)
     }
 
     fn node_mut(&mut self, id: NodeId) -> Result<&mut Node, DomError> {
@@ -553,32 +606,6 @@ impl Dom {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ElementRevisionKind {
-    None,
-    Style,
-    Content,
-    All,
-}
-
-impl ElementRevisionKind {
-    fn between(current: &Elements, replacement: &Elements) -> Self {
-        if current == replacement {
-            return Self::None;
-        }
-
-        match (current, replacement) {
-            (Elements::Window { .. }, Elements::Window { .. })
-            | (Elements::Div { .. }, Elements::Div { .. })
-            | (Elements::Flex { .. }, Elements::Flex { .. })
-            | (Elements::Grid { .. }, Elements::Grid { .. })
-            | (Elements::Text { .. }, Elements::Text { .. }) => Self::Style,
-            (Elements::_String { .. }, Elements::_String { .. }) => Self::Content,
-            _ => Self::All,
-        }
-    }
-}
-
 // increments a revision counter
 fn bump(revision: &mut u64) {
     *revision = revision
@@ -590,8 +617,8 @@ fn bump(revision: &mut u64) {
 }
 
 impl<'a> IntoIterator for &'a Dom {
-    type Item = (NodeId, &'a Elements);
-    type IntoIter = ElementsIter<'a>;
+    type Item = (NodeId, &'a NodeKind);
+    type IntoIter = DomIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -604,12 +631,14 @@ pub enum DomError {
     NodeNotFound(NodeId),
     #[error("App must be the root node")]
     AppMustBeRoot,
-    #[error("the root element must remain an App")]
-    RootMustBeApp,
+    #[error("node {0:?} is not an element")]
+    NodeNotElement(NodeId),
+    #[error("node {0:?} is not a text node")]
+    NodeNotText(NodeId),
+    #[error("node {0:?}'s element tag cannot be changed")]
+    ElementTagMismatch(NodeId),
     #[error("cannot insert node {child:?} under node {parent:?}")]
     InvalidRelationship { parent: NodeId, child: NodeId },
-    #[error("node {0:?}'s existing children are invalid for its new element type")]
-    InvalidChildren(NodeId),
     #[error("only one Window may be attached to App")]
     AppAlreadyHasWindow,
     #[error("inserting node {child:?} under node {parent:?} would create a cycle")]
@@ -633,16 +662,16 @@ mod tests {
     #[test]
     fn handles_survive_moves_updates_and_snapshot_clones() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window {
+        let window = dom.create_element(Element::Window {
             style: Box::default(),
         });
-        let first_parent = dom.create(Elements::Div {
+        let first_parent = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let second_parent = dom.create(Elements::Div {
+        let second_parent = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let child = dom.create(Elements::Text {
+        let child = dom.create_element(Element::Text {
             style: Box::default(),
         });
 
@@ -653,19 +682,22 @@ mod tests {
         dom.append_child(second_parent, child).unwrap();
         dom.set_element(
             child,
-            Elements::Text {
-                style: Box::default(),
+            Element::Text {
+                style: Box::new(CommonStyle {
+                    background_color: Some(RgbaColor::rgb(1, 2, 3)),
+                    ..CommonStyle::default()
+                }),
             },
         )
         .unwrap();
 
         assert_eq!(dom.parent(child), Some(second_parent));
-        assert!(matches!(dom.element(child), Some(Elements::Text { .. })));
+        assert!(matches!(dom.element(child), Some(Element::Text { .. })));
 
         let snapshot = dom.clone();
         assert!(matches!(
             snapshot.element(child),
-            Some(Elements::Text { .. })
+            Some(Element::Text { .. })
         ));
         assert_eq!(snapshot.parent(child), Some(second_parent));
     }
@@ -673,11 +705,11 @@ mod tests {
     #[test]
     fn removed_handles_never_refer_to_reused_slots() {
         let mut dom = Dom::new();
-        let stale = dom.create(Elements::Div {
+        let stale = dom.create_element(Element::Div {
             style: Box::default(),
         });
         dom.remove_subtree(stale).unwrap();
-        let replacement = dom.create(Elements::Div {
+        let replacement = dom.create_element(Element::Div {
             style: Box::default(),
         });
 
@@ -687,7 +719,7 @@ mod tests {
         assert_eq!(
             dom.set_element(
                 stale,
-                Elements::Div {
+                Element::Div {
                     style: Box::default(),
                 },
             ),
@@ -698,13 +730,13 @@ mod tests {
     #[test]
     fn invalid_mutations_leave_the_tree_unchanged() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window {
+        let window = dom.create_element(Element::Window {
             style: Box::default(),
         });
-        let div = dom.create(Elements::Div {
+        let div = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let text = dom.create(Elements::Text {
+        let text = dom.create_element(Element::Text {
             style: Box::default(),
         });
         dom.append_child(dom.root(), window).unwrap();
@@ -724,26 +756,24 @@ mod tests {
     #[test]
     fn reports_supported_style_properties_by_element_type() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window {
+        let window = dom.create_element(Element::Window {
             style: Box::default(),
         });
-        let div = dom.create(Elements::Div {
+        let div = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let flex = dom.create(Elements::Flex {
+        let flex = dom.create_element(Element::Flex {
             style: Box::default(),
         });
-        let grid = dom.create(Elements::Grid {
+        let grid = dom.create_element(Element::Grid {
             style: Box::default(),
         });
-        let text = dom.create(Elements::Text {
+        let text_element = dom.create_element(Element::Text {
             style: Box::default(),
         });
-        let string = dom.create(Elements::_String {
-            string: String::new(),
-        });
+        let text_node = dom.create_text("");
 
-        for id in [window, div, flex, grid, text] {
+        for id in [window, div, flex, grid, text_element] {
             assert_eq!(dom.supports_style_property(id, "width"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "not-defined"), Ok(false));
         }
@@ -760,30 +790,39 @@ mod tests {
             Ok(false)
         );
         assert_eq!(dom.supports_style_property(dom.root(), "width"), Ok(false));
-        assert_eq!(dom.supports_style_property(string, "width"), Ok(false));
+        assert_eq!(dom.supports_style_property(text_node, "width"), Ok(false));
     }
 
     #[test]
-    fn preserves_authored_style_declarations() {
+    fn style_no_ops_do_not_advance_revisions() {
         let mut dom = Dom::new();
-        let div = dom.create(Elements::Div {
+        let div = dom.create_element(Element::Div {
             style: Box::default(),
         });
+        let initial_revision = dom.revision();
 
         assert_eq!(dom.set_style_property(div, "flex-grow", "0.00"), Ok(true));
+        assert_eq!(dom.revision(), initial_revision);
+
+        assert_eq!(dom.set_style_property(div, "flex-grow", "1"), Ok(true));
+        let changed_revision = dom.revision();
+        assert!(changed_revision > initial_revision);
+        assert_eq!(dom.set_style_property(div, "flex-grow", "1.0"), Ok(true));
+        assert_eq!(dom.revision(), changed_revision);
 
         assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(true));
+        let removed_revision = dom.revision();
+        assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(true));
+        assert_eq!(dom.revision(), removed_revision);
     }
 
     #[test]
-    fn tracks_style_and_content_revisions_independently() {
+    fn tracks_style_and_text_revisions_independently() {
         let mut dom = Dom::new();
-        let flex = dom.create(Elements::Flex {
+        let flex = dom.create_element(Element::Flex {
             style: Box::default(),
         });
-        let string = dom.create(Elements::_String {
-            string: "before".into(),
-        });
+        let text = dom.create_text("before");
 
         let style = FlexStyle {
             common: CommonStyle {
@@ -794,18 +833,12 @@ mod tests {
         };
         dom.set_element(
             flex,
-            Elements::Flex {
+            Element::Flex {
                 style: Box::new(style),
             },
         )
         .unwrap();
-        dom.set_element(
-            string,
-            Elements::_String {
-                string: "after".into(),
-            },
-        )
-        .unwrap();
+        dom.set_text(text, "after").unwrap();
 
         assert_eq!(
             dom.node(flex).unwrap().revisions(),
@@ -815,7 +848,7 @@ mod tests {
             }
         );
         assert_eq!(
-            dom.node(string).unwrap().revisions(),
+            dom.node(text).unwrap().revisions(),
             NodeRevisions {
                 content: 1,
                 ..NodeRevisions::default()
@@ -826,13 +859,13 @@ mod tests {
     #[test]
     fn structural_mutations_mark_only_affected_nodes() {
         let mut dom = Dom::new();
-        let window = dom.create(Elements::Window {
+        let window = dom.create_element(Element::Window {
             style: Box::default(),
         });
-        let first = dom.create(Elements::Div {
+        let first = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let second = dom.create(Elements::Div {
+        let second = dom.create_element(Element::Div {
             style: Box::default(),
         });
         dom.append_child(dom.root(), window).unwrap();
@@ -859,38 +892,141 @@ mod tests {
     #[test]
     fn no_op_replacement_does_not_advance_revisions() {
         let mut dom = Dom::new();
-        let div = dom.create(Elements::Div {
+        let div = dom.create_element(Element::Div {
             style: Box::default(),
         });
+        let text = dom.create_text("same");
         let dom_revision = dom.revision();
-        let node_revisions = dom.node(div).unwrap().revisions();
+        let div_revisions = dom.node(div).unwrap().revisions();
+        let text_revisions = dom.node(text).unwrap().revisions();
 
         dom.set_element(
             div,
-            Elements::Div {
+            Element::Div {
                 style: Box::default(),
             },
         )
         .unwrap();
+        dom.set_text(text, "same").unwrap();
 
         assert_eq!(dom.revision(), dom_revision);
-        assert_eq!(dom.node(div).unwrap().revisions(), node_revisions);
+        assert_eq!(dom.node(div).unwrap().revisions(), div_revisions);
+        assert_eq!(dom.node(text).unwrap().revisions(), text_revisions);
     }
 
     #[test]
     fn removing_a_subtree_invalidates_descendants() {
         let mut dom = Dom::new();
-        let parent = dom.create(Elements::Div {
+        let parent = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let child = dom.create(Elements::Text {
-            style: Box::default(),
-        });
+        let child = dom.create_text("content");
         dom.append_child(parent, child).unwrap();
 
         dom.remove_subtree(parent).unwrap();
 
         assert!(!dom.contains(parent));
         assert!(!dom.contains(child));
+    }
+
+    #[test]
+    fn ordinary_elements_accept_text_nodes_directly() {
+        let mut dom = Dom::new();
+        let parents = [
+            dom.create_element(Element::Window {
+                style: Box::default(),
+            }),
+            dom.create_element(Element::Div {
+                style: Box::default(),
+            }),
+            dom.create_element(Element::Flex {
+                style: Box::default(),
+            }),
+            dom.create_element(Element::Grid {
+                style: Box::default(),
+            }),
+        ];
+
+        for parent in parents {
+            let text = dom.create_text("content");
+            dom.append_child(parent, text).unwrap();
+            assert_eq!(dom.parent(text), Some(parent));
+            assert_eq!(dom.text(text), Some("content"));
+        }
+    }
+
+    #[test]
+    fn styled_text_elements_accept_text_nodes_and_nested_text_elements() {
+        // Represents: <text>text here<text>asdad</text></text>
+        let mut dom = Dom::new();
+        let outer = dom.create_element(Element::Text {
+            style: Box::default(),
+        });
+        let outer_content = dom.create_text("text here");
+        let inner = dom.create_element(Element::Text {
+            style: Box::default(),
+        });
+        let inner_content = dom.create_text("asdad");
+
+        dom.append_child(outer, outer_content).unwrap();
+        dom.append_child(outer, inner).unwrap();
+        dom.append_child(inner, inner_content).unwrap();
+
+        assert_eq!(dom.children(outer), Some(&[outer_content, inner][..]));
+        assert_eq!(dom.children(inner), Some(&[inner_content][..]));
+    }
+
+    #[test]
+    fn text_nodes_are_leaves() {
+        let mut dom = Dom::new();
+        let parent = dom.create_text("parent");
+        let child = dom.create_text("child");
+
+        assert_eq!(
+            dom.append_child(parent, child),
+            Err(DomError::InvalidRelationship { parent, child })
+        );
+        assert_eq!(dom.parent(child), None);
+    }
+
+    #[test]
+    fn node_kind_and_element_tag_are_immutable() {
+        let mut dom = Dom::new();
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let text = dom.create_text("content");
+
+        assert_eq!(
+            dom.set_element(
+                div,
+                Element::Flex {
+                    style: Box::default(),
+                },
+            ),
+            Err(DomError::ElementTagMismatch(div))
+        );
+        assert_eq!(
+            dom.set_text(div, "changed"),
+            Err(DomError::NodeNotText(div))
+        );
+        assert_eq!(
+            dom.set_element(
+                text,
+                Element::Div {
+                    style: Box::default(),
+                },
+            ),
+            Err(DomError::NodeNotElement(text))
+        );
+        assert_eq!(
+            dom.set_attribute(text, "role".into(), "note".into()),
+            Err(DomError::NodeNotElement(text))
+        );
+        assert!(matches!(
+            dom.kind(div),
+            Some(NodeKind::Element(Element::Div { .. }))
+        ));
+        assert!(matches!(dom.kind(text), Some(NodeKind::Text(value)) if value == "content"));
     }
 }

@@ -1,17 +1,17 @@
 use std::iter::FusedIterator;
 
-use super::{Dom, Elements, NodeId};
+use super::{Dom, NodeId, NodeKind};
 
-/// A pre-order iterator over the reachable elements in a [`Dom`].
+/// A pre-order iterator over the reachable nodes in a [`Dom`].
 ///
 /// Each item includes its stable [`NodeId`], which callers may retain after the
-/// borrowed element reference expires.
-pub struct ElementsIter<'a> {
+/// borrowed node-kind reference expires. Detached nodes are not visited.
+pub struct DomIter<'a> {
     dom: &'a Dom,
     pending: Vec<NodeId>,
 }
 
-impl<'a> ElementsIter<'a> {
+impl<'a> DomIter<'a> {
     pub(super) fn new(dom: &'a Dom) -> Self {
         Self {
             dom,
@@ -20,8 +20,8 @@ impl<'a> ElementsIter<'a> {
     }
 }
 
-impl<'a> Iterator for ElementsIter<'a> {
-    type Item = (NodeId, &'a Elements);
+impl<'a> Iterator for DomIter<'a> {
+    type Item = (NodeId, &'a NodeKind);
 
     fn next(&mut self) -> Option<Self::Item> {
         let id = self.pending.pop()?;
@@ -30,52 +30,57 @@ impl<'a> Iterator for ElementsIter<'a> {
             .node(id)
             .expect("reachable DOM relationships only contain live nodes");
         self.pending.extend(node.children().iter().rev().copied());
-        Some((id, node.element()))
+        Some((id, node.kind()))
     }
 }
 
-impl FusedIterator for ElementsIter<'_> {}
+impl FusedIterator for DomIter<'_> {}
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DomError, Element};
     use super::*;
 
     #[test]
-    fn iterates_reachable_elements_in_pre_order_with_stable_ids() {
+    fn iterates_reachable_nodes_in_pre_order_with_stable_ids() {
         let mut dom = Dom::new();
-        let detached = dom.create(Elements::Div {
+        let detached = dom.create_element(Element::Div {
             style: Box::default(),
         });
-        let window = dom.create(Elements::Window {
+        let window = dom.create_element(Element::Window {
             style: Box::default(),
         });
-        let text = dom.create(Elements::Text {
+        let text_element = dom.create_element(Element::Text {
             style: Box::default(),
         });
-        let string = dom.create(Elements::_String {
-            string: "content".into(),
-        });
-        let div = dom.create(Elements::Div {
+        let text_node = dom.create_text("content");
+        let div = dom.create_element(Element::Div {
             style: Box::default(),
         });
 
         dom.append_child(dom.root(), window).unwrap();
-        dom.append_child(window, text).unwrap();
-        dom.append_child(text, string).unwrap();
+        dom.append_child(window, text_element).unwrap();
+        dom.append_child(text_element, text_node).unwrap();
         dom.append_child(window, div).unwrap();
 
-        let elements: Vec<_> = dom.iter().collect();
+        let nodes: Vec<_> = dom.iter().collect();
 
         assert_eq!(
-            elements.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![dom.root(), window, text, string, div]
+            nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![dom.root(), window, text_element, text_node, div]
         );
-        assert!(!elements.iter().any(|(id, _)| *id == detached));
-        assert!(matches!(elements[0].1, Elements::App));
-        assert!(matches!(elements[1].1, Elements::Window { .. }));
-        assert!(matches!(elements[2].1, Elements::Text { .. }));
-        assert!(matches!(elements[3].1, Elements::_String { .. }));
-        assert!(matches!(elements[4].1, Elements::Div { .. }));
+        assert!(!nodes.iter().any(|(id, _)| *id == detached));
+        assert!(matches!(nodes[0].1, NodeKind::App));
+        assert!(matches!(
+            nodes[1].1,
+            NodeKind::Element(Element::Window { .. })
+        ));
+        assert!(matches!(
+            nodes[2].1,
+            NodeKind::Element(Element::Text { .. })
+        ));
+        assert!(matches!(nodes[3].1, NodeKind::Text(text) if text == "content"));
+        assert!(matches!(nodes[4].1, NodeKind::Element(Element::Div { .. })));
     }
 
     #[test]
@@ -88,17 +93,17 @@ mod tests {
     #[test]
     fn app_can_only_have_one_window() {
         let mut dom = Dom::new();
-        let first = dom.create(Elements::Window {
+        let first = dom.create_element(Element::Window {
             style: Box::default(),
         });
-        let second = dom.create(Elements::Window {
+        let second = dom.create_element(Element::Window {
             style: Box::default(),
         });
         dom.append_child(dom.root(), first).unwrap();
 
         assert_eq!(
             dom.append_child(dom.root(), second),
-            Err(super::super::DomError::AppAlreadyHasWindow)
+            Err(DomError::AppAlreadyHasWindow)
         );
         assert_eq!(dom.iter().count(), 2);
     }
