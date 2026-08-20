@@ -27,6 +27,7 @@ fn parse_window_size(value: &str) -> Option<WindowSize> {
 impl Styles for WindowStyle {
     fn to_taffy_style(self) -> taffy::Style<String> {
         taffy::Style {
+            display: taffy::Display::Block,
             size: taffy::Size {
                 width: match self.width {
                     WindowSize::Auto => taffy::Dimension::auto(),

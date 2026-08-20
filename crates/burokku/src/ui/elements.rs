@@ -79,22 +79,24 @@ impl Elements {
         }
     }
 
+    // TODO: make Styles trait use self.supports_property() instead of static methods
+    // this can be better since we can call it directly on the style field,
+    // and in future, if we introduce more element types with different styles,
+    // we can make it more flexible.
     fn supports_style_property(&self, name: &str) -> bool {
         match self {
-            Self::Window { .. } | Self::Div { .. } | Self::Text { .. } => {
-                CommonStyle::supports_property(name)
-            }
+            Self::Div { .. } => CommonStyle::supports_property(name),
+            Self::Window { .. } => WindowStyle::supports_property(name),
             Self::Flex { .. } => FlexStyle::supports_property(name),
             Self::Grid { .. } => GridStyle::supports_property(name),
+            Self::Text { .. } => CommonStyle::supports_property(name),
             Self::App | Self::_String { .. } => false,
         }
     }
 
     fn set_style_property(&mut self, name: &str, value: &str) -> bool {
         match self {
-            Self::Div { style } | Self::Text { style } => {
-                style.set_property(name, value)
-            }
+            Self::Div { style } | Self::Text { style } => style.set_property(name, value),
             Self::Window { style } => style.set_property(name, value),
             Self::Flex { style } => style.set_property(name, value),
             Self::Grid { style } => style.set_property(name, value),
@@ -115,9 +117,7 @@ impl Elements {
     pub fn background_color(&self) -> Option<RgbaColor> {
         match self {
             Self::Window { style } => style.background_color,
-            Self::Div { style } | Self::Text { style } => {
-                style.background_color
-            }
+            Self::Div { style } | Self::Text { style } => style.background_color,
             Self::Flex { style } => style.common.background_color,
             Self::Grid { style } => style.common.background_color,
             Self::App | Self::_String { .. } => None,
