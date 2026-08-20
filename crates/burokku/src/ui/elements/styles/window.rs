@@ -56,6 +56,10 @@ impl Styles for WindowStyle {
                 self.height = size;
                 true
             }),
+            "background-color" => {
+                self.background_color = crate::ui::elements::styles::color::RgbaColor::parse(value);
+                true
+            }
             _ => false,
         }
     }
