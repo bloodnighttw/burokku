@@ -196,7 +196,7 @@ For a UI engine, bridge messages will typically include stable IDs and
 revisions:
 
 ```text
-Background -> Main: Commit { document_id, revision, mutations }
+Background -> Main: Commit { app_id, revision, mutations }
 Main -> Background: Event { window_id, target_id, revision, payload }
 ```
 
