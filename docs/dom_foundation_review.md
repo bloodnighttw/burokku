@@ -116,7 +116,7 @@ Consequences:
 Prefer a separate body element. If window paint remains supported, implement
 its style operations consistently.
 
-### 5. `NodeId` does not identify its owning DOM lineage
+### 5. `NodeId` does not identify its owning DOM lineage -- Not a critical issue since we never create separate DOMs
 
 `NodeId` contains only SlotMap slot and generation information. Independent
 fresh `Dom` instances can issue identical IDs. Passing an ID from one DOM to
