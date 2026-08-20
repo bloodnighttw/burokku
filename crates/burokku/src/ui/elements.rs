@@ -579,10 +579,14 @@ impl ElementRevisionKind {
     }
 }
 
+// increments a revision counter
 fn bump(revision: &mut u64) {
     *revision = revision
-        .checked_add(1)
-        .expect("DOM revision counter overflowed");
+        // u64 is so large so it should never overflow
+        // but if it overflows, it also should not break anything
+        // since revision same from 0 to overflow 0 should be very
+        // very unlikely to happen.
+        .wrapping_add(1)
 }
 
 impl<'a> IntoIterator for &'a Dom {
