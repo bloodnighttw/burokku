@@ -99,8 +99,9 @@ impl Element {
 /// The immutable kind of a DOM node.
 ///
 /// Parent and child relationships deliberately live in [`Node`] rather than in
-/// this enum. The app root is created internally by [`Dom::new`]; callers create
-/// only element and text nodes through the corresponding typed constructors.
+/// this enum. The app root is created when the crate bootstraps the DOM;
+/// callers create only element and text nodes through the corresponding typed
+/// constructors.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind {
     App,
@@ -209,6 +210,11 @@ impl Node {
 /// then inserted with [`Dom::append_child`] or [`Dom::insert_child`]. Structural
 /// operations are validated before mutation, so an invalid operation leaves
 /// the tree unchanged.
+///
+/// Fresh DOM construction is crate-owned so an application cannot accidentally
+/// create independent arenas whose [`NodeId`] values overlap. Clones are
+/// intentionally allowed: they belong to the original DOM lineage and preserve
+/// its node handles for snapshot publication.
 #[derive(Clone, Debug)]
 pub struct Dom {
     // Cloning the arena for publication only clones these pointers. Node data
@@ -218,14 +224,18 @@ pub struct Dom {
     revision: u64,
 }
 
-impl Default for Dom {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Dom {
-    pub fn new() -> Self {
+    /// Creates the application's DOM arena.
+    ///
+    /// This is crate-private to keep fresh arena creation under the application
+    /// owner's control. Unit tests in this crate may create isolated arenas.
+    /// 
+    /// this is to ensure only one instance of the DOM exists.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by the pending application bootstrap")
+    )]
+    pub(crate) fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(Arc::new(Node {
             kind: NodeKind::App,
@@ -348,7 +358,7 @@ impl Dom {
     pub fn create_text(&mut self, text: impl Into<String>) -> NodeId {
         self.create_node(NodeKind::Text(text.into()))
     }
-    
+
     /// Internally creates a node of the given kind and returns its stable handle.
     /// Always prefers to use [`Self::create_element`] or [`Self::create_text`] instead.
     fn create_node(&mut self, kind: NodeKind) -> NodeId {

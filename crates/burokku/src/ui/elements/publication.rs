@@ -1,4 +1,1 @@
-pub struct Dom {
-    
-    
-}
+pub struct Dom {}
