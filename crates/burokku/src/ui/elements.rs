@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use crate::ui::elements::{styles::common::CommonStyle, traits::Styles};
+use crate::ui::elements::{
+    styles::{common::CommonStyle, window::WindowStyle},
+    traits::Styles,
+};
 
 use self::styles::{color::RgbaColor, flex::FlexStyle, grid::GridStyle};
 use slotmap::{new_key_type, SlotMap};
@@ -32,9 +35,10 @@ new_key_type! {
 pub enum Elements {
     // for <app> tag
     App,
-    // for <window> tag
+    // for <window> tag, currently only supported one window in app,
+    // we will extend this to support multiple windows in the future.
     Window {
-        style: Box<CommonStyle>,
+        style: Box<WindowStyle>,
     },
     // for <div> tag
     Div {
@@ -88,9 +92,10 @@ impl Elements {
 
     fn set_style_property(&mut self, name: &str, value: &str) -> bool {
         match self {
-            Self::Window { style } | Self::Div { style } | Self::Text { style } => {
+            Self::Div { style } | Self::Text { style } => {
                 style.set_property(name, value)
             }
+            Self::Window { style } => style.set_property(name, value),
             Self::Flex { style } => style.set_property(name, value),
             Self::Grid { style } => style.set_property(name, value),
             Self::App | Self::_String { .. } => false,
@@ -99,9 +104,8 @@ impl Elements {
 
     fn remove_style_property(&mut self, name: &str) -> bool {
         match self {
-            Self::Window { style } | Self::Div { style } | Self::Text { style } => {
-                style.remove_property(name)
-            }
+            Self::Div { style } | Self::Text { style } => style.remove_property(name),
+            Self::Window { style } => style.remove_property(name),
             Self::Flex { style } => style.remove_property(name),
             Self::Grid { style } => style.remove_property(name),
             Self::App | Self::_String { .. } => false,
@@ -110,7 +114,8 @@ impl Elements {
 
     pub fn background_color(&self) -> Option<RgbaColor> {
         match self {
-            Self::Window { style } | Self::Div { style } | Self::Text { style } => {
+            Self::Window { style } => style.background_color,
+            Self::Div { style } | Self::Text { style } => {
                 style.background_color
             }
             Self::Flex { style } => style.common.background_color,
