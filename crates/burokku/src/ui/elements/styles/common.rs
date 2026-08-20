@@ -1,13 +1,11 @@
-//! this module defines the common style properties shared by block, flex, and grid elements.
+//! Common style properties shared by regular layout elements.
 
-use taffy::{
-    geometry::{Rect, Size},
-    AlignSelf,
-};
+use taffy::geometry::{Rect, Size};
 
 use crate::ui::elements::{
     styles::{
         color::RgbaColor,
+        item::ItemStyle,
         length::{
             parse_dimension, parse_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
         },
@@ -15,22 +13,19 @@ use crate::ui::elements::{
     traits::Styles,
 };
 
-// Layout and paint properties shared by block, flex, and grid elements.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Layout and paint properties shared by regular layout elements.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommonStyle {
     pub size: Size<Dimension>,
     pub padding: Rect<LengthPercentage>,
     pub margin: Rect<LengthPercentage>,
     pub background_color: Option<RgbaColor>,
-    pub flex_basis: Dimension,
-    pub flex_grow: f32,
-    pub flex_shrink: f32,
-    pub align_self: Option<AlignSelf>,
+    pub item: ItemStyle,
 }
 
 impl Styles for CommonStyle {
     fn to_taffy_style(self) -> taffy::Style<String> {
-        taffy::Style {
+        let mut style = taffy::Style {
             // Divs use CommonStyle directly and must not inherit Taffy's Flex default.
             // FlexStyle and GridStyle explicitly override this container display mode.
             display: taffy::Display::Block,
@@ -50,27 +45,17 @@ impl Styles for CommonStyle {
                 top: to_taffy_auto(self.margin.top),
                 bottom: to_taffy_auto(self.margin.bottom),
             },
-            flex_basis: self.flex_basis.to_taffy(),
-            flex_grow: self.flex_grow,
-            flex_shrink: self.flex_shrink,
-            align_self: self.align_self,
             ..Default::default()
-        }
+        };
+        self.item.apply_to_taffy(&mut style);
+        style
     }
 
     fn supports_property(property: &str) -> bool {
         matches!(
             property,
-            "width"
-                | "height"
-                | "padding"
-                | "margin"
-                | "background-color"
-                | "flex-basis"
-                | "flex-grow"
-                | "flex-shrink"
-                | "align-self"
-        )
+            "width" | "height" | "padding" | "margin" | "background-color"
+        ) || ItemStyle::supports_property(property)
     }
 
     fn set_property(&mut self, property: &str, value: &str) -> bool {
@@ -105,47 +90,7 @@ impl Styles for CommonStyle {
                 self.background_color = Some(value);
                 true
             }),
-            "flex-basis" => parse_dimension(value).is_some_and(|value| {
-                self.flex_basis = value;
-                true
-            }),
-            "flex-grow" => value.parse().ok().is_some_and(|value: f32| {
-                if value < 0.0 {
-                    return false;
-                }
-
-                if value.is_infinite() {
-                    return false;
-                }
-
-                if value.is_nan() {
-                    return false;
-                }
-
-                self.flex_grow = value;
-                true
-            }),
-            "flex-shrink" => value.parse().ok().is_some_and(|value: f32| {
-                if value < 0.0 {
-                    return false;
-                }
-
-                if value.is_infinite() {
-                    return false;
-                }
-
-                if value.is_nan() {
-                    return false;
-                }
-
-                self.flex_shrink = value;
-                true
-            }),
-            "align-self" => value.parse().ok().is_some_and(|value| {
-                self.align_self = Some(value);
-                true
-            }),
-            _ => false,
+            _ => self.item.set_property(property, value),
         }
     }
 
@@ -157,11 +102,7 @@ impl Styles for CommonStyle {
             "padding" => self.padding = defaults.padding,
             "margin" => self.margin = defaults.margin,
             "background-color" => self.background_color = defaults.background_color,
-            "flex-basis" => self.flex_basis = defaults.flex_basis,
-            "flex-grow" => self.flex_grow = defaults.flex_grow,
-            "flex-shrink" => self.flex_shrink = defaults.flex_shrink,
-            "align-self" => self.align_self = defaults.align_self,
-            _ => return false,
+            _ => return self.item.remove_property(property),
         };
         true
     }
@@ -187,10 +128,7 @@ impl Default for CommonStyle {
                 bottom: LengthPercentage::ZERO,
             },
             background_color: None,
-            flex_basis: Dimension::Auto,
-            flex_grow: 0.0,
-            flex_shrink: 1.0,
-            align_self: None,
+            item: ItemStyle::default(),
         }
     }
 }
