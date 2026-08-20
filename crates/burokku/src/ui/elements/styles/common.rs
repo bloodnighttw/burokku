@@ -31,6 +31,9 @@ pub struct CommonStyle {
 impl Styles for CommonStyle {
     fn to_taffy_style(self) -> taffy::Style<String> {
         taffy::Style {
+            // Divs use CommonStyle directly and must not inherit Taffy's Flex default.
+            // FlexStyle and GridStyle explicitly override this container display mode.
+            display: taffy::Display::Block,
             size: Size {
                 width: self.size.width.to_taffy(),
                 height: self.size.height.to_taffy(),
@@ -106,11 +109,35 @@ impl Styles for CommonStyle {
                 self.flex_basis = value;
                 true
             }),
-            "flex-grow" => value.parse().ok().is_some_and(|value| {
+            "flex-grow" => value.parse().ok().is_some_and(|value: f32| {
+                if value < 0.0 {
+                    return false;
+                }
+
+                if value.is_infinite() {
+                    return false;
+                }
+
+                if value.is_nan() {
+                    return false;
+                }
+
                 self.flex_grow = value;
                 true
             }),
-            "flex-shrink" => value.parse().ok().is_some_and(|value| {
+            "flex-shrink" => value.parse().ok().is_some_and(|value: f32| {
+                if value < 0.0 {
+                    return false;
+                }
+
+                if value.is_infinite() {
+                    return false;
+                }
+
+                if value.is_nan() {
+                    return false;
+                }
+
                 self.flex_shrink = value;
                 true
             }),
@@ -165,5 +192,17 @@ impl Default for CommonStyle {
             flex_shrink: 1.0,
             align_self: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_convert_to_taffy_block_display() {
+        let style = CommonStyle::default().to_taffy_style();
+
+        assert_eq!(style.display, taffy::Display::Block);
     }
 }
