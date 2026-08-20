@@ -1,312 +1,174 @@
-# DOM foundation review
+# DOM foundation: current problems
 
 ## Scope
 
-This review covers the current working tree only. Git history and pre-refactor
-implementations were not consulted.
+This review lists the current implementation problems in the working tree.
 
-Primary implementation reviewed:
+The agreed node and mount-root contract is defined in
+`docs/dom_node_model.md`:
 
-- `crates/burokku/src/ui/elements.rs`
-- `crates/burokku/src/ui/elements/`
-- the current TypeScript runtime contract and examples
+```text
+Node
+├── AppNode
+├── TextNode
+└── Element
+```
 
-## Summary
+The host-created `globalThis.app: AppNode` is the permanent root. It is not an
+element. Scripts create detached nodes exclusively through
+`app.createElement(...)` and `app.createTextNode(...)`, then mount a `Window`
+under `app`.
 
-The current implementation is a useful tree arena, but it is not yet a usable
-DOM pipeline. Stable handles, structural validation, detached construction,
-and copy-on-write nodes are a good foundation. The main blockers are incorrect
-layout defaults, an undefined application mount root, missing publication,
-missing JavaScript bindings, incomplete text handling, and no layout/render/event
-integration.
+## 1. The TypeScript runtime contract does not match the AppNode contract
 
-## Major findings
-
-### 1. `Div` currently becomes a flex container -- OK
-
-`Element::Div` is documented as a block element in
-`crates/burokku/src/ui/elements.rs:38`, but
-`CommonStyle::to_taffy_style()` leaves `display` at Taffy's default in
-`crates/burokku/src/ui/elements/styles/common.rs:32-55`.
-
-With the enabled Taffy features, the default display mode is `Flex`. This means
-both `Div` and styled `Text`, which use `CommonStyle`, are converted into flex
-containers.
+`packages/runtime/src/index.ts` still assumes browser-specific element types,
+exports a standalone `createElement` helper, and delegates creation to a browser
+global factory. That conflicts with the agreed Burokku-native API.
 
 Required changes:
 
-- explicitly use `taffy::Display::Block` for `Div`;
-- give styled text a dedicated layout and measurement path rather than treating
-  it as a generic common-style container;
-- add tests asserting the converted display mode for every element tag.
+- define Burokku-native `Node`, `AppNode`, `TextNode`, and `Element` interfaces;
+- declare `globalThis.app: AppNode`;
+- put `createElement` and `createTextNode` on `AppNode`;
+- remove browser-specific element assumptions from `BurokkuElement` and
+  `setStyles`;
+- make framework typings map supported tags to Burokku element types;
+- keep `AppNode` out of `BurokkuTagName` because scripts cannot create it.
 
-### 2. DOM publication is absent
+## 2. Immutable DOM publication is absent
 
-`crates/burokku/src/ui/elements/publication.rs` contains only an empty duplicate
-`Dom` declaration. The `arc-swap` dependency is currently unused.
+`crates/burokku/src/ui/elements/publication.rs` contains only an empty
+`DomSnapshot` placeholder. `arc-swap` is present but unused.
 
-There is no implementation for:
+The background runtime needs a mutable staging DOM, while the main thread needs
+an immutable committed view. Layout and rendering must never observe a partial
+JavaScript update.
 
-- an immutable `DomSnapshot`;
-- a mutable staging DOM owner;
-- dirty tracking;
-- checkpoint commits;
-- atomic snapshot publication;
-- a mutation/change batch;
-- redraw notification or presented-revision tracking.
-
-Although cloning the current `Dom` shares individual `Arc<Node>` values, the
-clone is still another publicly mutable `Dom`. Snapshot immutability is only a
-convention, and cloning the `SlotMap` remains an O(arena-size) operation.
-
-Required design:
+Required flow:
 
 ```text
 BTS staging Dom
+    -> macrotask and ready microtasks complete
     -> runtime checkpoint
-    -> immutable committed DomSnapshot + ChangeSet
+    -> immutable PublishedDom { snapshot, changes }
     -> ArcSwap publication
+    -> redraw request
     -> MTS layout/render reconciliation
 ```
 
-Only publish when the staging DOM is dirty, and publish once after a complete
-JavaScript macrotask plus its microtasks.
+The initial implementation may publish `ChangeSet::FullRebuild`. It must still:
 
-### 3. The application mount-root contract -- DECIDED, PENDING IMPLEMENTATION
+- publish only after a real mutation;
+- publish the snapshot and its change marker atomically;
+- keep snapshot mutation APIs inaccessible;
+- preserve `NodeId` values across revisions;
+- let the main thread retain one complete revision for an entire frame;
+- avoid holding a DOM lock during layout or rendering.
 
-`Dom::new()` creates the internal `NodeKind::App` root. The host must expose a
-stable JavaScript wrapper for that exact node as `globalThis.app`:
+Cloning the current `SlotMap<NodeId, Arc<Node>>` is acceptable for the first
+correct implementation even though it is O(arena size).
 
-```text
-AppNode             host-created, permanent mount root
-└── Window          script/framework-created native host and viewport
-    └── content     regular elements
-```
+## 3. Change discovery is incomplete
 
-`AppNode` extends the JavaScript `Node` facade directly; it is not an element.
-It therefore has no tag, attributes, layout style, or paint style. Script
-cannot create another app node. UI frameworks mount a `Window` under `app`, and
-`window` remains a supported `BurokkuTagName`. The current native tree contract
-allows one attached window.
+`NodeRevisions` records structure, style, and content revisions per node, but a
+consumer must already visit a node to discover that its revision changed.
+Removed nodes cannot be discovered from the new snapshot at all.
 
-Implementation must still define and enforce:
-
-- the stable `globalThis.app: AppNode` wrapper;
-- native-window creation and teardown when a `Window` is inserted or removed;
-- behavior when the user closes the native window;
-- how native window size constrains the window's content layout root.
-
-See `docs/dom_node_model.md` for the complete node hierarchy and mount-root
-contract.
-
-### 4. `WindowStyle` is internally inconsistent -- OK
-
-`WindowStyle` stores `background_color` in
-`crates/burokku/src/ui/elements/styles/window.rs:11-15`, and
-`Element::background_color()` reads it. However, `supports_property`,
-`set_property`, and `remove_property` only implement width and height.
-
-This inconsistency has been corrected: `supports_property`, `set_property`, and
-`remove_property` now handle `background-color`. `Window` intentionally remains
-a specialized native-host element rather than a general content container;
-regular layout and paint styling belongs on its child elements.
-
-### 5. `NodeId` does not identify its owning DOM lineage -- Not a critical issue since we never create separate DOMs
-
-`NodeId` contains only SlotMap slot and generation information. Independent
-fresh `Dom` instances can issue identical IDs. Passing an ID from one DOM to
-another can therefore resolve to an unrelated node instead of producing
-`DomError::NodeNotFound`.
-
-This matters when handles are moved through runtime messages or when more than
-one independent app lineage can exist.
-
-Possible solutions:
-
-- include a stable app/lineage ID alongside the SlotMap key;
-- wrap IDs in a handle carrying and validating its owner;
-- make construction and all cross-thread APIs enforce a single DOM lineage.
-
-Committed snapshots from the same lineage should intentionally preserve the
-same node handles.
-
-### 6. Grid item properties are attached to grid containers -- OK
-
-`GridStyle` combines container properties with item properties such as `row`,
-`column`, and `justify_self`. Only `Element::Grid` owns `GridStyle`.
-
-As a result, a `Div`, `Flex`, or `Text` that is a child of a grid cannot receive
-normal grid-item placement or `justify-self`. These properties describe an
-item's relationship to its parent and must be available to every layout
-element.
-
-Additionally, grid row/column/template fields exist in Rust but are not handled
-by the string style API.
-
-Required changes:
-
-- move grid-item placement and `justify-self` into a shared item-style section;
-- keep template, auto-flow, gap, and item-alignment properties on grid
-  containers;
-- add parsing/removal support for every property exposed to TypeScript;
-- either expose the remaining grid properties through TypeScript or remove
-  unfinished public claims until implemented.
-
-### 7. Text nodes cannot yet be laid out or rendered correctly
-
-The tree distinguishes styled `Element::Text` from raw `NodeKind::Text`, which
-is a useful representation for styled runs. However, the required behavior is
-missing:
-
-- a `TextStyle` containing font family, size, weight, color, line height, and
-  wrapping behavior;
-- inherited text style;
-- text shaping and glyph layout;
-- a Taffy leaf measurement callback;
-- element-level `textContent` get/set semantics;
-- concatenation of descendant text for getters;
-- invalidation of an enclosing shaped-text cache when a descendant run changes.
-
-The examples already require assignments such as:
-
-```ts
-const title = app.createElement("text");
-title.textContent = "Click counter";
-```
-
-Setting `textContent` on an element should replace its children with one raw
-text node, while setting `nodeValue`/`data` should update an existing raw text
-node.
-
-### 8. Revisions alone do not provide change discovery
-
-`NodeRevisions` tracks structure, style, and content per node, but consumers
-have no dirty-node set or mutation journal. After observing a new global DOM
-revision, the main thread must traverse the entire reachable tree to discover
-what changed.
-
-Other issues:
-
-- removed descendants are not returned as a removal set;
-- layout and paint share one `style` revision;
-- changing only `background-color` can force layout-style processing;
-- arbitrary attributes such as `role` are classified as visual content;
-- parent revisions do not summarize descendant text changes.
-
-Recommended revision categories:
+A full rebuild on each publication is a valid initial fallback. Incremental
+reconciliation later requires a bounded change batch containing:
 
 ```text
-structure
-layout
-paint
-text
-attributes/accessibility
+inserted
+moved
+removed
+layout_dirty
+paint_dirty
+text_dirty
+attributes_dirty
 ```
 
-Each commit should also carry a bounded `ChangeSet` containing inserted, moved,
-removed, layout-dirty, paint-dirty, and text-dirty node IDs. A full rebuild can
-remain the fallback when the change set is unavailable or too large.
+The change batch must identify its source and target revisions. If the main
+thread skips a required revision or the batch is unavailable, it must fall back
+to a full rebuild.
 
-### 9. Style parsing admits invalid numeric state -- OK
+The current `style` and `content` revisions are also too broad for efficient
+layout, paint, text, and accessibility caches. They should be split when those
+incremental caches are introduced.
 
-Current `f32` parsing accepts values such as `NaN` and infinity. Negative sizes,
-negative gaps/padding, and negative flex factors are also not validated before
-being placed in authoritative DOM state.
+## 4. The JavaScript node facade is missing
 
-There are contract mismatches with `packages/runtime/src/index.ts`:
+There is no Burokku plugin that exposes the native DOM arena to QuickJS.
 
-- TypeScript exposes `alignSelf: "auto"` and `justifySelf: "auto"`, but Rust
-  attempts to parse them as concrete Taffy alignment values instead of mapping
-  them to `None`;
-- TypeScript dimensions use `px`, `%`, or `auto`, while `WindowStyle` accepts
-  only `auto` or a unitless float;
-- `BurokkuColor` is any string, while native parsing currently accepts only a
-  subset of hexadecimal colors.
+The minimum facade must provide:
 
-`Result<bool, DomError>` also conflates an unsupported property with an invalid
-value. Use a typed error such as:
-
-```rust
-enum StyleError {
-    NodeNotElement(NodeId),
-    UnsupportedProperty(String),
-    InvalidValue { property: String, value: String },
-}
-```
-
-All accepted numeric values should be finite and satisfy property-specific
-constraints.
-
-### 10. Taffy conversion consumes authoritative style values -- OK
-
-`Styles::to_taffy_style(self)` takes ownership of the style. A renderer reading
-an immutable snapshot cannot move style values out of it, so it must clone them
-first. This is especially expensive for `GridStyle`, which owns vectors and
-strings.
-
-Prefer conversion from `&self`, and cache converted/computed Taffy state using
-the node's layout revision. The resulting Taffy style may still need owned
-strings, but unchanged DOM styles should not be repeatedly cloned and parsed.
-
-### 11. Detached-node ownership and garbage collection are undefined
-
-`app.createElement` and `app.createTextNode` allocate detached nodes
-immediately. If a JavaScript wrapper becomes unreachable before insertion, the
-arena retains the node unless something explicitly calls `remove_subtree`.
-
-The JS integration must distinguish:
-
-- detaching a node from the app tree while keeping it valid for live JS
-  references;
-- permanently reclaiming an unreachable detached subtree;
-- removing an attached subtree from rendering without invalidating wrappers;
-- stale handles from genuinely reclaimed nodes.
-
-QuickJS wrapper finalizers or an explicit host-side wrapper registry should
-reclaim detached nodes only when no JS wrapper or tree relationship retains
-them.
-
-### 12. The JavaScript DOM facade is missing
-
-QuickJS does not provide browser DOM classes. The project needs a DOM plugin
-that creates and maintains at least:
-
-- `globalThis.app` backed by the permanent `AppNode` wrapper;
-- `app.createElement` and `app.createTextNode` as the only script-facing node
-  factories;
-- `Node`, `AppNode`, `Element`, and `TextNode` behavior;
-- a stable `NodeId -> JS wrapper` identity cache so repeated access preserves
-  `===` identity;
-- detached-node creation through the two `app` factory methods;
+- the permanent `globalThis.app` wrapper for the existing `NodeKind::App` root;
+- `app.createElement(tag)` and `app.createTextNode(data)`;
+- `Node`, `AppNode`, `TextNode`, and `Element` behavior;
+- a stable `NodeId -> live JS wrapper` identity cache so repeated access
+  preserves `===` identity;
 - `parentNode`, `childNodes`, `firstChild`, `nextSibling`, and connectedness;
 - `appendChild`, `insertBefore`, `removeChild`, and replacement operations;
-- `textContent`, `nodeValue`, and text data;
-- attributes;
-- `CSSStyleDeclaration` set/remove/read behavior;
-- event listener registration and removal;
-- conversion of `DomError` and style errors into useful JavaScript exceptions.
+- `textContent`, `nodeValue`, and `TextNode.data`;
+- attributes and a Burokku-native style declaration API;
+- listener registration and removal;
+- conversion of `DomError` and `StyleError` into useful JavaScript exceptions;
+- a checkpoint hook that commits dirty staging state through the publisher.
 
-The implementation does not need to emulate the entire browser DOM, but the
-supported contract must be explicit and match `packages/runtime`.
+DOM mutations must update staging state synchronously so JavaScript can read its
+own writes. Publication remains deferred until the runtime checkpoint.
 
-## Missing integration layers
+React and Solid integration tests are required because their renderers may rely
+on additional structural node behavior beyond basic insertion methods.
 
-### DOM plugin and mutation owner
+## 5. Detached-node reclamation is undefined
 
-The background runtime should normally own the mutable staging DOM. DOM methods
-must update it synchronously so JavaScript can read its own writes. The plugin's
-runtime checkpoint should publish one coherent revision after all ready
-microtasks finish.
+The app factory methods allocate detached native nodes immediately. If the
+corresponding JavaScript wrappers become unreachable before insertion, those
+nodes remain in the arena indefinitely.
 
-### Snapshot publisher
+The facade must distinguish:
 
-Implement immutable committed snapshots with `ArcSwap`. Publication must not
-hold a DOM synchronization lock during layout or rendering. Coalesce multiple
-mutations from one JavaScript task into one publication and one redraw request.
+- an attached node retained by the app tree;
+- a detached node retained by a live wrapper;
+- a detached subtree containing a live descendant wrapper;
+- a removed subtree whose wrappers must remain valid;
+- a genuinely unreachable detached subtree that can be reclaimed.
 
-### Taffy reconciler
+The wrapper identity cache must not strongly retain every wrapper forever.
+After the basic facade exists, use QuickJS finalizers, weak wrapper tracking, or
+a host-side mark pass rooted at both the app tree and all live wrappers. Only a
+genuinely reclaimed node should produce a stale `NodeId`.
 
-Maintain an MTS-only mapping:
+## 6. Text DOM behavior, shaping, and measurement are incomplete
+
+The current foundation has raw `NodeKind::Text`, styled `Element::Text`,
+validated typography, and inherited `ComputedTextStyle`. It does not yet have a
+working text pipeline.
+
+Missing work includes:
+
+- `textContent`, `nodeValue`, and `TextNode.data` semantics;
+- replacing element children when assigning `textContent`;
+- concatenating descendant text for getters;
+- collecting nested styled text into inherited runs;
+- Parley shaping and glyph layout;
+- a Taffy measurement callback for paragraph leaves;
+- invalidating an enclosing paragraph when descendant text or style changes;
+- caching shaped paragraphs by revision, width constraint, and font state;
+- painting the exact shaped layout used for measurement.
+
+An outer styled text element should own one measured Taffy leaf. Nested styled
+text elements are runs within that paragraph and must not become independent
+Taffy layout nodes.
+
+The detailed implementation contract is in `docs/text_rendering_plan.md`.
+
+## 7. Taffy reconciliation is missing
+
+The project converts authoritative styles into `taffy::Style`, but it does not
+create or maintain a Taffy tree.
+
+The main thread needs a stable mapping:
 
 ```text
 DOM NodeId -> Taffy NodeId
@@ -314,108 +176,91 @@ DOM NodeId -> Taffy NodeId
 
 The reconciler must handle:
 
-- creation and removal;
+- node creation and removal;
 - reparenting and child order;
-- layout-style revision changes;
-- text measurement and dirty propagation;
-- viewport constraints from the native window;
-- cleanup of Taffy nodes absent from the committed DOM.
+- layout-style changes;
+- cleanup of Taffy nodes absent from the committed snapshot;
+- measured text leaves and text invalidation;
+- native window viewport constraints;
+- full rebuilding first and incremental `ChangeSet` application later.
 
-### Rendering
+The reconciler must consume one immutable committed snapshot rather than the
+mutable staging DOM.
 
-Convert computed layout plus paint/text data into a Vello scene. Paint caching
-should be invalidated separately from layout. Rendering should always use one
-complete committed DOM revision and its corresponding computed layout.
+## 8. Rendering and presentation are missing
 
-### Events
+Vello dependencies exist, but there is no scene construction or presentation
+pipeline.
 
-The main thread needs hit testing against the presented layout, a listener
-registry, event targeting by `NodeId` and presented revision, and asynchronous
-dispatch into the appropriate runtime through its bounded macrotask queue.
+Required work:
 
-At minimum, the current counter example requires `click` registration and
+- convert computed Taffy layout and paint data into a Vello scene;
+- render backgrounds and shaped text;
+- separate layout invalidation from paint invalidation;
+- cache paint data without mixing revisions;
+- retain one committed snapshot through layout and scene construction;
+- track the DOM revision represented by the presented frame;
+- request redraw after a new committed revision.
+
+## 9. Events are missing
+
+There is no complete path from native input to a JavaScript listener.
+
+Required work:
+
+- hit-test against the presented layout;
+- target events by `NodeId` and presented revision;
+- maintain listener registration for live wrappers;
+- forward events through the bounded runtime macrotask queue;
+- define bubbling, cancellation, and listener-removal behavior for the supported
+  event subset;
+- reject or safely handle events targeting stale revisions or reclaimed nodes.
+
+At minimum, the current application contract requires click registration and
 dispatch.
 
-### Lifecycle and native window integration
+## 10. Native Window lifecycle integration is missing
 
-The host must define how the `Window` DOM node creates, configures, resizes, and
-closes the native window, and how closing the final window shuts down both
-runtimes.
+The agreed tree permits a script/framework-created `Window` under the permanent
+app root, but no implementation connects that element to a native window.
 
-## Recommended implementation order
+The host must define and implement:
 
-1. **Correct the element/style model**
-   - make `Div` block;
-   - separate tag, common item style, container style, paint style, and text
-     style;
-   - move grid-item properties into shared item data;
-   - validate style values and return typed errors.
+- `DOM NodeId -> native WindowId` ownership;
+- native creation when a `Window` is committed under `app`;
+- resize propagation into viewport constraints and redraw;
+- removal and replacement behavior during framework reconciliation;
+- native close behavior and JavaScript notification;
+- cleanup of GPU surfaces, Taffy state, and event targets;
+- shutdown behavior after the final native window closes.
 
-2. **Expose the application mount root**
-   - expose the existing `NodeKind::App` root as `globalThis.app: AppNode`;
-   - allow scripts and UI frameworks to mount a `Window` under `app`;
-   - define window insertion, removal, native-close, and viewport behavior;
-   - add tag-name constructors and getters for element nodes.
+The current tree allows one attached window. Multi-window behavior should not be
+claimed until the tree and lifecycle contracts explicitly support it.
 
-3. **Implement immutable publication**
-   - staging DOM owner;
-   - dirty flag and `ChangeSet`;
-   - `DomSnapshot`;
-   - `ArcSwap` publisher;
-   - runtime-checkpoint commit.
+## 11. End-to-end application integration is absent
 
-4. **Implement the minimal JS DOM plugin**
-   - wrapper identity and lifetime;
-   - node traversal and mutation methods;
-   - attributes, styles, and text content;
-   - JavaScript error mapping.
+The crate exposes the tree arena and style model, but it does not yet assemble
+the native event loop, dual runtimes, staging DOM plugin, publisher, reconciler,
+renderer, and event bridge into a usable application host.
 
-5. **Implement Taffy reconciliation and text measurement**
-   - stable Taffy-node mapping;
-   - incremental structural/style changes;
-   - shaping and measurement for text nodes.
+End-to-end tests must eventually verify this complete flow:
 
-6. **Implement paint, presentation, and events**
-   - Vello scene construction;
-   - layout/paint invalidation;
-   - hit testing and click dispatch;
-   - presented-revision tracking.
+```text
+JavaScript app factory and mutations
+    -> checkpoint publication
+    -> Taffy and Parley layout
+    -> Vello scene and presentation
+    -> native input hit testing
+    -> JavaScript event dispatch
+```
 
-7. **Add end-to-end tests**
-   - execute the TypeScript consumer contract through QuickJS;
-   - publish at checkpoints;
-   - reconcile layout;
-   - verify example trees, styles, text updates, and click events.
+## Implementation order
 
-## Existing strengths
-
-The current arena already provides several useful guarantees:
-
-- generation-checked handles within one arena;
-- stable IDs across arena growth, moves, and cloned snapshots;
-- detached node construction;
-- parent/child validation before mutation;
-- cycle prevention;
-- one attached window under the app root;
-- iterative subtree removal and preorder traversal;
-- no-op mutation detection;
-- independent per-node revision counters;
-- per-node `Arc` copy-on-write storage.
-
-These pieces should be retained while making snapshot ownership explicit and
-adding the missing integration layers.
-
-## Current verification status
-
-At the time of this review:
-
-- `cargo test -p burokku --lib` passes all 24 tests;
-- Clippy with warnings denied fails because the publication placeholder and two
-  test-only helpers are dead code;
-- `cargo check --workspace --all-targets` fails because the examples import the
-  currently absent `burokku::Burokku` API.
-
-The highest-priority fixes are the incorrect `Div` display mode, the application
-mount-root contract, the shared/item/text style model, and immutable DOM
-publication. Those should be resolved before building rendering on top of the
-current representation.
+1. Align `packages/runtime` with the `AppNode` factory contract.
+2. Implement immutable snapshot publication with a full-rebuild change marker.
+3. Implement the minimal JavaScript node facade and synchronous staging DOM.
+4. Add detached-wrapper lifetime tracking and reclamation.
+5. Connect committed `Window` elements to native window lifecycle.
+6. Implement Taffy reconciliation and Parley text measurement.
+7. Implement Vello painting, presentation revisions, hit testing, and events.
+8. Assemble the application host and add end-to-end React/Solid tests.
