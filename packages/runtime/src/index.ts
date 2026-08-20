@@ -16,6 +16,12 @@ export type BurokkuStyle = Partial<{
   padding: BurokkuLength;
   margin: BurokkuLength;
   backgroundColor: BurokkuColor;
+  fontFamily: string;
+  fontSize: `${number}px`;
+  fontWeight: number | "normal" | "bold";
+  color: BurokkuColor;
+  lineHeight: "normal" | number | `${number}px`;
+  textWrap: "wrap" | "nowrap";
   flexBasis: BurokkuDimension;
   flexGrow: number;
   flexShrink: number;

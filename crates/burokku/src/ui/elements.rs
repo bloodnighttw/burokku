@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::ui::elements::{
-    styles::{common::CommonStyle, window::WindowStyle},
+    styles::{common::CommonStyle, text::TextElementStyle, window::WindowStyle},
     traits::Styles,
 };
 
@@ -42,7 +42,7 @@ pub enum Element {
     /// A grid container element.
     Grid { style: Box<GridStyle> },
     /// A styled `<text>` element, distinct from a DOM text node.
-    Text { style: Box<CommonStyle> },
+    Text { style: Box<TextElementStyle> },
 }
 
 impl Element {
@@ -64,13 +64,14 @@ impl Element {
             Self::Window { .. } => WindowStyle::supports_property(name),
             Self::Flex { .. } => FlexStyle::supports_property(name),
             Self::Grid { .. } => GridStyle::supports_property(name),
-            Self::Text { .. } => CommonStyle::supports_property(name),
+            Self::Text { .. } => TextElementStyle::supports_property(name),
         }
     }
 
     fn set_style_property(&mut self, name: &str, value: &str) -> bool {
         match self {
-            Self::Div { style } | Self::Text { style } => style.set_property(name, value),
+            Self::Div { style } => style.set_property(name, value),
+            Self::Text { style } => style.set_property(name, value),
             Self::Window { style } => style.set_property(name, value),
             Self::Flex { style } => style.set_property(name, value),
             Self::Grid { style } => style.set_property(name, value),
@@ -79,7 +80,8 @@ impl Element {
 
     fn remove_style_property(&mut self, name: &str) -> bool {
         match self {
-            Self::Div { style } | Self::Text { style } => style.remove_property(name),
+            Self::Div { style } => style.remove_property(name),
+            Self::Text { style } => style.remove_property(name),
             Self::Window { style } => style.remove_property(name),
             Self::Flex { style } => style.remove_property(name),
             Self::Grid { style } => style.remove_property(name),
@@ -89,7 +91,8 @@ impl Element {
     pub fn background_color(&self) -> Option<RgbaColor> {
         match self {
             Self::Window { style } => style.background_color,
-            Self::Div { style } | Self::Text { style } => style.background_color,
+            Self::Div { style } => style.background_color,
+            Self::Text { style } => style.common.background_color,
             Self::Flex { style } => style.common.background_color,
             Self::Grid { style } => style.common.background_color,
         }
@@ -720,9 +723,12 @@ mod tests {
         dom.set_element(
             child,
             Element::Text {
-                style: Box::new(CommonStyle {
-                    background_color: Some(RgbaColor::rgb(1, 2, 3)),
-                    ..CommonStyle::default()
+                style: Box::new(TextElementStyle {
+                    common: CommonStyle {
+                        background_color: Some(RgbaColor::rgb(1, 2, 3)),
+                        ..CommonStyle::default()
+                    },
+                    ..TextElementStyle::default()
                 }),
             },
         )
@@ -846,6 +852,38 @@ mod tests {
         );
         assert_eq!(dom.supports_style_property(dom.root(), "width"), Ok(false));
         assert_eq!(dom.supports_style_property(text_node, "width"), Ok(false));
+    }
+
+    #[test]
+    fn text_elements_expose_box_and_typography_properties() {
+        let mut dom = Dom::new();
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let text = dom.create_element(Element::Text {
+            style: Box::default(),
+        });
+
+        assert_eq!(dom.supports_style_property(text, "width"), Ok(true));
+        assert_eq!(dom.supports_style_property(text, "font-size"), Ok(true));
+        assert_eq!(dom.supports_style_property(div, "font-size"), Ok(false));
+        assert_eq!(dom.set_style_property(text, "font-size", "20px"), Ok(true));
+        assert_eq!(
+            dom.set_style_property(text, "font-weight", "bold"),
+            Ok(true)
+        );
+
+        let Some(Element::Text { style }) = dom.element(text) else {
+            panic!("expected text element");
+        };
+        assert_eq!(style.text.font_size, Some(20.0));
+        assert_eq!(style.text.font_weight, Some(styles::text::FontWeight::BOLD));
+
+        assert_eq!(dom.remove_style_property(text, "font-size"), Ok(true));
+        let Some(Element::Text { style }) = dom.element(text) else {
+            panic!("expected text element");
+        };
+        assert_eq!(style.text.font_size, None);
     }
 
     #[test]
