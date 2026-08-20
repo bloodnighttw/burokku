@@ -348,7 +348,9 @@ impl Dom {
     pub fn create_text(&mut self, text: impl Into<String>) -> NodeId {
         self.create_node(NodeKind::Text(text.into()))
     }
-
+    
+    /// Internally creates a node of the given kind and returns its stable handle.
+    /// Always prefers to use [`Self::create_element`] or [`Self::create_text`] instead.
     fn create_node(&mut self, kind: NodeKind) -> NodeId {
         let id = self.nodes.insert(Arc::new(Node {
             kind,
