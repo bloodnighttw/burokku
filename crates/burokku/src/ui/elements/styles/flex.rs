@@ -5,7 +5,7 @@ use crate::ui::elements::{styles::common::CommonStyle, traits::Styles};
 #[cfg(test)]
 use crate::ui::elements::styles::item::ItemStyle;
 
-use super::length::{parse_length_percentage, LengthPercentage};
+use super::length::{parse_non_negative_length_percentage, LengthPercentage};
 
 /// Thread-safe properties used to lay out a flex container and its flex items.
 ///
@@ -67,18 +67,18 @@ impl Styles for FlexStyle {
                 self.wrap = value;
                 true
             }),
-            "gap" => parse_length_percentage(value).is_some_and(|value| {
+            "gap" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.gap = Size {
                     width: value,
                     height: value,
                 };
                 true
             }),
-            "column-gap" => parse_length_percentage(value).is_some_and(|value| {
+            "column-gap" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.gap.width = value;
                 true
             }),
-            "row-gap" => parse_length_percentage(value).is_some_and(|value| {
+            "row-gap" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.gap.height = value;
                 true
             }),

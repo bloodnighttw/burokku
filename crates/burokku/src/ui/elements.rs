@@ -229,7 +229,7 @@ impl Dom {
     ///
     /// This is crate-private to keep fresh arena creation under the application
     /// owner's control. Unit tests in this crate may create isolated arenas.
-    /// 
+    ///
     /// this is to ensure only one instance of the DOM exists.
     #[cfg_attr(
         not(test),
@@ -304,45 +304,58 @@ impl Dom {
             .is_some_and(|element| element.supports_style_property(name)))
     }
 
+    /// Sets a supported style property and reports whether its computed native
+    /// value changed. Invalid values never enter authoritative DOM state.
     pub fn set_style_property(
         &mut self,
         id: NodeId,
         name: &str,
         value: &str,
-    ) -> Result<bool, DomError> {
-        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-        let Some(current) = node.element() else {
-            return Ok(false);
-        };
-        let mut element = current.clone();
-        if !element.set_style_property(name, value) {
-            return Ok(false);
-        }
-        if &element == current {
-            return Ok(true);
+    ) -> Result<bool, StyleError> {
+        let node = self.node(id).ok_or(StyleError::NodeNotFound(id))?;
+        let current = node.element().ok_or(StyleError::NodeNotElement(id))?;
+        if !current.supports_style_property(name) {
+            return Err(StyleError::UnsupportedProperty(name.into()));
         }
 
-        let node = self.node_mut(id)?;
+        let mut element = current.clone();
+        if !element.set_style_property(name, value) {
+            return Err(StyleError::InvalidValue {
+                property: name.into(),
+                value: value.into(),
+            });
+        }
+        if &element == current {
+            return Ok(false);
+        }
+
+        let node = self
+            .node_mut(id)
+            .map_err(|_| StyleError::NodeNotFound(id))?;
         node.kind = NodeKind::Element(element);
         bump(&mut node.revisions.style);
         self.bump_revision();
         Ok(true)
     }
 
-    pub fn remove_style_property(&mut self, id: NodeId, name: &str) -> Result<bool, DomError> {
-        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
-        let Some(current) = node.element() else {
-            return Ok(false);
-        };
-        let mut element = current.clone();
-        if !element.remove_style_property(name) {
-            return Ok(false);
-        }
-        if &element == current {
-            return Ok(true);
+    /// Removes a supported style property and reports whether its native value
+    /// changed from the default.
+    pub fn remove_style_property(&mut self, id: NodeId, name: &str) -> Result<bool, StyleError> {
+        let node = self.node(id).ok_or(StyleError::NodeNotFound(id))?;
+        let current = node.element().ok_or(StyleError::NodeNotElement(id))?;
+        if !current.supports_style_property(name) {
+            return Err(StyleError::UnsupportedProperty(name.into()));
         }
 
-        let node = self.node_mut(id)?;
+        let mut element = current.clone();
+        debug_assert!(element.remove_style_property(name));
+        if &element == current {
+            return Ok(false);
+        }
+
+        let node = self
+            .node_mut(id)
+            .map_err(|_| StyleError::NodeNotFound(id))?;
         node.kind = NodeKind::Element(element);
         bump(&mut node.revisions.style);
         self.bump_revision();
@@ -637,6 +650,18 @@ impl<'a> IntoIterator for &'a Dom {
     }
 }
 
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum StyleError {
+    #[error("node {0:?} does not exist or is stale")]
+    NodeNotFound(NodeId),
+    #[error("node {0:?} is not an element")]
+    NodeNotElement(NodeId),
+    #[error("unsupported style property {0:?}")]
+    UnsupportedProperty(String),
+    #[error("invalid value {value:?} for style property {property:?}")]
+    InvalidValue { property: String, value: String },
+}
+
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum DomError {
     #[error("node {0:?} does not exist or is stale")]
@@ -874,19 +899,116 @@ mod tests {
         });
         let initial_revision = dom.revision();
 
-        assert_eq!(dom.set_style_property(div, "flex-grow", "0.00"), Ok(true));
+        assert_eq!(dom.set_style_property(div, "flex-grow", "0.00"), Ok(false));
         assert_eq!(dom.revision(), initial_revision);
 
         assert_eq!(dom.set_style_property(div, "flex-grow", "1"), Ok(true));
         let changed_revision = dom.revision();
         assert!(changed_revision > initial_revision);
-        assert_eq!(dom.set_style_property(div, "flex-grow", "1.0"), Ok(true));
+        assert_eq!(dom.set_style_property(div, "flex-grow", "1.0"), Ok(false));
         assert_eq!(dom.revision(), changed_revision);
 
         assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(true));
         let removed_revision = dom.revision();
-        assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(true));
+        assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(false));
         assert_eq!(dom.revision(), removed_revision);
+    }
+
+    #[test]
+    fn style_errors_distinguish_targets_properties_and_values() {
+        let mut dom = Dom::new();
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let text = dom.create_text("content");
+        let stale = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        dom.remove_subtree(stale).unwrap();
+
+        assert_eq!(
+            dom.set_style_property(stale, "width", "10px"),
+            Err(StyleError::NodeNotFound(stale))
+        );
+        assert_eq!(
+            dom.set_style_property(text, "width", "10px"),
+            Err(StyleError::NodeNotElement(text))
+        );
+        assert_eq!(
+            dom.set_style_property(div, "unknown", "10px"),
+            Err(StyleError::UnsupportedProperty("unknown".into()))
+        );
+        assert_eq!(
+            dom.set_style_property(div, "width", "large"),
+            Err(StyleError::InvalidValue {
+                property: "width".into(),
+                value: "large".into(),
+            })
+        );
+        assert_eq!(
+            dom.remove_style_property(div, "unknown"),
+            Err(StyleError::UnsupportedProperty("unknown".into()))
+        );
+    }
+
+    #[test]
+    fn invalid_numeric_styles_never_enter_dom_state() {
+        let mut dom = Dom::new();
+        let flex = dom.create_element(Element::Flex {
+            style: Box::default(),
+        });
+        let initial_revision = dom.revision();
+
+        for (property, value) in [
+            ("width", "NaNpx"),
+            ("height", "infpx"),
+            ("width", "-1px"),
+            ("padding", "-1px"),
+            ("gap", "-1%"),
+            ("flex-basis", "-1px"),
+            ("flex-grow", "-1"),
+            ("flex-shrink", "NaN"),
+        ] {
+            assert_eq!(
+                dom.set_style_property(flex, property, value),
+                Err(StyleError::InvalidValue {
+                    property: property.into(),
+                    value: value.into(),
+                }),
+                "{property}: {value}"
+            );
+        }
+
+        assert_eq!(dom.revision(), initial_revision);
+        assert_eq!(
+            dom.element(flex),
+            Some(&Element::Flex {
+                style: Box::default()
+            })
+        );
+    }
+
+    #[test]
+    fn style_contract_accepts_auto_percent_dimensions_and_hex_colors() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::Window {
+            style: Box::default(),
+        });
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+
+        assert_eq!(dom.set_style_property(window, "width", "50%"), Ok(true));
+        assert_eq!(dom.set_style_property(window, "height", "640px"), Ok(true));
+        assert_eq!(
+            dom.set_style_property(window, "background-color", "#1234"),
+            Ok(true)
+        );
+        assert_eq!(dom.set_style_property(div, "align-self", "auto"), Ok(false));
+        assert_eq!(
+            dom.set_style_property(div, "justify-self", "auto"),
+            Ok(false)
+        );
     }
 
     #[test]

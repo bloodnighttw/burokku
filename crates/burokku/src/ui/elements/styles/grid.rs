@@ -8,7 +8,7 @@ use crate::ui::elements::{
     traits::{IntoTaffyStyle, Styles},
 };
 
-use super::length::{parse_length_percentage, LengthPercentage};
+use super::length::{parse_non_negative_length_percentage, LengthPercentage};
 
 // Preserve the previous public path while item placement now lives in the
 // shared item-style module.
@@ -285,18 +285,18 @@ impl Styles for GridStyle {
             return true;
         }
         match property {
-            "gap" => parse_length_percentage(value).is_some_and(|value| {
+            "gap" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.gap = Size {
                     width: value,
                     height: value,
                 };
                 true
             }),
-            "column-gap" => parse_length_percentage(value).is_some_and(|value| {
+            "column-gap" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.gap.width = value;
                 true
             }),
-            "row-gap" => parse_length_percentage(value).is_some_and(|value| {
+            "row-gap" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.gap.height = value;
                 true
             }),
