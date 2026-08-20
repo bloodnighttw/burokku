@@ -2,7 +2,7 @@
 
 pub trait Styles {
     // this is for converting to taffy style to calculate layout
-    fn to_taffy_style(self) -> taffy::Style<String>;
+    fn to_taffy_style(&self) -> taffy::Style<String>;
 
     // return true when the property is recognized by this style type
     fn supports_property(property: &str) -> bool;

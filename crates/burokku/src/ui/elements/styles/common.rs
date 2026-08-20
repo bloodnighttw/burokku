@@ -25,7 +25,7 @@ pub struct CommonStyle {
 }
 
 impl Styles for CommonStyle {
-    fn to_taffy_style(self) -> taffy::Style<String> {
+    fn to_taffy_style(&self) -> taffy::Style<String> {
         let mut style = taffy::Style {
             // Divs use CommonStyle directly and must not inherit Taffy's Flex default.
             // FlexStyle and GridStyle explicitly override this container display mode.
@@ -48,7 +48,7 @@ impl Styles for CommonStyle {
             },
             ..Default::default()
         };
-        self.item.apply_to_taffy(&mut style);
+        self.item.clone().apply_to_taffy(&mut style);
         style
     }
 

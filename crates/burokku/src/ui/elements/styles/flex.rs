@@ -23,7 +23,7 @@ pub struct FlexStyle {
 }
 
 impl Styles for FlexStyle {
-    fn to_taffy_style(self) -> taffy::Style<String> {
+    fn to_taffy_style(&self) -> taffy::Style<String> {
         taffy::Style {
             display: taffy::Display::Flex,
             flex_direction: self.direction,
