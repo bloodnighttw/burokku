@@ -16,11 +16,3 @@ vello_common = { version = "0.2", default-features = false, features = ["std"] }
 vello_hybrid = { version = "0.2", default-features = false, features = ["wgpu"] }
 wgpu = { version = "29", features = ["std", "wgsl"] }
 winit = { package = "burokku-winit", path = "../winit" }
-
-[[bench]]
-name = "phase6"
-harness = false
-
-[[bench]]
-name = "dom_lifecycle"
-harness = false
