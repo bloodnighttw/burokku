@@ -33,6 +33,7 @@ impl Styles for WindowStyle {
     fn to_taffy_style(&self) -> taffy::Style<String> {
         taffy::Style {
             display: taffy::Display::Block,
+            position: taffy::Position::Absolute,
             size: taffy::Size {
                 width: to_taffy_dimension(self.width),
                 height: to_taffy_dimension(self.height),
