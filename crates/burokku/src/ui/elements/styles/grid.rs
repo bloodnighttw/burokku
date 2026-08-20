@@ -222,33 +222,38 @@ pub struct GridStyle {
 }
 
 impl Styles for GridStyle {
-    fn to_taffy_style(self) -> taffy::Style<String> {
+    fn to_taffy_style(&self) -> taffy::Style<String> {
         taffy::Style {
             display: taffy::Display::Grid,
             grid_template_rows: self
                 .template_rows
+                .clone()
                 .into_iter()
                 .map(IntoTaffyStyle::into_taffy_style)
                 .collect(),
             grid_template_columns: self
                 .template_columns
+                .clone()
                 .into_iter()
                 .map(IntoTaffyStyle::into_taffy_style)
                 .collect(),
             grid_template_areas: self
                 .template_areas
+                .clone()
                 .into_iter()
                 .map(IntoTaffyStyle::into_taffy_style)
                 .collect(),
-            grid_template_row_names: self.template_row_names,
-            grid_template_column_names: self.template_column_names,
+            grid_template_row_names: self.template_row_names.clone(),
+            grid_template_column_names: self.template_column_names.clone(),
             grid_auto_rows: self
                 .auto_rows
+                .clone()
                 .into_iter()
                 .map(TrackSizingFunction::to_taffy)
                 .collect(),
             grid_auto_columns: self
                 .auto_columns
+                .clone()
                 .into_iter()
                 .map(TrackSizingFunction::to_taffy)
                 .collect(),
