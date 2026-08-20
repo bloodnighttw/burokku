@@ -7,8 +7,6 @@
 //! [`BurokkuBuilder::runtime_plugin`], while latency-sensitive plugins can be
 //! installed in MTS with [`BurokkuBuilder::main_runtime_plugin`].
 
-#[cfg(debug_assertions)]
-pub mod debug;
 pub mod ui;
 
 pub use runtime;
