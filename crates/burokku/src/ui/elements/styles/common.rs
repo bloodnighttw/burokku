@@ -7,7 +7,8 @@ use crate::ui::elements::{
         color::RgbaColor,
         item::ItemStyle,
         length::{
-            parse_dimension, parse_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
+            parse_length_percentage, parse_non_negative_dimension,
+            parse_non_negative_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
         },
     },
     traits::Styles,
@@ -60,15 +61,15 @@ impl Styles for CommonStyle {
 
     fn set_property(&mut self, property: &str, value: &str) -> bool {
         match property {
-            "width" => parse_dimension(value).is_some_and(|value| {
+            "width" => parse_non_negative_dimension(value).is_some_and(|value| {
                 self.size.width = value;
                 true
             }),
-            "height" => parse_dimension(value).is_some_and(|value| {
+            "height" => parse_non_negative_dimension(value).is_some_and(|value| {
                 self.size.height = value;
                 true
             }),
-            "padding" => parse_length_percentage(value).is_some_and(|value| {
+            "padding" => parse_non_negative_length_percentage(value).is_some_and(|value| {
                 self.padding = Rect {
                     left: value,
                     right: value,

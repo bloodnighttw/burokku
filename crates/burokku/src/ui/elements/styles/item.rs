@@ -84,10 +84,12 @@ impl ItemStyle {
 
     pub(crate) fn set_property(&mut self, property: &str, value: &str) -> bool {
         match property {
-            "flex-basis" => super::length::parse_dimension(value).is_some_and(|value| {
-                self.flex_basis = value;
-                true
-            }),
+            "flex-basis" => {
+                super::length::parse_non_negative_dimension(value).is_some_and(|value| {
+                    self.flex_basis = value;
+                    true
+                })
+            }
             "flex-grow" => parse_non_negative_finite(value).is_some_and(|value| {
                 self.flex_grow = value;
                 true

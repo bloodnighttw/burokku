@@ -6,7 +6,8 @@ export type BurokkuElement<Tag extends BurokkuTagName = BurokkuTagName> = HTMLEl
 
 export type BurokkuDimension = "auto" | `${number}px` | `${number}%`;
 export type BurokkuLength = `${number}px` | `${number}%`;
-export type BurokkuColor = string;
+/** A CSS hexadecimal color: #rgb, #rgba, #rrggbb, or #rrggbbaa. */
+export type BurokkuColor = `#${string}`;
 
 /** Styles currently understood by Burokku's native layout bridge. */
 export type BurokkuStyle = Partial<{

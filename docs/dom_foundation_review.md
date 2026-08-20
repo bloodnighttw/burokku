@@ -22,7 +22,7 @@ integration.
 
 ## Major findings
 
-### 1. `Div` currently becomes a flex container
+### 1. `Div` currently becomes a flex container -- OK
 
 `Element::Div` is documented as a block element in
 `crates/burokku/src/ui/elements.rs:38`, but
@@ -98,7 +98,7 @@ The contract must define:
 - whether removing or replacing the body/window is permitted;
 - how native window size constrains the body layout root.
 
-### 4. `WindowStyle` is internally inconsistent
+### 4. `WindowStyle` is internally inconsistent -- OK
 
 `WindowStyle` stores `background_color` in
 `crates/burokku/src/ui/elements/styles/window.rs:11-15`, and
@@ -135,7 +135,7 @@ Possible solutions:
 Committed snapshots from the same lineage should intentionally preserve the
 same node handles.
 
-### 6. Grid item properties are attached to grid containers
+### 6. Grid item properties are attached to grid containers -- OK
 
 `GridStyle` combines container properties with item properties such as `row`,
 `column`, and `justify_self`. Only `Element::Grid` owns `GridStyle`.
@@ -212,7 +212,7 @@ Each commit should also carry a bounded `ChangeSet` containing inserted, moved,
 removed, layout-dirty, paint-dirty, and text-dirty node IDs. A full rebuild can
 remain the fallback when the change set is unavailable or too large.
 
-### 9. Style parsing admits invalid numeric state
+### 9. Style parsing admits invalid numeric state -- OK
 
 Current `f32` parsing accepts values such as `NaN` and infinity. Negative sizes,
 negative gaps/padding, and negative flex factors are also not validated before

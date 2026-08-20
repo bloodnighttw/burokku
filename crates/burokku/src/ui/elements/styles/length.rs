@@ -66,16 +66,18 @@ impl Dimension {
 pub(crate) fn parse_length_percentage(value: &str) -> Option<LengthPercentage> {
     let value = value.trim();
     if let Some(value) = value.strip_suffix("px") {
-        return value.trim().parse().ok().map(LengthPercentage::Length);
+        return parse_finite(value).map(LengthPercentage::Length);
     }
     if let Some(value) = value.strip_suffix('%') {
-        return value
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|value| LengthPercentage::Percent(value / 100.0));
+        return parse_finite(value).map(|value| LengthPercentage::Percent(value / 100.0));
     }
-    value.parse().ok().map(LengthPercentage::Length)
+    None
+}
+
+pub(crate) fn parse_non_negative_length_percentage(value: &str) -> Option<LengthPercentage> {
+    parse_length_percentage(value).filter(|value| match value {
+        LengthPercentage::Length(value) | LengthPercentage::Percent(value) => *value >= 0.0,
+    })
 }
 
 pub(crate) fn parse_dimension(value: &str) -> Option<Dimension> {
@@ -87,6 +89,18 @@ pub(crate) fn parse_dimension(value: &str) -> Option<Dimension> {
             LengthPercentage::Percent(value) => Dimension::Percent(value),
         })
     }
+}
+
+pub(crate) fn parse_non_negative_dimension(value: &str) -> Option<Dimension> {
+    parse_dimension(value).filter(|value| match value {
+        Dimension::Length(value) | Dimension::Percent(value) => *value >= 0.0,
+        Dimension::Auto => true,
+    })
+}
+
+fn parse_finite(value: &str) -> Option<f32> {
+    let value = value.trim().parse::<f32>().ok()?;
+    value.is_finite().then_some(value)
 }
 
 pub fn to_taffy_auto(value: LengthPercentage) -> taffy::LengthPercentageAuto {
@@ -119,5 +133,27 @@ mod tests {
             taffy::LengthPercentage::percent(0.5)
         );
         assert_eq!(Dimension::auto().to_taffy(), taffy::Dimension::auto());
+    }
+
+    #[test]
+    fn parsers_require_units_and_finite_values() {
+        assert_eq!(
+            parse_length_percentage("12px"),
+            Some(LengthPercentage::Length(12.0))
+        );
+        assert_eq!(
+            parse_length_percentage("50%"),
+            Some(LengthPercentage::Percent(0.5))
+        );
+        for invalid in ["12", "NaNpx", "infpx", "-inf%"] {
+            assert_eq!(parse_length_percentage(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn non_negative_parsers_enforce_property_constraints() {
+        assert_eq!(parse_non_negative_length_percentage("-1px"), None);
+        assert_eq!(parse_non_negative_dimension("-1%"), None);
+        assert_eq!(parse_non_negative_dimension("auto"), Some(Dimension::Auto));
     }
 }
