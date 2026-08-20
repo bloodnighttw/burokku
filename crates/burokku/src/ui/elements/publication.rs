@@ -1,1 +1,3 @@
-pub struct Dom {}
+pub struct DomSnapshot {
+    
+}
