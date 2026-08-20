@@ -10,8 +10,6 @@ mod iter;
 mod publication;
 
 pub use iter::ElementsIter;
-#[allow(unused_imports)]
-pub use publication::{BtsDom, CommitError, DomSnapshot, SharedDom, StagingDomMut};
 pub mod styles;
 pub mod traits;
 
