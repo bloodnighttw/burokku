@@ -29,6 +29,13 @@ export type BurokkuStyle = Partial<{
   justifyContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
   justifyItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
   justifySelf: "auto" | "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  gridRow: string;
+  gridRowStart: string;
+  gridRowEnd: string;
+  gridColumn: string;
+  gridColumnStart: string;
+  gridColumnEnd: string;
+  gridAutoFlow: "row" | "column" | "row dense" | "column dense" | "dense";
 }>;
 
 /** Create one of the element kinds supported by the native DOM plugin. */

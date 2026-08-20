@@ -1,6 +1,6 @@
 use taffy::{
-    geometry::{Line, MinMax, Size},
-    AlignContent, AlignItems, GridAutoFlow, JustifyContent, JustifyItems, JustifySelf,
+    geometry::{MinMax, Size},
+    AlignContent, AlignItems, GridAutoFlow, JustifyContent, JustifyItems,
 };
 
 use crate::ui::elements::{
@@ -9,6 +9,10 @@ use crate::ui::elements::{
 };
 
 use super::length::{parse_length_percentage, LengthPercentage};
+
+// Preserve the previous public path while item placement now lives in the
+// shared item-style module.
+pub use super::item::GridPlacement;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GridTemplateArea {
@@ -29,30 +33,6 @@ impl IntoTaffyStyle for GridTemplateArea {
             row_end: self.row_end,
             column_start: self.column_start,
             column_end: self.column_end,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum GridPlacement {
-    #[default]
-    Auto,
-    Line(i16),
-    NamedLine(String, i16),
-    Span(u16),
-    NamedSpan(String, u16),
-}
-
-impl IntoTaffyStyle for GridPlacement {
-    type Into = taffy::GridPlacement<String>;
-
-    fn into_taffy_style(self) -> Self::Into {
-        match self {
-            Self::Auto => taffy::GridPlacement::Auto,
-            Self::Line(index) => taffy::GridPlacement::Line(index.into()),
-            Self::NamedLine(name, index) => taffy::GridPlacement::NamedLine(name, index),
-            Self::Span(tracks) => taffy::GridPlacement::Span(tracks),
-            Self::NamedSpan(name, occurrence) => taffy::GridPlacement::NamedSpan(name, occurrence),
         }
     }
 }
@@ -220,7 +200,7 @@ impl IntoTaffyStyle for GridTemplateComponent {
     }
 }
 
-/// Thread-safe properties used to lay out a grid container and its grid items.
+/// Thread-safe properties used to lay out a grid container.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridStyle {
     pub common: CommonStyle,
@@ -239,153 +219,8 @@ pub struct GridStyle {
     pub justify_content: Option<JustifyContent>,
     pub align_items: Option<AlignItems>,
     pub justify_items: Option<JustifyItems>,
-
-    // Item properties
-    pub row: Line<GridPlacement>,
-    pub column: Line<GridPlacement>,
-    pub justify_self: Option<JustifySelf>,
 }
 
-// impl GridStyle {
-//     /// Build the Taffy value consumed only by MTS computed/layout state.
-//     pub fn to_taffy_style(&self) -> taffy::Style<String> {
-//         let mut style = taffy::Style {
-//             display: taffy::Display::Grid,
-//             grid_template_rows: self
-//                 .template_rows
-//                 .iter()
-//                 .map(GridTemplateComponent::to_taffy)
-//                 .collect(),
-//             grid_template_columns: self
-//                 .template_columns
-//                 .iter()
-//                 .map(GridTemplateComponent::to_taffy)
-//                 .collect(),
-//             grid_template_areas: self
-//                 .template_areas
-//                 .iter()
-//                 .map(GridTemplateArea::to_taffy)
-//                 .collect(),
-//             grid_template_row_names: self.template_row_names.clone(),
-//             grid_template_column_names: self.template_column_names.clone(),
-//             grid_auto_rows: self
-//                 .auto_rows
-//                 .iter()
-//                 .copied()
-//                 .map(TrackSizingFunction::to_taffy)
-//                 .collect(),
-//             grid_auto_columns: self
-//                 .auto_columns
-//                 .iter()
-//                 .copied()
-//                 .map(TrackSizingFunction::to_taffy)
-//                 .collect(),
-//             grid_auto_flow: self.auto_flow,
-//             gap: Size {
-//                 width: self.gap.width.to_taffy(),
-//                 height: self.gap.height.to_taffy(),
-//             },
-//             align_content: self.align_content,
-//             justify_content: self.justify_content,
-//             align_items: self.align_items,
-//             justify_items: self.justify_items,
-//             grid_row: Line {
-//                 start: self.row.start.to_taffy(),
-//                 end: self.row.end.to_taffy(),
-//             },
-//             grid_column: Line {
-//                 start: self.column.start.to_taffy(),
-//                 end: self.column.end.to_taffy(),
-//             },
-//             justify_self: self.justify_self,
-//             ..taffy::Style::default()
-//         };
-//         self.common.apply_to_taffy(&mut style);
-//         style
-//     }
-
-//     pub(crate) fn supports(name: &str) -> bool {
-//         CommonStyle::supports(name)
-//             || matches!(
-//                 name,
-//                 "gap"
-//                     | "column-gap"
-//                     | "row-gap"
-//                     | "align-content"
-//                     | "align-items"
-//                     | "justify-content"
-//                     | "justify-items"
-//                     | "justify-self"
-//             )
-//     }
-
-//     pub(crate) fn set_property(&mut self, name: &str, value: &str) -> bool {
-//         if CommonStyle::supports(name) {
-//             return self.common.set_property(name, value);
-//         }
-//         match name {
-//             "gap" => parse_length_percentage(value).is_some_and(|value| {
-//                 self.gap = Size {
-//                     width: value,
-//                     height: value,
-//                 };
-//                 true
-//             }),
-//             "column-gap" => parse_length_percentage(value).is_some_and(|value| {
-//                 self.gap.width = value;
-//                 true
-//             }),
-//             "row-gap" => parse_length_percentage(value).is_some_and(|value| {
-//                 self.gap.height = value;
-//                 true
-//             }),
-//             "align-content" => value.parse().ok().is_some_and(|value| {
-//                 self.align_content = Some(value);
-//                 true
-//             }),
-//             "align-items" => value.parse().ok().is_some_and(|value| {
-//                 self.align_items = Some(value);
-//                 true
-//             }),
-//             "justify-content" => value.parse().ok().is_some_and(|value| {
-//                 self.justify_content = Some(value);
-//                 true
-//             }),
-//             "justify-items" => value.parse().ok().is_some_and(|value| {
-//                 self.justify_items = Some(value);
-//                 true
-//             }),
-//             "justify-self" => value.parse().ok().is_some_and(|value| {
-//                 self.justify_self = Some(value);
-//                 true
-//             }),
-//             _ => false,
-//         }
-//     }
-
-//     pub(crate) fn remove_property(&mut self, name: &str) -> bool {
-//         if CommonStyle::supports(name) {
-//             return self.common.remove_property(name);
-//         }
-//         if !Self::supports(name) {
-//             return false;
-//         }
-//         let defaults = Self::default();
-//         match name {
-//             "gap" => self.gap = defaults.gap,
-//             "column-gap" => self.gap.width = defaults.gap.width,
-//             "row-gap" => self.gap.height = defaults.gap.height,
-//             "align-content" => self.align_content = defaults.align_content,
-//             "align-items" => self.align_items = defaults.align_items,
-//             "justify-content" => self.justify_content = defaults.justify_content,
-//             "justify-items" => self.justify_items = defaults.justify_items,
-//             "justify-self" => self.justify_self = defaults.justify_self,
-//             _ => unreachable!("support was checked above"),
-//         }
-//         true
-//     }
-// }
-//
 impl Styles for GridStyle {
     fn to_taffy_style(self) -> taffy::Style<String> {
         taffy::Style {
@@ -426,15 +261,6 @@ impl Styles for GridStyle {
             justify_content: self.justify_content,
             align_items: self.align_items,
             justify_items: self.justify_items,
-            grid_row: Line {
-                start: self.row.start.into_taffy_style(),
-                end: self.row.end.into_taffy_style(),
-            },
-            grid_column: Line {
-                start: self.column.start.into_taffy_style(),
-                end: self.column.end.into_taffy_style(),
-            },
-            justify_self: self.justify_self,
             ..self.common.to_taffy_style()
         }
     }
@@ -450,7 +276,7 @@ impl Styles for GridStyle {
                     | "align-items"
                     | "justify-content"
                     | "justify-items"
-                    | "justify-self"
+                    | "grid-auto-flow"
             )
     }
 
@@ -490,8 +316,8 @@ impl Styles for GridStyle {
                 self.justify_items = Some(value);
                 true
             }),
-            "justify-self" => value.parse().ok().is_some_and(|value| {
-                self.justify_self = Some(value);
+            "grid-auto-flow" => value.parse().ok().is_some_and(|value| {
+                self.auto_flow = value;
                 true
             }),
             _ => false,
@@ -513,7 +339,7 @@ impl Styles for GridStyle {
             "align-items" => self.align_items = defaults.align_items,
             "justify-content" => self.justify_content = defaults.justify_content,
             "justify-items" => self.justify_items = defaults.justify_items,
-            "justify-self" => self.justify_self = defaults.justify_self,
+            "grid-auto-flow" => self.auto_flow = defaults.auto_flow,
             _ => return false,
         }
         true
@@ -540,15 +366,6 @@ impl Default for GridStyle {
             justify_content: None,
             align_items: None,
             justify_items: None,
-            row: Line {
-                start: GridPlacement::Auto,
-                end: GridPlacement::Auto,
-            },
-            column: Line {
-                start: GridPlacement::Auto,
-                end: GridPlacement::Auto,
-            },
-            justify_self: None,
         }
     }
 }

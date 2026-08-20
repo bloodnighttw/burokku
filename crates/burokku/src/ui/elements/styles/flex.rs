@@ -2,13 +2,16 @@ use taffy::{geometry::Size, AlignContent, AlignItems, FlexDirection, FlexWrap, J
 
 use crate::ui::elements::{styles::common::CommonStyle, traits::Styles};
 
+#[cfg(test)]
+use crate::ui::elements::styles::item::ItemStyle;
+
 use super::length::{parse_length_percentage, LengthPercentage};
 
 /// Thread-safe properties used to lay out a flex container and its flex items.
 ///
 /// This is authoritative DOM data and contains no Taffy compact pointer values.
 /// MTS converts it to [`taffy::Style`] immediately before updating layout state.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FlexStyle {
     pub common: CommonStyle,
     pub direction: FlexDirection,
@@ -162,8 +165,11 @@ mod tests {
                 height: LengthPercentage::percent(0.1),
             },
             common: CommonStyle {
-                flex_basis: crate::ui::elements::styles::length::Dimension::percent(0.5),
-                flex_grow: 2.0,
+                item: ItemStyle {
+                    flex_basis: crate::ui::elements::styles::length::Dimension::percent(0.5),
+                    flex_grow: 2.0,
+                    ..ItemStyle::default()
+                },
                 ..CommonStyle::default()
             },
             ..FlexStyle::default()

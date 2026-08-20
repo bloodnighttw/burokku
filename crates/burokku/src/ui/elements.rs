@@ -780,6 +780,16 @@ mod tests {
             assert_eq!(dom.supports_style_property(id, "not-defined"), Ok(false));
         }
 
+        for id in [div, flex, grid, text_element] {
+            assert_eq!(dom.supports_style_property(id, "grid-row"), Ok(true));
+            assert_eq!(dom.supports_style_property(id, "grid-column"), Ok(true));
+            assert_eq!(dom.supports_style_property(id, "justify-self"), Ok(true));
+        }
+        assert_eq!(
+            dom.supports_style_property(window, "justify-self"),
+            Ok(false)
+        );
+
         assert_eq!(dom.supports_style_property(div, "gap"), Ok(false));
         assert_eq!(dom.supports_style_property(flex, "gap"), Ok(true));
         assert_eq!(
@@ -788,11 +798,62 @@ mod tests {
         );
         assert_eq!(dom.supports_style_property(grid, "justify-items"), Ok(true));
         assert_eq!(
+            dom.supports_style_property(grid, "grid-auto-flow"),
+            Ok(true)
+        );
+        assert_eq!(
+            dom.supports_style_property(div, "grid-auto-flow"),
+            Ok(false)
+        );
+        assert_eq!(
             dom.supports_style_property(grid, "flex-direction"),
             Ok(false)
         );
         assert_eq!(dom.supports_style_property(dom.root(), "width"), Ok(false));
         assert_eq!(dom.supports_style_property(text_node, "width"), Ok(false));
+    }
+
+    #[test]
+    fn grid_item_properties_apply_to_non_grid_elements() {
+        let mut dom = Dom::new();
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+
+        assert_eq!(
+            dom.set_style_property(div, "grid-row", "2 / span 3"),
+            Ok(true)
+        );
+        assert_eq!(
+            dom.set_style_property(div, "justify-self", "center"),
+            Ok(true)
+        );
+
+        let Some(Element::Div { style }) = dom.element(div) else {
+            panic!("expected div element");
+        };
+        assert_eq!(
+            style.item.grid_row,
+            taffy::Line {
+                start: styles::item::GridPlacement::Line(2),
+                end: styles::item::GridPlacement::Span(3),
+            }
+        );
+        assert_eq!(style.item.justify_self, Some(taffy::AlignItems::CENTER));
+
+        assert_eq!(dom.remove_style_property(div, "grid-row"), Ok(true));
+        assert_eq!(dom.remove_style_property(div, "justify-self"), Ok(true));
+        let Some(Element::Div { style }) = dom.element(div) else {
+            panic!("expected div element");
+        };
+        assert_eq!(
+            style.item.grid_row,
+            taffy::Line {
+                start: styles::item::GridPlacement::Auto,
+                end: styles::item::GridPlacement::Auto,
+            }
+        );
+        assert_eq!(style.item.justify_self, None);
     }
 
     #[test]
@@ -828,7 +889,10 @@ mod tests {
 
         let style = FlexStyle {
             common: CommonStyle {
-                flex_grow: 1.0,
+                item: styles::item::ItemStyle {
+                    flex_grow: 1.0,
+                    ..styles::item::ItemStyle::default()
+                },
                 ..CommonStyle::default()
             },
             ..FlexStyle::default()
