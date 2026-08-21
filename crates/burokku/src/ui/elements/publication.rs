@@ -91,7 +91,7 @@ impl PublishedDom {
 ///
 /// Implementations should only wake or signal the main event loop. They must
 /// not run layout, rendering, or staging DOM work on the publisher's thread (BTS).
-pub trait CommitNotifier: Send + 'static {
+pub(crate) trait CommitNotifier: Send + 'static {
     fn committed(&self, revision: u64);
 }
 
@@ -134,7 +134,7 @@ impl fmt::Debug for PublishedDomReader {
 /// Publication behavior is added in the checkpoint implementation step. The
 /// writer is `Send` so it can move to BTS, but its single-owner notifier keeps
 /// it from being `Sync`; it also intentionally does not implement [`Clone`].
-pub struct DomPublisher {
+pub(crate) struct DomPublisher {
     committed: Arc<ArcSwap<PublishedDom>>,
     last_published_revision: u64,
     notifier: Box<dyn CommitNotifier>,

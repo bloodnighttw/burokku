@@ -226,7 +226,7 @@ async fn run<'js>(
         while context.execute_pending_job() {}
 
         for plugin in &mut plugins {
-            if let Err(error) = plugin.checkpoint(&context) {
+            if let Err(error) = plugin.checkpoint() {
                 eprintln!(
                     "JavaScript checkpoint for {} failed: {error}",
                     plugin.name()
