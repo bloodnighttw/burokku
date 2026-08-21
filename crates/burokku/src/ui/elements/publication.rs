@@ -181,13 +181,69 @@ impl fmt::Debug for PublishedDomReader {
 
 /// The single-owner BTS side of immutable DOM publication.
 ///
-/// Publication behavior is added in the checkpoint implementation step. The
-/// writer is `Send` so it can move to BTS, but its single-owner notifier keeps
-/// it from being `Sync`; it also intentionally does not implement [`Clone`].
+/// The future DOM plugin owns this writer alongside its mutable staging
+/// [`Dom`] and calls [`Self::checkpoint`] from `runtime::Plugin::checkpoint`.
+/// The writer is `Send` so it can move to BTS, but its single-owner notifier
+/// keeps it from being `Sync`; it also intentionally does not implement
+/// [`Clone`].
 pub(crate) struct DomPublisher {
     committed: Arc<ArcSwap<PublishedDom>>,
     last_published_revision: u64,
     notifier: Box<dyn CommitNotifier>,
+}
+
+impl DomPublisher {
+    /// Create the single BTS writer and cloneable MTS reader.
+    ///
+    /// The initial staging state becomes the immutable baseline without
+    /// emitting a notification.
+    pub(crate) fn new(staging: &Dom, notifier: impl CommitNotifier) -> (Self, PublishedDomReader) {
+        let revision = staging.revision();
+        let baseline = Arc::new(PublishedDom::new(
+            DomSnapshot::from_staging(staging),
+            ChangeSet::FullRebuild {
+                from_revision: revision,
+                to_revision: revision,
+            },
+        ));
+        let committed = Arc::new(ArcSwap::from(baseline));
+        let reader = PublishedDomReader {
+            committed: committed.clone(),
+        };
+        let publisher = Self {
+            committed,
+            last_published_revision: revision,
+            notifier: Box::new(notifier),
+        };
+
+        (publisher, reader)
+    }
+
+    /// Publish one complete revision when staging changed since the previous
+    /// checkpoint.
+    ///
+    /// The atomic store happens before MTS is notified, so a consumer awakened
+    /// by the notifier can immediately load the committed target revision.
+    pub(crate) fn checkpoint(&mut self, staging: &Dom) -> Option<u64> {
+        let target_revision = staging.revision();
+        if target_revision == self.last_published_revision {
+            return None;
+        }
+
+        let source_revision = self.last_published_revision;
+        let publication = Arc::new(PublishedDom::new(
+            DomSnapshot::from_staging(staging),
+            ChangeSet::FullRebuild {
+                from_revision: source_revision,
+                to_revision: target_revision,
+            },
+        ));
+
+        self.committed.store(publication);
+        self.last_published_revision = target_revision;
+        self.notifier.committed(target_revision);
+        Some(target_revision)
+    }
 }
 
 impl fmt::Debug for DomPublisher {
@@ -202,7 +258,10 @@ impl fmt::Debug for DomPublisher {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
+    use std::sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
 
     use super::*;
 
@@ -239,6 +298,158 @@ mod tests {
                 to_revision: 1,
             },
         );
+    }
+
+    #[test]
+    fn publisher_initializes_without_notifying_and_skips_unchanged_checkpoints() {
+        let staging = Dom::new();
+        let notification_count = Arc::new(AtomicUsize::new(0));
+        let (mut publisher, reader) = DomPublisher::new(&staging, {
+            let notification_count = notification_count.clone();
+            move |_| {
+                notification_count.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+
+        let before = reader.load();
+        assert_eq!(before.revision(), 0);
+        assert!(matches!(
+            before.snapshot().kind(before.snapshot().root()),
+            Some(NodeKind::App)
+        ));
+        assert_eq!(publisher.checkpoint(&staging), None);
+
+        let after = reader.load();
+        assert!(Arc::ptr_eq(&before, &after));
+        assert_eq!(notification_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn checkpoint_coalesces_mutations_and_retains_complete_old_revisions() {
+        let mut staging = Dom::new();
+        let notified_revisions = Arc::new(Mutex::new(Vec::new()));
+        let (mut publisher, reader) = DomPublisher::new(&staging, {
+            let notified_revisions = notified_revisions.clone();
+            move |revision| notified_revisions.lock().unwrap().push(revision)
+        });
+        let old_frame = reader.load();
+
+        let window = staging.create_element(Element::Window {
+            style: Box::default(),
+        });
+        let div = staging.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let text = staging.create_text("before");
+        staging.append_child(staging.root(), window).unwrap();
+        staging.append_child(window, div).unwrap();
+        staging.append_child(div, text).unwrap();
+        staging
+            .set_attribute(div, "role".into(), "status".into())
+            .unwrap();
+        let first_revision = staging.revision();
+
+        assert_eq!(publisher.checkpoint(&staging), Some(first_revision));
+        let first_frame = reader.load();
+
+        assert_eq!(old_frame.revision(), 0);
+        assert_eq!(old_frame.snapshot().iter().count(), 1);
+        assert!(!old_frame.snapshot().contains(window));
+        assert_eq!(first_frame.revision(), first_revision);
+        assert_eq!(first_frame.snapshot().parent(text), Some(div));
+        assert_eq!(first_frame.snapshot().text(text), Some("before"));
+        assert_eq!(
+            first_frame.snapshot().attribute(div, "role"),
+            Some("status")
+        );
+        assert_eq!(first_frame.changes().source_revision(), 0);
+        assert_eq!(first_frame.changes().target_revision(), first_revision);
+        assert_eq!(*notified_revisions.lock().unwrap(), [first_revision]);
+
+        staging.set_text(text, "after").unwrap();
+        assert_eq!(reader.load().snapshot().text(text), Some("before"));
+        assert_eq!(old_frame.snapshot().iter().count(), 1);
+
+        let second_revision = staging.revision();
+        assert_eq!(publisher.checkpoint(&staging), Some(second_revision));
+        let second_frame = reader.load();
+        assert_eq!(second_frame.snapshot().text(text), Some("after"));
+        assert_eq!(first_frame.snapshot().text(text), Some("before"));
+        assert_eq!(second_frame.changes().source_revision(), first_revision);
+        assert_eq!(second_frame.changes().target_revision(), second_revision);
+        assert_eq!(
+            *notified_revisions.lock().unwrap(),
+            [first_revision, second_revision]
+        );
+    }
+
+    #[test]
+    fn no_op_and_invalid_mutations_do_not_publish() {
+        let mut staging = Dom::new();
+        let div = staging.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let text = staging.create_text("same");
+        staging
+            .set_attribute(div, "role".into(), "status".into())
+            .unwrap();
+        staging.append_child(div, text).unwrap();
+        let baseline_revision = staging.revision();
+        let notification_count = Arc::new(AtomicUsize::new(0));
+        let (mut publisher, reader) = DomPublisher::new(&staging, {
+            let notification_count = notification_count.clone();
+            move |_| {
+                notification_count.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+        let baseline = reader.load();
+
+        staging.set_text(text, "same").unwrap();
+        staging
+            .set_attribute(div, "role".into(), "status".into())
+            .unwrap();
+        staging.append_child(div, text).unwrap();
+        staging.detach(div).unwrap();
+        assert!(matches!(
+            staging.append_child(text, div),
+            Err(super::super::DomError::InvalidRelationship { .. })
+        ));
+
+        assert_eq!(staging.revision(), baseline_revision);
+        assert_eq!(publisher.checkpoint(&staging), None);
+        assert!(Arc::ptr_eq(&baseline, &reader.load()));
+        assert_eq!(notification_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn checkpoint_stores_before_notifying() {
+        let mut staging = Dom::new();
+        let reader_slot = Arc::new(Mutex::new(None::<PublishedDomReader>));
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (mut publisher, reader) = DomPublisher::new(&staging, {
+            let reader_slot = reader_slot.clone();
+            let observations = observations.clone();
+            move |notified_revision| {
+                let loaded_revision = reader_slot
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .expect("reader is installed before the first checkpoint")
+                    .load()
+                    .revision();
+                observations
+                    .lock()
+                    .unwrap()
+                    .push((notified_revision, loaded_revision));
+            }
+        });
+        *reader_slot.lock().unwrap() = Some(reader);
+
+        staging.create_text("detached mutation");
+        let revision = staging.revision();
+        assert_eq!(publisher.checkpoint(&staging), Some(revision));
+
+        assert_eq!(*observations.lock().unwrap(), [(revision, revision)]);
     }
 
     #[test]
