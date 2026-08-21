@@ -240,6 +240,17 @@ impl DomPublisher {
     ///
     /// The initial staging state becomes the immutable baseline without
     /// emitting a notification.
+    /// 
+    /// you should pass your custom notifier, for example:
+    /// ```rust
+    /// let (publisher, reader) = DomPublisher::new(&staging, {
+    ///     let count = Arc::new(AtomicUsize::new(0));
+    ///     let count_clone = count.clone();
+    ///     move |_| {
+    ///         count_clone.fetch_add(1, Ordering::AcqRel);
+    ///     }
+    /// });
+    /// ```
     pub(crate) fn new(staging: &Dom, notifier: impl CommitNotifier) -> (Self, PublishedDomReader) {
         let revision = staging.revision();
         let baseline = Arc::new(PublishedDom::new(
