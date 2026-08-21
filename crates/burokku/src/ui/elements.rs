@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use crate::ui::elements::{
     styles::{common::CommonStyle, text::TextElementStyle, window::WindowStyle},
@@ -33,6 +36,47 @@ new_key_type! {
     pub struct NodeId;
 }
 
+/// A script-creatable element tag supported by Burokku.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ElementTag {
+    Window,
+    Div,
+    Flex,
+    Grid,
+    Text,
+}
+
+impl ElementTag {
+    pub const fn local_name(self) -> &'static str {
+        match self {
+            Self::Window => "window",
+            Self::Div => "div",
+            Self::Flex => "flex",
+            Self::Grid => "grid",
+            Self::Text => "text",
+        }
+    }
+}
+
+impl TryFrom<&str> for ElementTag {
+    type Error = ElementTagError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "window" => Ok(Self::Window),
+            "div" => Ok(Self::Div),
+            "flex" => Ok(Self::Flex),
+            "grid" => Ok(Self::Grid),
+            "text" => Ok(Self::Text),
+            _ => Err(ElementTagError(value.into())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("unsupported Burokku element tag {0:?}")]
+pub struct ElementTagError(pub String);
+
 /// The data belonging to an element node.
 ///
 /// This describes tags such as `<div>` and `<text>`. Text content is represented
@@ -53,6 +97,40 @@ pub enum Element {
 }
 
 impl Element {
+    pub fn from_tag(tag: ElementTag) -> Self {
+        match tag {
+            ElementTag::Window => Self::Window {
+                style: Box::default(),
+            },
+            ElementTag::Div => Self::Div {
+                style: Box::default(),
+            },
+            ElementTag::Flex => Self::Flex {
+                style: Box::default(),
+            },
+            ElementTag::Grid => Self::Grid {
+                style: Box::default(),
+            },
+            ElementTag::Text => Self::Text {
+                style: Box::default(),
+            },
+        }
+    }
+
+    pub const fn tag(&self) -> ElementTag {
+        match self {
+            Self::Window { .. } => ElementTag::Window,
+            Self::Div { .. } => ElementTag::Div,
+            Self::Flex { .. } => ElementTag::Flex,
+            Self::Grid { .. } => ElementTag::Grid,
+            Self::Text { .. } => ElementTag::Text,
+        }
+    }
+
+    pub const fn local_name(&self) -> &'static str {
+        self.tag().local_name()
+    }
+
     fn same_tag(&self, other: &Self) -> bool {
         matches!(
             (self, other),
@@ -172,6 +250,14 @@ pub struct NodeRevisions {
     pub structure: u64,
     pub style: u64,
     pub content: u64,
+}
+
+/// Nodes permanently removed by one detached-component lifetime sweep.
+/// This is for cache cleanup in taffy layout tree/text layout tree.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReclaimReport {
+    pub(crate) roots: Vec<NodeId>,
+    pub(crate) nodes: Vec<NodeId>,
 }
 
 /// An arena entry containing a node kind and its tree relationships.
@@ -307,6 +393,100 @@ impl Dom {
         self.node(id).map(Node::children)
     }
 
+    pub fn element_tag(&self, id: NodeId) -> Result<ElementTag, DomError> {
+        self.node(id)
+            .ok_or(DomError::NodeNotFound(id))?
+            .element()
+            .map(Element::tag)
+            .ok_or(DomError::NodeNotElement(id))
+    }
+
+    pub fn parent_node(&self, id: NodeId) -> Result<Option<NodeId>, DomError> {
+        Ok(self.node(id).ok_or(DomError::NodeNotFound(id))?.parent)
+    }
+
+    pub fn first_child(&self, id: NodeId) -> Result<Option<NodeId>, DomError> {
+        Ok(self
+            .node(id)
+            .ok_or(DomError::NodeNotFound(id))?
+            .children
+            .first()
+            .copied())
+    }
+
+    pub fn last_child(&self, id: NodeId) -> Result<Option<NodeId>, DomError> {
+        Ok(self
+            .node(id)
+            .ok_or(DomError::NodeNotFound(id))?
+            .children
+            .last()
+            .copied())
+    }
+
+    pub fn next_sibling(&self, id: NodeId) -> Result<Option<NodeId>, DomError> {
+        self.sibling_at_offset(id, 1)
+    }
+
+    pub fn previous_sibling(&self, id: NodeId) -> Result<Option<NodeId>, DomError> {
+        self.sibling_at_offset(id, -1)
+    }
+
+    pub fn is_connected(&self, mut id: NodeId) -> Result<bool, DomError> {
+        self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        loop {
+            if id == self.root {
+                return Ok(true);
+            }
+            match self.nodes[id].parent {
+                Some(parent) => id = parent,
+                None => return Ok(false),
+            }
+        }
+    }
+
+    pub fn contains_node(
+        &self,
+        ancestor: NodeId,
+        mut descendant: NodeId,
+    ) -> Result<bool, DomError> {
+        self.node(ancestor)
+            .ok_or(DomError::NodeNotFound(ancestor))?;
+        self.node(descendant)
+            .ok_or(DomError::NodeNotFound(descendant))?;
+
+        loop {
+            if descendant == ancestor {
+                return Ok(true);
+            }
+            match self.nodes[descendant].parent {
+                Some(parent) => descendant = parent,
+                None => return Ok(false),
+            }
+        }
+    }
+
+    pub fn text_content(&self, id: NodeId) -> Result<String, DomError> {
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        if let Some(text) = node.text() {
+            return Ok(text.into());
+        }
+
+        let mut content = String::new();
+        let mut pending = node.children.iter().rev().copied().collect::<Vec<_>>();
+        while let Some(next) = pending.pop() {
+            let node = self
+                .node(next)
+                .expect("all child handles belong to the same DOM arena");
+            match node.kind() {
+                NodeKind::Text(text) => content.push_str(text),
+                NodeKind::App | NodeKind::Element(_) => {
+                    pending.extend(node.children.iter().rev().copied());
+                }
+            }
+        }
+        Ok(content)
+    }
+
     pub fn supports_style_property(&self, id: NodeId, name: &str) -> Result<bool, DomError> {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
         Ok(node
@@ -375,6 +555,11 @@ impl Dom {
     /// Allocates a detached element node and returns its stable handle.
     pub fn create_element(&mut self, element: Element) -> NodeId {
         self.create_node(NodeKind::Element(element))
+    }
+
+    /// Allocates a detached element with the default data for `tag`.
+    pub fn create_element_tag(&mut self, tag: ElementTag) -> NodeId {
+        self.create_element(Element::from_tag(tag))
     }
 
     /// Allocates a detached DOM text node and returns its stable handle.
@@ -452,19 +637,68 @@ impl Dom {
     }
 
     /// Replaces a text node's content without changing its stable handle.
-    pub fn set_text(&mut self, id: NodeId, text: impl Into<String>) -> Result<(), DomError> {
+    pub fn set_text(&mut self, id: NodeId, text: impl Into<String>) -> Result<bool, DomError> {
         let text = text.into();
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
         let current = node.text().ok_or(DomError::NodeNotText(id))?;
         if current == text {
-            return Ok(());
+            return Ok(false);
         }
 
         let node = self.node_mut(id)?;
         node.kind = NodeKind::Text(text);
         bump(&mut node.revisions.content);
         self.bump_revision();
-        Ok(())
+        Ok(true)
+    }
+
+    /// Replaces an element's children with one raw text node.
+    ///
+    /// Existing children are detached rather than permanently removed so live
+    /// JavaScript wrappers can continue to use them. Text nodes are updated in
+    /// place. The app root rejects assignment because it cannot accept text.
+    pub fn set_text_content(
+        &mut self,
+        id: NodeId,
+        text: impl Into<String>,
+    ) -> Result<bool, DomError> {
+        let text = text.into();
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        match node.kind() {
+            NodeKind::Text(_) => return self.set_text(id, text),
+            NodeKind::App => return Err(DomError::TextContentNotSupported(id)),
+            NodeKind::Element(_) => {}
+        }
+
+        if let [only_child] = node.children.as_slice() {
+            if self.text(*only_child) == Some(text.as_str()) {
+                return Ok(false);
+            }
+        }
+
+        let old_children = node.children.clone();
+        let text_id = self.nodes.insert(Arc::new(Node {
+            kind: NodeKind::Text(text),
+            parent: Some(id),
+            children: Vec::new(),
+            attributes: BTreeMap::new(),
+            revisions: NodeRevisions {
+                structure: 1,
+                ..NodeRevisions::default()
+            },
+        }));
+
+        for child in old_children {
+            let child = self.node_mut(child)?;
+            child.parent = None;
+            bump(&mut child.revisions.structure);
+        }
+        let node = self.node_mut(id)?;
+        node.children.clear();
+        node.children.push(text_id);
+        bump(&mut node.revisions.structure);
+        self.bump_revision();
+        Ok(true)
     }
 
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), DomError> {
@@ -479,6 +713,139 @@ impl Dom {
             child_count
         };
         self.insert_child(parent, index, child)
+    }
+
+    /// Inserts `child` immediately before `reference`, or appends it when the
+    /// reference is `None`.
+    pub fn insert_before(
+        &mut self,
+        parent: NodeId,
+        child: NodeId,
+        reference: Option<NodeId>,
+    ) -> Result<(), DomError> {
+        let Some(reference) = reference else {
+            return self.append_child(parent, child);
+        };
+
+        let parent_node = self.node(parent).ok_or(DomError::NodeNotFound(parent))?;
+        self.node(child).ok_or(DomError::NodeNotFound(child))?;
+        self.node(reference)
+            .ok_or(DomError::NodeNotFound(reference))?;
+        if self.parent(reference) != Some(parent) {
+            return Err(DomError::NotAChild {
+                parent,
+                child: reference,
+            });
+        }
+        if child == reference {
+            return Ok(());
+        }
+
+        let reference_index = parent_node
+            .children
+            .iter()
+            .position(|candidate| *candidate == reference)
+            .expect("a direct child is present in its parent's child list");
+        let child_precedes_reference = self.parent(child) == Some(parent)
+            && parent_node
+                .children
+                .iter()
+                .position(|candidate| *candidate == child)
+                .is_some_and(|child_index| child_index < reference_index);
+        let final_index = reference_index - usize::from(child_precedes_reference);
+        self.insert_child(parent, final_index, child)
+    }
+
+    /// Detaches `child` after verifying that it is a direct child of `parent`.
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), DomError> {
+        self.node(parent).ok_or(DomError::NodeNotFound(parent))?;
+        self.node(child).ok_or(DomError::NodeNotFound(child))?;
+        if self.parent(child) != Some(parent) {
+            return Err(DomError::NotAChild { parent, child });
+        }
+        self.detach(child)
+    }
+
+    /// Atomically replaces one direct child and leaves the old child detached.
+    pub fn replace_child(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+    ) -> Result<(), DomError> {
+        let parent_node = self.node(parent).ok_or(DomError::NodeNotFound(parent))?;
+        let new_node = self
+            .node(new_child)
+            .ok_or(DomError::NodeNotFound(new_child))?;
+        self.node(old_child)
+            .ok_or(DomError::NodeNotFound(old_child))?;
+
+        if self.parent(old_child) != Some(parent) {
+            return Err(DomError::NotAChild {
+                parent,
+                child: old_child,
+            });
+        }
+        if new_child == old_child {
+            return Ok(());
+        }
+        if new_child == self.root || matches!(new_node.kind, NodeKind::App) {
+            return Err(DomError::AppMustBeRoot);
+        }
+        if !parent_node.kind.accepts(&new_node.kind) {
+            return Err(DomError::InvalidRelationship {
+                parent,
+                child: new_child,
+            });
+        }
+        if self.is_ancestor_or_self(new_child, parent) {
+            return Err(DomError::Cycle {
+                parent,
+                child: new_child,
+            });
+        }
+
+        let old_index = parent_node
+            .children
+            .iter()
+            .position(|candidate| *candidate == old_child)
+            .expect("a direct child is present in its parent's child list");
+        let new_parent = new_node.parent;
+        let new_index = (new_parent == Some(parent)).then(|| {
+            parent_node
+                .children
+                .iter()
+                .position(|candidate| *candidate == new_child)
+                .expect("a direct child is present in its parent's child list")
+        });
+        let final_old_index =
+            old_index - usize::from(new_index.is_some_and(|index| index < old_index));
+
+        if let Some(new_parent) = new_parent {
+            let node = self.node_mut(new_parent)?;
+            node.children.retain(|candidate| *candidate != new_child);
+            bump(&mut node.revisions.structure);
+        }
+
+        let parent_node = self.node_mut(parent)?;
+        parent_node.children[final_old_index] = new_child;
+        if new_parent == Some(parent) {
+            // Removing the existing sibling already bumped this same parent.
+        } else {
+            bump(&mut parent_node.revisions.structure);
+        }
+
+        if new_parent != Some(parent) {
+            let new_node = self.node_mut(new_child)?;
+            new_node.parent = Some(parent);
+            bump(&mut new_node.revisions.structure);
+        }
+        let old_node = self.node_mut(old_child)?;
+        old_node.parent = None;
+        bump(&mut old_node.revisions.structure);
+
+        self.bump_revision();
+        Ok(())
     }
 
     /// Inserts or moves `child` to `index` in `parent`'s child list.
@@ -606,6 +973,57 @@ impl Dom {
         Ok(kind)
     }
 
+    /// Permanently removes detached components not retained by a live wrapper.
+    ///
+    /// A wrapper for any node retains its complete component because parent and
+    /// sibling traversal makes every node in that component observable.
+    pub(crate) fn reclaim_unreachable_detached<I>(
+        &mut self,
+        live_wrappers: I,
+    ) -> Result<ReclaimReport, DomError>
+    where
+        I: IntoIterator<Item = NodeId>,
+    {
+        let mut marked = HashSet::new();
+        self.mark_subtree(self.root, &mut marked);
+
+        for mut live in live_wrappers {
+            self.node(live).ok_or(DomError::NodeNotFound(live))?;
+            while let Some(parent) = self.nodes[live].parent {
+                live = parent;
+            }
+            self.mark_subtree(live, &mut marked);
+        }
+
+        let roots = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                (id != self.root && node.parent.is_none() && !marked.contains(&id)).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        let mut reclaimed = Vec::new();
+
+        for root in roots.iter().copied() {
+            let mut pending = vec![root];
+            while let Some(id) = pending.pop() {
+                let Some(node) = self.nodes.remove(id) else {
+                    continue;
+                };
+                pending.extend(node.children.iter().copied());
+                reclaimed.push(id);
+            }
+        }
+
+        if !reclaimed.is_empty() {
+            self.bump_revision();
+        }
+        Ok(ReclaimReport {
+            roots,
+            nodes: reclaimed,
+        })
+    }
+
     /// Iterates over the reachable tree in pre-order, yielding stable IDs.
     pub fn iter(&self) -> DomIter<'_> {
         DomIter::new(self)
@@ -616,11 +1034,27 @@ impl Dom {
         Ok(Arc::make_mut(node))
     }
 
-    #[cfg(test)]
-    fn shares_node_with(&self, other: &Self, id: NodeId) -> bool {
-        match (self.nodes.get(id), other.nodes.get(id)) {
-            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-            _ => false,
+    fn sibling_at_offset(&self, id: NodeId, offset: isize) -> Result<Option<NodeId>, DomError> {
+        let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
+        let Some(parent) = node.parent else {
+            return Ok(None);
+        };
+        let siblings = &self.nodes[parent].children;
+        let index = siblings
+            .iter()
+            .position(|candidate| *candidate == id)
+            .expect("a child's parent contains the child");
+        let sibling_index = index.checked_add_signed(offset);
+        Ok(sibling_index.and_then(|index| siblings.get(index).copied()))
+    }
+
+    fn mark_subtree(&self, root: NodeId, marked: &mut HashSet<NodeId>) {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if !marked.insert(id) {
+                continue;
+            }
+            pending.extend(self.nodes[id].children.iter().copied());
         }
     }
 
@@ -696,6 +1130,10 @@ pub enum DomError {
         index: usize,
         len: usize,
     },
+    #[error("node {child:?} is not a direct child of node {parent:?}")]
+    NotAChild { parent: NodeId, child: NodeId },
+    #[error("node {0:?} does not support textContent assignment")]
+    TextContentNotSupported(NodeId),
     #[error("the root node cannot be detached")]
     CannotDetachRoot,
     #[error("the root node cannot be removed")]
@@ -1230,6 +1668,200 @@ mod tests {
             Err(DomError::InvalidRelationship { parent, child })
         );
         assert_eq!(dom.parent(child), None);
+    }
+
+    #[test]
+    fn creates_default_elements_from_checked_tags() {
+        let mut dom = Dom::new();
+        for (name, tag) in [
+            ("window", ElementTag::Window),
+            ("div", ElementTag::Div),
+            ("flex", ElementTag::Flex),
+            ("grid", ElementTag::Grid),
+            ("text", ElementTag::Text),
+        ] {
+            assert_eq!(ElementTag::try_from(name), Ok(tag));
+            let id = dom.create_element_tag(tag);
+            assert_eq!(dom.element_tag(id), Ok(tag));
+            assert_eq!(dom.element(id).unwrap().local_name(), name);
+        }
+
+        let revision = dom.revision();
+        assert_eq!(
+            ElementTag::try_from("canvas"),
+            Err(ElementTagError("canvas".into()))
+        );
+        assert_eq!(dom.revision(), revision);
+    }
+
+    #[test]
+    fn traverses_parents_children_siblings_and_connectedness() {
+        let mut dom = Dom::new();
+        let window = dom.create_element_tag(ElementTag::Window);
+        let parent = dom.create_element_tag(ElementTag::Div);
+        let first = dom.create_element_tag(ElementTag::Div);
+        let second = dom.create_text("second");
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, parent).unwrap();
+        dom.append_child(parent, first).unwrap();
+        dom.append_child(parent, second).unwrap();
+
+        assert_eq!(dom.parent_node(first), Ok(Some(parent)));
+        assert_eq!(dom.first_child(parent), Ok(Some(first)));
+        assert_eq!(dom.last_child(parent), Ok(Some(second)));
+        assert_eq!(dom.previous_sibling(first), Ok(None));
+        assert_eq!(dom.next_sibling(first), Ok(Some(second)));
+        assert_eq!(dom.previous_sibling(second), Ok(Some(first)));
+        assert_eq!(dom.next_sibling(second), Ok(None));
+        assert_eq!(dom.contains_node(parent, second), Ok(true));
+        assert_eq!(dom.contains_node(second, parent), Ok(false));
+        assert_eq!(dom.is_connected(second), Ok(true));
+
+        dom.detach(parent).unwrap();
+        assert_eq!(dom.is_connected(parent), Ok(false));
+        assert_eq!(dom.is_connected(second), Ok(false));
+    }
+
+    #[test]
+    fn insert_before_validates_references_and_handles_same_parent_moves() {
+        let mut dom = Dom::new();
+        let parent = dom.create_element_tag(ElementTag::Div);
+        let first = dom.create_element_tag(ElementTag::Div);
+        let second = dom.create_element_tag(ElementTag::Div);
+        let third = dom.create_element_tag(ElementTag::Div);
+        let outsider = dom.create_element_tag(ElementTag::Div);
+        dom.append_child(parent, first).unwrap();
+        dom.append_child(parent, second).unwrap();
+        dom.append_child(parent, third).unwrap();
+
+        dom.insert_before(parent, third, Some(first)).unwrap();
+        assert_eq!(dom.children(parent), Some(&[third, first, second][..]));
+
+        let revision = dom.revision();
+        dom.insert_before(parent, first, Some(second)).unwrap();
+        dom.insert_before(parent, first, Some(first)).unwrap();
+        assert_eq!(dom.revision(), revision);
+        assert_eq!(dom.children(parent), Some(&[third, first, second][..]));
+
+        assert_eq!(
+            dom.insert_before(parent, third, Some(outsider)),
+            Err(DomError::NotAChild {
+                parent,
+                child: outsider,
+            })
+        );
+        assert_eq!(dom.children(parent), Some(&[third, first, second][..]));
+    }
+
+    #[test]
+    fn remove_and_replace_require_direct_children_and_leave_old_nodes_detached() {
+        let mut dom = Dom::new();
+        let first_window = dom.create_element_tag(ElementTag::Window);
+        let second_window = dom.create_element_tag(ElementTag::Window);
+        let unrelated = dom.create_element_tag(ElementTag::Window);
+        dom.append_child(dom.root(), first_window).unwrap();
+
+        dom.replace_child(dom.root(), second_window, first_window)
+            .unwrap();
+        assert_eq!(dom.children(dom.root()), Some(&[second_window][..]));
+        assert_eq!(dom.parent(first_window), None);
+        assert_eq!(dom.parent(second_window), Some(dom.root()));
+        assert!(dom.contains(first_window));
+
+        assert_eq!(
+            dom.remove_child(dom.root(), unrelated),
+            Err(DomError::NotAChild {
+                parent: dom.root(),
+                child: unrelated,
+            })
+        );
+        dom.remove_child(dom.root(), second_window).unwrap();
+        assert_eq!(dom.parent(second_window), None);
+        assert!(dom.children(dom.root()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_content_concatenates_and_replaces_without_destroying_old_children() {
+        let mut dom = Dom::new();
+        let outer = dom.create_element_tag(ElementTag::Text);
+        let before = dom.create_text("before ");
+        let inner = dom.create_element_tag(ElementTag::Text);
+        let nested = dom.create_text("nested");
+        dom.append_child(outer, before).unwrap();
+        dom.append_child(outer, inner).unwrap();
+        dom.append_child(inner, nested).unwrap();
+
+        assert_eq!(dom.text_content(outer), Ok("before nested".into()));
+        assert_eq!(dom.set_text_content(outer, "after"), Ok(true));
+        let replacement = dom.first_child(outer).unwrap().unwrap();
+        assert_eq!(dom.text(replacement), Some("after"));
+        assert_eq!(dom.parent(before), None);
+        assert_eq!(dom.parent(inner), None);
+        assert!(dom.contains(before));
+        assert!(dom.contains(nested));
+        assert_eq!(dom.set_text_content(outer, "after"), Ok(false));
+        assert_eq!(dom.set_text(replacement, "updated"), Ok(true));
+        assert_eq!(dom.set_text(replacement, "updated"), Ok(false));
+        assert_eq!(
+            dom.set_text_content(dom.root(), "invalid"),
+            Err(DomError::TextContentNotSupported(dom.root()))
+        );
+    }
+
+    #[test]
+    fn reclamation_retains_connected_and_live_detached_components() {
+        let mut dom = Dom::new();
+        let window = dom.create_element_tag(ElementTag::Window);
+        let connected = dom.create_element_tag(ElementTag::Div);
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, connected).unwrap();
+
+        let detached_root = dom.create_element_tag(ElementTag::Div);
+        let live_descendant = dom.create_element_tag(ElementTag::Div);
+        let sibling = dom.create_text("sibling");
+        dom.append_child(detached_root, live_descendant).unwrap();
+        dom.append_child(detached_root, sibling).unwrap();
+
+        let unreachable = dom.create_element_tag(ElementTag::Grid);
+        let unreachable_child = dom.create_text("unused");
+        dom.append_child(unreachable, unreachable_child).unwrap();
+        let before_reclaim = dom.revision();
+
+        let report = dom.reclaim_unreachable_detached([live_descendant]).unwrap();
+        assert_eq!(report.roots, vec![unreachable]);
+        assert!(report.nodes.contains(&unreachable));
+        assert!(report.nodes.contains(&unreachable_child));
+        assert!(!report.nodes.is_empty());
+        assert_eq!(dom.revision(), before_reclaim + 1);
+        assert!(dom.contains(connected));
+        assert!(dom.contains(detached_root));
+        assert!(dom.contains(live_descendant));
+        assert!(dom.contains(sibling));
+
+        let report = dom
+            .reclaim_unreachable_detached(std::iter::empty())
+            .unwrap();
+        assert_eq!(report.roots, vec![detached_root]);
+        assert!(!dom.contains(detached_root));
+        assert!(!dom.contains(live_descendant));
+        assert!(!dom.contains(sibling));
+        assert!(dom.contains(connected));
+    }
+
+    #[test]
+    fn reclamation_rejects_stale_live_wrapper_roots_without_sweeping() {
+        let mut dom = Dom::new();
+        let stale = dom.create_element_tag(ElementTag::Div);
+        dom.remove_subtree(stale).unwrap();
+        let detached = dom.create_element_tag(ElementTag::Grid);
+        let revision = dom.revision();
+
+        assert_eq!(
+            dom.reclaim_unreachable_detached([stale]),
+            Err(DomError::NodeNotFound(stale))
+        );
+        assert!(dom.contains(detached));
+        assert_eq!(dom.revision(), revision);
     }
 
     #[test]
