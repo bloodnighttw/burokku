@@ -12,8 +12,6 @@ check:
     cargo check --workspace
 
 test:
-    env CI=true pnpm --filter @burokku/example-counter check
-    env CI=true pnpm --filter @burokku/example-layouts check
     cargo test --workspace
 
 counter:

@@ -1,8 +1,76 @@
 export type BurokkuTagName = "div" | "flex" | "grid" | "text" | "window";
 
-export type BurokkuElement<Tag extends BurokkuTagName = BurokkuTagName> = HTMLElement & {
+export type BurokkuEventListener = (event: unknown) => void;
+
+/** Shared behavior implemented by every Burokku-native node wrapper. */
+export interface Node {
+  readonly parentNode: Node | null;
+  readonly childNodes: readonly Node[];
+  readonly firstChild: Node | null;
+  readonly lastChild: Node | null;
+  readonly nextSibling: Node | null;
+  readonly previousSibling: Node | null;
+  readonly isConnected: boolean;
+  textContent: string;
+  nodeValue: string | null;
+
+  appendChild<Child extends Node>(child: Child): Child;
+  insertBefore<Child extends Node>(child: Child, reference: Node | null): Child;
+  removeChild<Child extends Node>(child: Child): Child;
+  replaceChild<OldChild extends Node>(newChild: Node, oldChild: OldChild): OldChild;
+  contains(other: Node): boolean;
+  addEventListener(type: string, callback: BurokkuEventListener): void;
+  removeEventListener(type: string, callback: BurokkuEventListener): void;
+}
+
+/** The permanent, host-created application mount root. */
+export interface AppNode extends Node {
+  createElement<Tag extends BurokkuTagName>(tag: Tag): BurokkuElement<Tag>;
+  createTextNode(data: string): TextNode;
+}
+
+/** A raw DOM text node, distinct from the styled `text` element. */
+export interface TextNode extends Node {
+  data: string;
+  textContent: string;
+  nodeValue: string;
+}
+
+/** The native style declaration exposed by a Burokku element. */
+export interface BurokkuStyleDeclaration {
+  supportsProperty(name: string): boolean;
+  setProperty(name: string, value: string): void;
+  removeProperty(name: string): void;
+}
+
+/** Shared behavior for script-creatable Burokku elements. */
+export interface Element<Tag extends BurokkuTagName = BurokkuTagName> extends Node {
   readonly localName: Tag;
-};
+  readonly style: BurokkuStyleDeclaration;
+
+  getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+  setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
+}
+
+export interface DivElement extends Element<"div"> {}
+export interface FlexElement extends Element<"flex"> {}
+export interface GridElement extends Element<"grid"> {}
+export interface TextElement extends Element<"text"> {}
+export interface WindowElement extends Element<"window"> {}
+
+export interface BurokkuElementTagNameMap {
+  div: DivElement;
+  flex: FlexElement;
+  grid: GridElement;
+  text: TextElement;
+  window: WindowElement;
+}
+
+export type BurokkuElement<
+  Tag extends BurokkuTagName = BurokkuTagName,
+> = BurokkuElementTagNameMap[Tag];
 
 export type BurokkuDimension = "auto" | `${number}px` | `${number}%`;
 export type BurokkuLength = `${number}px` | `${number}%`;
@@ -45,16 +113,16 @@ export type BurokkuStyle = Partial<{
   gridAutoFlow: "row" | "column" | "row dense" | "column dense" | "dense";
 }>;
 
-/** Create one of the element kinds supported by the native DOM plugin. */
-export function createElement<Tag extends BurokkuTagName>(tag: Tag): BurokkuElement<Tag> {
-  return document.createElement(tag) as BurokkuElement<Tag>;
-}
-
-/** Apply a checked set of native styles to an element. */
-export function setStyles(element: HTMLElement, styles: Readonly<BurokkuStyle>): void {
+/** Apply a checked set of native styles to a Burokku element. */
+export function setStyles(element: Element, styles: Readonly<BurokkuStyle>): void {
   for (const [name, value] of Object.entries(styles)) {
     if (value === undefined) continue;
-    const cssName = name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
-    element.style.setProperty(cssName, String(value));
+    const nativeName = name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+    element.style.setProperty(nativeName, String(value));
   }
+}
+
+declare global {
+  /** The permanent Burokku application mount root. */
+  var app: AppNode;
 }

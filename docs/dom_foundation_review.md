@@ -95,11 +95,13 @@ The current `style` and `content` revisions are also too broad for efficient
 layout, paint, text, and accessibility caches. They should be split when those
 incremental caches are introduced.
 
-## 4. The JavaScript node facade is missing
+## 4. JavaScript node facade
 
-There is no Burokku plugin that exposes the native DOM arena to QuickJS.
+**Status: implemented in the current working tree.** The BTS-only `DomPlugin`
+now exposes the native DOM arena to QuickJS without installing a browser
+`document`.
 
-The minimum facade must provide:
+The facade provides:
 
 - the permanent `globalThis.app` wrapper for the existing `NodeKind::App` root;
 - `app.createElement(tag)` and `app.createTextNode(data)`;
@@ -120,13 +122,13 @@ own writes. Publication remains deferred until the runtime checkpoint.
 React and Solid integration tests are required because their renderers may rely
 on additional structural node behavior beyond basic insertion methods.
 
-## 5. Detached-node reclamation is undefined
+## 5. Detached-node reclamation
 
-The app factory methods allocate detached native nodes immediately. If the
-corresponding JavaScript wrappers become unreachable before insertion, those
-nodes remain in the arena indefinitely.
+**Status: implemented in the current working tree.** Factory-created detached
+nodes are tracked through weak canonical wrappers and reclaimed by a
+wrapper-aware mark/sweep pass at runtime checkpoints.
 
-The facade must distinguish:
+The facade distinguishes:
 
 - an attached node retained by the app tree;
 - a detached node retained by a live wrapper;
@@ -134,10 +136,13 @@ The facade must distinguish:
 - a removed subtree whose wrappers must remain valid;
 - a genuinely unreachable detached subtree that can be reclaimed.
 
-The wrapper identity cache must not strongly retain every wrapper forever.
-After the basic facade exists, use QuickJS finalizers, weak wrapper tracking, or
-a host-side mark pass rooted at both the app tree and all live wrappers. Only a
+The wrapper identity cache must not strongly retain every wrapper forever. From
+its first implementation, use QuickJS finalizers, weak wrapper tracking, or a
+host-side mark pass rooted at both the app tree and all live wrappers. Only a
 genuinely reclaimed node should produce a stale `NodeId`.
+
+Problems 4 and 5 are one implementation workstream. The detailed contract and
+sequence are in `docs/dom_facade_lifetime_plan.md`.
 
 ## 6. Text DOM behavior, shaping, and measurement are incomplete
 
@@ -258,9 +263,9 @@ JavaScript app factory and mutations
 
 1. Align `packages/runtime` with the `AppNode` factory contract.
 2. Implement immutable snapshot publication with a full-rebuild change marker.
-3. Implement the minimal JavaScript node facade and synchronous staging DOM.
-4. Add detached-wrapper lifetime tracking and reclamation.
-5. Connect committed `Window` elements to native window lifecycle.
-6. Implement Taffy reconciliation and Parley text measurement.
-7. Implement Vello painting, presentation revisions, hit testing, and events.
-8. Assemble the application host and add end-to-end React/Solid tests.
+3. Implement the JavaScript node facade, synchronous staging DOM, weak wrapper
+   identity, and detached-node reclamation as one workstream.
+4. Connect committed `Window` elements to native window lifecycle.
+5. Implement Taffy reconciliation and Parley text measurement.
+6. Implement Vello painting, presentation revisions, hit testing, and events.
+7. Assemble the application host and add end-to-end React/Solid tests.
