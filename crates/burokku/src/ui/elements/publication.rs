@@ -1,3 +1,46 @@
+//! Atomic transfer of immutable DOM revisions from BTS to MTS.
+//!
+//! # BTS integration
+//!
+//! The future native DOM plugin exclusively owns its mutable staging [`Dom`]
+//! and one [`DomPublisher`]. JavaScript facade methods mutate staging
+//! synchronously so JavaScript can read its own writes. After the runtime has
+//! completed one macrotask and drained all ready microtasks, the plugin's
+//! context-free `runtime::Plugin::checkpoint` callback delegates to the
+//! publisher:
+//!
+//! ```ignore
+//! struct DomPlugin {
+//!     staging: Dom,
+//!     publisher: DomPublisher,
+//! }
+//!
+//! impl runtime::Plugin for DomPlugin {
+//!     fn checkpoint(&mut self) -> runtime::Result<()> {
+//!         self.publisher.checkpoint(&self.staging);
+//!         Ok(())
+//!     }
+//! }
+//! ```
+//!
+//! A checkpoint does not execute JavaScript or schedule more microtasks. It
+//! publishes successfully applied staging mutations even when the preceding
+//! JavaScript macrotask ended with an exception. The staging DOM, publisher,
+//! and notifier remain crate-private capabilities and must not be exposed to
+//! application plugins.
+//!
+//! # MTS frame integration
+//!
+//! MTS owns a cloneable [`PublishedDomReader`]. It calls
+//! [`PublishedDomReader::load`] once at frame start and retains that exact
+//! `Arc<PublishedDom>` through reconciliation, layout, hit testing, scene
+//! construction, and presentation. Loading individual pieces again during the
+//! frame could mix revisions and is therefore outside this API's contract.
+//!
+//! The notifier only wakes MTS after the new publication is stored. Native
+//! window ownership, redraw handling, Taffy reconciliation, Vello rendering,
+//! events, and the JavaScript node facade are separate implementation stages.
+
 #![allow(
     dead_code,
     reason = "publication types are wired into the DOM owner in subsequent implementation steps"
