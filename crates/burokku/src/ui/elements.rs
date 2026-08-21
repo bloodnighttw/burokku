@@ -13,6 +13,11 @@ mod iter;
 mod publication;
 
 pub use iter::DomIter;
+#[allow(
+    unused_imports,
+    reason = "consumed by the pending MTS reconciliation host"
+)]
+pub(crate) use publication::{ChangeSet, DomSnapshot, PublishedDom, PublishedDomReader};
 pub mod styles;
 pub mod traits;
 

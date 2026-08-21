@@ -7,7 +7,7 @@ use std::{fmt, sync::Arc};
 
 use arc_swap::ArcSwap;
 
-use super::Dom;
+use super::{Dom, DomIter, Element, Node, NodeId, NodeKind};
 
 /// Describes how an MTS consumer should reconcile two committed DOM revisions.
 ///
@@ -54,6 +54,56 @@ impl DomSnapshot {
 
     pub fn revision(&self) -> u64 {
         self.dom.revision()
+    }
+
+    pub fn root(&self) -> NodeId {
+        self.dom.root()
+    }
+
+    pub fn contains(&self, id: NodeId) -> bool {
+        self.dom.contains(id)
+    }
+
+    pub fn node(&self, id: NodeId) -> Option<&Node> {
+        self.dom.node(id)
+    }
+
+    pub fn kind(&self, id: NodeId) -> Option<&NodeKind> {
+        self.dom.kind(id)
+    }
+
+    pub fn element(&self, id: NodeId) -> Option<&Element> {
+        self.dom.element(id)
+    }
+
+    pub fn text(&self, id: NodeId) -> Option<&str> {
+        self.dom.text(id)
+    }
+
+    pub fn attribute(&self, id: NodeId, name: &str) -> Option<&str> {
+        self.dom.attribute(id, name)
+    }
+
+    pub fn parent(&self, id: NodeId) -> Option<NodeId> {
+        self.dom.parent(id)
+    }
+
+    pub fn children(&self, id: NodeId) -> Option<&[NodeId]> {
+        self.dom.children(id)
+    }
+
+    /// Iterate over the app tree in pre-order. Detached nodes are not visited.
+    pub fn iter(&self) -> DomIter<'_> {
+        self.dom.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a DomSnapshot {
+    type Item = (NodeId, &'a NodeKind);
+    type IntoIter = DomIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -189,6 +239,62 @@ mod tests {
                 to_revision: 1,
             },
         );
+    }
+
+    #[test]
+    fn snapshot_exposes_read_only_queries_and_preserves_node_ids() {
+        let mut staging = Dom::new();
+        let window = staging.create_element(Element::Window {
+            style: Box::default(),
+        });
+        let div = staging.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let text = staging.create_text("before");
+        let detached = staging.create_element(Element::Grid {
+            style: Box::default(),
+        });
+        staging
+            .set_attribute(div, "role".into(), "status".into())
+            .unwrap();
+        staging.append_child(staging.root(), window).unwrap();
+        staging.append_child(window, div).unwrap();
+        staging.append_child(div, text).unwrap();
+
+        let snapshot = DomSnapshot::from_staging(&staging);
+        let snapshot_revision = snapshot.revision();
+
+        assert_eq!(snapshot.root(), staging.root());
+        assert!(snapshot.contains(detached));
+        assert!(matches!(
+            snapshot.kind(snapshot.root()),
+            Some(NodeKind::App)
+        ));
+        assert!(matches!(
+            snapshot.element(window),
+            Some(Element::Window { .. })
+        ));
+        assert_eq!(snapshot.text(text), Some("before"));
+        assert_eq!(snapshot.attribute(div, "role"), Some("status"));
+        assert_eq!(snapshot.parent(text), Some(div));
+        assert_eq!(snapshot.children(div), Some(&[text][..]));
+        assert_eq!(snapshot.node(text).unwrap().parent(), Some(div));
+        assert_eq!(
+            snapshot.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            vec![snapshot.root(), window, div, text]
+        );
+        assert_eq!((&snapshot).into_iter().count(), 4);
+
+        staging.set_text(text, "after").unwrap();
+        staging.remove_subtree(div).unwrap();
+
+        assert_eq!(snapshot.revision(), snapshot_revision);
+        assert_eq!(snapshot.text(text), Some("before"));
+        assert_eq!(snapshot.parent(text), Some(div));
+        assert!(snapshot.contains(div));
+        assert!(snapshot.contains(text));
+        assert!(!staging.contains(div));
+        assert!(!staging.contains(text));
     }
 
     #[test]
