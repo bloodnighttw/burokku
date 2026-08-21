@@ -989,13 +989,17 @@ impl Dom {
 
         for mut live in live_wrappers {
             self.node(live).ok_or(DomError::NodeNotFound(live))?;
+            // find the root of the live wrapper
             while let Some(parent) = self.nodes[live].parent {
                 live = parent;
             }
             self.mark_subtree(live, &mut marked);
         }
 
-        let roots = self
+        // filter that id is not the root and hasn't been visited, which
+        // is recorded in the marked set, note this only records nodes that are
+        // roots of unreachable subtrees (i.e., detached from the main tree).
+        let unreachable_node_root = self
             .nodes
             .iter()
             .filter_map(|(id, node)| {
@@ -1004,7 +1008,8 @@ impl Dom {
             .collect::<Vec<_>>();
         let mut reclaimed = Vec::new();
 
-        for root in roots.iter().copied() {
+        // this removes the unreachable subtrees from the arena
+        for root in unreachable_node_root.iter().copied() {
             let mut pending = vec![root];
             while let Some(id) = pending.pop() {
                 let Some(node) = self.nodes.remove(id) else {
@@ -1019,7 +1024,7 @@ impl Dom {
             self.bump_revision();
         }
         Ok(ReclaimReport {
-            roots,
+            roots: unreachable_node_root,
             nodes: reclaimed,
         })
     }
@@ -1048,6 +1053,8 @@ impl Dom {
         Ok(sibling_index.and_then(|index| siblings.get(index).copied()))
     }
 
+    // mark all nodes in subtree as reachable
+    // hash set will mark nodes as visited
     fn mark_subtree(&self, root: NodeId, marked: &mut HashSet<NodeId>) {
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -1058,6 +1065,7 @@ impl Dom {
         }
     }
 
+    // to prevent cycles
     fn is_ancestor_or_self(&self, possible_ancestor: NodeId, mut id: NodeId) -> bool {
         loop {
             if id == possible_ancestor {

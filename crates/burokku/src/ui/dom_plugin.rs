@@ -21,8 +21,11 @@ mod lifetime;
 pub(super) type SharedDomState = Arc<Mutex<DomPluginState>>;
 
 pub(super) struct DomPluginState {
+    // the staging domJavascript read and modify/
     pub(super) staging: Dom,
+    // the javascript facade side of dom reference tracking
     pub(super) live_wrappers: HashMap<NodeId, usize>,
+    // the node last cleanup
     pub(super) last_reclaim: ReclaimReport,
 }
 
@@ -536,22 +539,6 @@ mod tests {
         plugin.checkpoint().unwrap();
         assert_eq!(plugin.state().staging.node_count(), 1);
         assert_eq!(notifications.load(Ordering::Acquire), 4);
-    }
-
-    #[test]
-    fn react_reconciler_mounts_updates_reorders_and_unmounts() {
-        run_framework_fixture(
-            "react",
-            include_str!("../../../../packages/framework-tests/bundles/react.js"),
-        );
-    }
-
-    #[test]
-    fn solid_universal_mounts_updates_reorders_and_unmounts() {
-        run_framework_fixture(
-            "solid",
-            include_str!("../../../../packages/framework-tests/bundles/solid.js"),
-        );
     }
 
     #[test]

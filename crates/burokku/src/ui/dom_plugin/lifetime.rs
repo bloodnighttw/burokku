@@ -19,6 +19,8 @@ pub(super) fn decode_node_id(token: &str) -> Result<NodeId, InvalidNodeToken> {
 pub(super) struct InvalidNodeToken;
 
 impl DomPluginState {
+
+    // insert the dom wrapper reference
     pub(super) fn acquire_wrapper(&mut self, id: NodeId) -> Result<(), DomError> {
         self.staging
             .contains(id)
@@ -31,6 +33,7 @@ impl DomPluginState {
         Ok(())
     }
 
+    // remove the dom wrapper reference
     pub(super) fn release_wrapper(&mut self, id: NodeId) {
         let Some(count) = self.live_wrappers.get_mut(&id) else {
             return;
@@ -42,6 +45,7 @@ impl DomPluginState {
         }
     }
 
+    // remove detached nodes that has no live wrappers
     pub(super) fn reclaim_detached(&mut self) -> runtime::Result<()> {
         let live = self.live_wrappers.keys().copied().collect::<Vec<_>>();
         self.last_reclaim = self
