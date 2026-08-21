@@ -31,7 +31,9 @@ discovery is Problem 3 and is not required here.
 - `Dom::revision()` advances on effective mutation, while existing no-op
   mutation paths leave it unchanged.
 - `runtime::Plugin::checkpoint` already runs after every macrotask and all ready
-  QuickJS jobs, including after a failed JavaScript macrotask.
+  QuickJS jobs, including after a failed JavaScript macrotask. It intentionally
+  receives no QuickJS `Ctx`, so checkpoint implementations cannot directly run
+  JavaScript or schedule QuickJS microtasks.
 - `arc-swap` is already a dependency of `crates/burokku`.
 
 ## Proposed publication model
@@ -71,6 +73,9 @@ pub struct DomPublisher {
 Names and visibility may be adjusted to match crate conventions, but preserve
 these ownership rules:
 
+- `DomPublisher`, its constructor, its checkpoint method, and the notifier
+  abstraction are crate-private to `burokku`; application plugins must not be
+  able to publish revisions.
 - `DomPublisher` is single-owner and lives on BTS; do not implement `Clone` for
   it.
 - `PublishedDomReader` is cloneable and can be sent to MTS.
@@ -134,11 +139,17 @@ per-mutation flag. This correctly coalesces all effective mutations in one task
 into one publication. A sequence that mutates and then restores the same value
 still publishes because mutations occurred and the DOM revision advanced.
 
-The future JavaScript DOM plugin from Problem 4 should own both the staging
-`Dom` and `DomPublisher`, then delegate its existing
-`runtime::Plugin::checkpoint` callback to this checkpoint method. No runtime
-scheduler change is needed for Problem 2 because checkpoint timing is already
-implemented and tested in `crates/runtime/src/event_loop.rs`.
+The future JavaScript DOM plugin from Problem 4 should exclusively own both the
+staging `Dom` and `DomPublisher`, then delegate its existing
+`runtime::Plugin::checkpoint` callback to this checkpoint method. The staging
+DOM and publisher must not be exposed to application plugins.
+
+`Plugin::checkpoint` receives no QuickJS `Ctx`. Checkpoints must not execute
+JavaScript or schedule QuickJS microtasks; deferred JavaScript work must enter
+through `runtime::MacrotaskQueue` as a future macrotask. Consequently, another
+application plugin cannot mutate the JavaScript DOM facade after publication in
+the same turn. No runtime scheduler priority is needed while this capability
+boundary is preserved.
 
 ## Redraw notification boundary
 
@@ -198,6 +209,8 @@ load operation.
 4. **Document the integration point**
    - Add a short comment/example showing that the future BTS DOM plugin calls
      the publisher from `Plugin::checkpoint`.
+   - Keep the publisher and mutable staging DOM inaccessible to application
+     plugins, and preserve the context-free checkpoint API.
    - Document that the reader's returned `Arc` is frame-scoped.
    - Do not implement the JavaScript facade, Taffy reconciliation, or native
      window lifecycle in this change.

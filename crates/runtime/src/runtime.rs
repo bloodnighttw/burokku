@@ -233,21 +233,26 @@ mod tests {
     use crate::{MacrotaskQueue, MacrotaskQueueError, Plugin, RuntimeRole};
     use rquickjs::{prelude::Func, Ctx};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         Arc, Mutex,
     };
 
     struct RecordingCheckpoint {
+        current_value: Arc<AtomicI32>,
         values: Arc<Mutex<Vec<i32>>>,
     }
 
     impl Plugin for RecordingCheckpoint {
-        fn install<'js>(&self, _context: &Ctx<'js>) -> crate::Result<()> {
-            Ok(())
+        fn install<'js>(&self, context: &Ctx<'js>) -> crate::Result<()> {
+            let current_value = self.current_value.clone();
+            context.globals().set(
+                "setCheckpointValue",
+                Func::from(move |value| current_value.store(value, Ordering::Release)),
+            )
         }
 
-        fn checkpoint<'js>(&mut self, context: &Ctx<'js>) -> crate::Result<()> {
-            let value = context.globals().get("__checkpoint_value")?;
+        fn checkpoint(&mut self) -> crate::Result<()> {
+            let value = self.current_value.load(Ordering::Acquire);
             self.values.lock().unwrap().push(value);
             Ok(())
         }
@@ -345,9 +350,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn plugin_checkpoint_runs_after_microtasks_and_failed_macrotasks() {
+        let current_value = Arc::new(AtomicI32::new(0));
         let values = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::builder()
             .plugin(RecordingCheckpoint {
+                current_value,
                 values: values.clone(),
             })
             .build()
@@ -356,15 +363,15 @@ mod tests {
 
         runtime
             .eval::<()>(
-                "globalThis.__checkpoint_value = 1; \
-                 Promise.resolve().then(() => __checkpoint_value = 2)",
+                "setCheckpointValue(1); \
+                 Promise.resolve().then(() => setCheckpointValue(2))",
             )
             .await
             .unwrap();
         assert_eq!(*values.lock().unwrap(), [2]);
 
         assert!(runtime
-            .eval::<()>("globalThis.__checkpoint_value = 7; throw new Error('failed')")
+            .eval::<()>("setCheckpointValue(7); throw new Error('failed')")
             .await
             .is_err());
         assert_eq!(*values.lock().unwrap(), [2, 7]);
