@@ -64,7 +64,7 @@ pub struct PublishedDomReader {
 pub struct DomPublisher {
     committed: Arc<ArcSwap<PublishedDom>>,
     last_published_revision: u64,
-    notifier: Arc<dyn CommitNotifier>,
+    notifier: Box<dyn CommitNotifier>,
 }
 ```
 
@@ -142,9 +142,11 @@ implemented and tested in `crates/runtime/src/event_loop.rs`.
 
 ## Redraw notification boundary
 
-Define a small `Send + Sync` notification interface (a trait or stored closure)
-for `DomPublisher`. It should report that a newer committed revision is
-available; it must not perform layout or read the staging DOM.
+Define a small `Send` notification interface (a trait or stored closure) for
+`DomPublisher`. It should report that a newer committed revision is available;
+it must not perform layout or read the staging DOM. Keep it single-owner (for
+example, `Box<dyn CommitNotifier>`) so `DomPublisher` is movable to BTS but is
+not `Sync`.
 
 The production notifier should wake the native event loop through a
 thread-safe signal such as `winit::EventLoopProxy`. MTS can then load the latest
@@ -241,8 +243,8 @@ load operation.
   unchanged, exercising the existing `Arc::make_mut` copy-on-write behavior.
 - The notification callback can immediately load the target revision, proving
   that notification occurs after the `ArcSwap` store.
-- Add compile-time assertions that the reader/publication types are `Send +
-  Sync`.
+- Add compile-time assertions that snapshots, publications, and readers are
+  `Send + Sync`, while the single-writer publisher is `Send` only.
 
 ### Revision coalescing
 
