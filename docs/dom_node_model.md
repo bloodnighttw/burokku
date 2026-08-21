@@ -54,6 +54,40 @@ Node
 The facade uses inheritance and polymorphism, while the Rust implementation can
 continue using enums and composition.
 
+## Child relationship contract
+
+Raw strings are represented by `TextNode`, and an attached `TextNode` is valid
+only beneath a `TextElement`. Text elements may nest recursively to introduce
+inherited styled runs.
+
+```text
+AppNode
+└── Window
+    ├── Div | Flex | Grid
+    │   └── Div | Flex | Grid | TextElement
+    └── TextElement
+        ├── TextNode
+        └── TextElement
+            ├── TextNode
+            └── TextElement ...
+```
+
+More precisely:
+
+- `AppNode` accepts one `Window`;
+- `Window`, `Div`, `Flex`, and `Grid` accept `Div`, `Flex`, `Grid`, and
+  `TextElement`, but never `TextNode`;
+- `TextElement` accepts `TextNode` and nested `TextElement` children only;
+- `TextNode` is a leaf.
+
+`app.createTextNode(...)` may return a detached text node. Attempting to insert
+it beneath a non-text parent must fail without changing either parent. The host
+must not silently wrap it in a text element because that would change observable
+node identity and structure.
+
+Therefore `<div><text>Application content</text></div>` is valid, while
+`<div>Application content</div>` is not.
+
 ## Application mount root
 
 The host exposes the existing app root as:
@@ -75,7 +109,7 @@ frameworks:
 ```tsx
 render(() => (
   <window>
-    <div>Application content</div>
+    <div><text>Application content</text></div>
   </window>
 ), globalThis.app);
 ```

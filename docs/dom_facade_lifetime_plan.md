@@ -13,10 +13,12 @@ lifetime tracking; reclamation is not a later retrofit.
 
 ## Status
 
-Implemented in the current working tree. The native plugin and lifetime logic
-live under `crates/burokku/src/ui/dom_plugin/`, the private facade bootstrap is
-`crates/burokku/src/ui/scripts/dom_facade.js`, and the React/Solid compatibility
-fixtures live in `packages/framework-tests/`.
+The facade and lifetime machinery are implemented in the current working tree.
+The native plugin and lifetime logic live under
+`crates/burokku/src/ui/dom_plugin/`, and the private facade bootstrap is
+`crates/burokku/src/ui/scripts/dom_facade.js`. The strict text-placement rule is
+also implemented: raw nodes attach only beneath recursively nestable text
+elements.
 
 ## Current foundation to reuse
 
@@ -192,7 +194,11 @@ Mutation methods return the affected wrapper in the normal DOM shape:
 returns the detached child, and `replaceChild` returns the replaced child.
 
 `childNodes` is intentionally a snapshot array, not a live browser `NodeList`.
-Do not expose unsupported browser behavior through the TypeScript contract.
+The shared JavaScript prototype may implement text setters for dispatch, but
+`textContent` assignment succeeds only for `TextNode` and `TextElement`;
+non-text nodes receive the native error. Generic `Node` text properties are
+therefore read-only in TypeScript. Do not expose unsupported browser behavior
+through the TypeScript contract.
 
 ### `AppNode`
 
@@ -250,17 +256,21 @@ Dom::set_text(text_id, value) -> Result<bool, DomError>
 
 Required behavior:
 
+- a raw text node may be attached only beneath an `Element::Text`;
+- text elements may contain raw text and nested text elements recursively;
+- `Window`, `Div`, `Flex`, and `Grid` accept explicit text elements but reject
+  raw text children atomically;
 - a raw text getter returns its data;
 - an element getter concatenates descendant raw text in tree order;
 - a raw text setter updates the existing node;
-- an element setter detaches all existing children and attaches one new raw
+- a text-element setter detaches all existing children and attaches one new raw
   text child containing the assigned value;
+- `textContent` assignment on `AppNode` and non-text elements is rejected
+  without mutation;
 - replaced children are detached, not immediately destroyed;
 - assigning the same effective value is a no-op when no structural change is
   needed;
-- `nodeValue` is `null` and its setter is a no-op for `AppNode` and elements;
-- assigning `textContent` on `AppNode` is rejected because raw text cannot be a
-  child of the app root.
+- `nodeValue` is `null` and its setter is a no-op for `AppNode` and elements.
 
 Use an iterative traversal or a checked depth limit for descendant text
 collection.
@@ -512,6 +522,10 @@ Add compile-only tests proving:
 
 - `app.createElement("div")` returns the mapped element type;
 - `app.createTextNode(...)` returns `TextNode`;
+- generic `Node` and non-text elements expose read-only text properties, while
+  `TextNode` and `TextElement` expose the supported writable properties;
+- child mutation types accept `textElement.appendChild(textNode)` and reject
+  `div.appendChild(textNode)`;
 - `AppNode` is not a `BurokkuTagName` or an `Element`;
 - browser-only `HTMLElement` members are not accidentally promised;
 - unsupported tags and style properties fail type checking.
@@ -533,13 +547,14 @@ and inspect `PublishedDomReader` after checkpoints.
 Each framework fixture must cover:
 
 1. initial creation and mounting of one `Window`;
-2. nested element and raw text creation;
-3. attribute and style updates;
-4. keyed sibling reordering without losing `NodeId` identity;
-5. text updates through both text nodes and `textContent`;
-6. element replacement and unmounting;
-7. retained wrappers remaining valid after removal;
-8. one publication per completed render turn rather than per mutation.
+2. raw text inside explicit, recursively nestable text elements;
+3. rejection of a direct raw child beneath a non-text element;
+4. attribute and style updates;
+5. keyed sibling reordering without losing `NodeId` identity;
+6. text updates through both text nodes and text-element `textContent`;
+7. element replacement and unmounting;
+8. retained wrappers remaining valid after removal;
+9. one publication per completed render turn rather than per mutation.
 
 Only add facade behavior actually required by the agreed contract or observed
 renderer needs. Record any extra structural method in both this document and
@@ -626,8 +641,11 @@ is reclaimed.
 - Invalid references and non-children leave the tree unchanged.
 - Replacing the app's existing `Window` is atomic and valid.
 - Replaced and removed children become detached rather than stale.
+- Raw text is accepted only beneath text elements, which may nest recursively.
+- Direct raw children beneath non-text elements are rejected without mutation.
 - Text getters concatenate nested text in tree order.
-- Text replacement detaches old children and handles no-ops.
+- Text-element replacement detaches old children and handles no-ops; non-text
+  `textContent` assignment is rejected.
 
 ### Wrapper identity and facade behavior
 

@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "rolldown.config.ts"]
+  "include": ["src", "type-tests", "rolldown.config.ts"]
 }

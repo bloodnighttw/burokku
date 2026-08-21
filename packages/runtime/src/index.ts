@@ -3,34 +3,40 @@ export type BurokkuTagName = "div" | "flex" | "grid" | "text" | "window";
 export type BurokkuEventListener = (event: unknown) => void;
 
 /** Shared behavior implemented by every Burokku-native node wrapper. */
-export interface Node {
-  readonly parentNode: Node | null;
-  readonly childNodes: readonly Node[];
-  readonly firstChild: Node | null;
-  readonly lastChild: Node | null;
-  readonly nextSibling: Node | null;
-  readonly previousSibling: Node | null;
+export interface Node<AllowedChild = never> {
+  readonly parentNode: BurokkuNode | null;
+  readonly childNodes: readonly AllowedChild[];
+  readonly firstChild: AllowedChild | null;
+  readonly lastChild: AllowedChild | null;
+  readonly nextSibling: BurokkuNode | null;
+  readonly previousSibling: BurokkuNode | null;
   readonly isConnected: boolean;
-  textContent: string;
-  nodeValue: string | null;
+  readonly textContent: string;
+  readonly nodeValue: string | null;
 
-  appendChild<Child extends Node>(child: Child): Child;
-  insertBefore<Child extends Node>(child: Child, reference: Node | null): Child;
-  removeChild<Child extends Node>(child: Child): Child;
-  replaceChild<OldChild extends Node>(newChild: Node, oldChild: OldChild): OldChild;
-  contains(other: Node): boolean;
+  appendChild<Child extends AllowedChild>(child: Child): Child;
+  insertBefore<Child extends AllowedChild>(
+    child: Child,
+    reference: AllowedChild | null,
+  ): Child;
+  removeChild<Child extends AllowedChild>(child: Child): Child;
+  replaceChild<OldChild extends AllowedChild>(
+    newChild: AllowedChild,
+    oldChild: OldChild,
+  ): OldChild;
+  contains(other: BurokkuNode): boolean;
   addEventListener(type: string, callback: BurokkuEventListener): void;
   removeEventListener(type: string, callback: BurokkuEventListener): void;
 }
 
 /** The permanent, host-created application mount root. */
-export interface AppNode extends Node {
+export interface AppNode extends Node<WindowElement> {
   createElement<Tag extends BurokkuTagName>(tag: Tag): BurokkuElement<Tag>;
   createTextNode(data: string): TextNode;
 }
 
 /** A raw DOM text node, distinct from the styled `text` element. */
-export interface TextNode extends Node {
+export interface TextNode extends Node<never> {
   data: string;
   textContent: string;
   nodeValue: string;
@@ -44,7 +50,10 @@ export interface BurokkuStyleDeclaration {
 }
 
 /** Shared behavior for script-creatable Burokku elements. */
-export interface Element<Tag extends BurokkuTagName = BurokkuTagName> extends Node {
+export interface Element<
+  Tag extends BurokkuTagName = BurokkuTagName,
+  AllowedChild = BurokkuContainerChild,
+> extends Node<AllowedChild> {
   readonly localName: Tag;
   readonly style: BurokkuStyleDeclaration;
 
@@ -57,8 +66,23 @@ export interface Element<Tag extends BurokkuTagName = BurokkuTagName> extends No
 export interface DivElement extends Element<"div"> {}
 export interface FlexElement extends Element<"flex"> {}
 export interface GridElement extends Element<"grid"> {}
-export interface TextElement extends Element<"text"> {}
+export interface TextElement extends Element<"text", BurokkuTextChild> {
+  textContent: string;
+}
 export interface WindowElement extends Element<"window"> {}
+
+/** Element children accepted by window and ordinary layout containers. */
+export type BurokkuContainerChild =
+  | DivElement
+  | FlexElement
+  | GridElement
+  | TextElement;
+
+/** Children accepted by a styled text element. */
+export type BurokkuTextChild = TextNode | TextElement;
+
+/** Any node exposed by the Burokku-native facade. */
+export type BurokkuNode = AppNode | TextNode | BurokkuElement;
 
 export interface BurokkuElementTagNameMap {
   div: DivElement;

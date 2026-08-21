@@ -147,14 +147,13 @@ sequence are in `docs/dom_facade_lifetime_plan.md`.
 ## 6. Text DOM behavior, shaping, and measurement are incomplete
 
 The current foundation has raw `NodeKind::Text`, styled `Element::Text`,
-validated typography, and inherited `ComputedTextStyle`. It does not yet have a
-working text pipeline.
+validated typography, inherited `ComputedTextStyle`, native/JavaScript text
+accessors, and a strict text child model. Raw text nodes can be attached only
+beneath `Element::Text`; text elements may nest recursively. Non-text
+`textContent` assignment is rejected without mutation.
 
-Missing work includes:
+It does not yet have a working layout and paint pipeline. Missing work includes:
 
-- `textContent`, `nodeValue`, and `TextNode.data` semantics;
-- replacing element children when assigning `textContent`;
-- concatenating descendant text for getters;
 - collecting nested styled text into inherited runs;
 - Parley shaping and glyph layout;
 - a Taffy measurement callback for paragraph leaves;
@@ -164,7 +163,8 @@ Missing work includes:
 
 An outer styled text element should own one measured Taffy leaf. Nested styled
 text elements are runs within that paragraph and must not become independent
-Taffy layout nodes.
+Taffy layout nodes. There is no standalone raw-text Taffy leaf fallback for an
+invalid non-text parent.
 
 The detailed implementation contract is in `docs/text_rendering_plan.md`.
 

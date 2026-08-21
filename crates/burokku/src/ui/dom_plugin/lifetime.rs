@@ -19,7 +19,6 @@ pub(super) fn decode_node_id(token: &str) -> Result<NodeId, InvalidNodeToken> {
 pub(super) struct InvalidNodeToken;
 
 impl DomPluginState {
-
     // insert the dom wrapper reference
     pub(super) fn acquire_wrapper(&mut self, id: NodeId) -> Result<(), DomError> {
         self.staging
