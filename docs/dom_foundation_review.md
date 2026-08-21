@@ -168,29 +168,35 @@ invalid non-text parent.
 
 The detailed implementation contract is in `docs/text_rendering_plan.md`.
 
-## 7. Taffy reconciliation is missing
+## 7. Taffy reconciliation
 
-The project converts authoritative styles into `taffy::Style`, but it does not
-create or maintain a Taffy tree.
+**Status: initial full-rebuild implementation completed.** The MTS-only layout
+engine in `crates/burokku/src/ui/layout/` uses Taffy 0.11's low-level trait API
+rather than maintaining a mutable `TaffyTree` mirror.
 
-The main thread needs a stable mapping:
+It now provides:
 
-```text
-DOM NodeId -> Taffy NodeId
-```
+- a generation-safe `DOM NodeId -> LayoutId -> Taffy NodeId` mapping;
+- a validated, revision-scoped `LayoutTopology` derived from one retained
+  immutable `PublishedDom`;
+- full rebuilding for creation, removal, DOM reparenting, child order, and
+  layout-style changes;
+- App omission, detached-node cleanup, and Window-root viewport constraints;
+- block, flex, grid, empty-box, and measured paragraph-leaf dispatch;
+- flattening of nested text descendants into one paragraph measurement input;
+- an injectable fallible `TextMeasurer` boundary with first-baseline support;
+- complete-output Taffy caching that preserves measurement baselines;
+- unrounded logical computed boxes and atomic replacement after success;
+- a derived-topology boundary that can later represent positioned containing
+  blocks separately from DOM and paint/stacking relationships.
 
-The reconciler must handle:
+Remaining integration is tracked by the adjacent workstreams: Parley implements
+the real text measurer in Problem 6, the native host supplies live viewports in
+Problem 10, and a bounded incremental `ChangeSet` can replace full rebuilding
+after Problem 3 defines its protocol.
 
-- node creation and removal;
-- reparenting and child order;
-- layout-style changes;
-- cleanup of Taffy nodes absent from the committed snapshot;
-- measured text leaves and text invalidation;
-- native window viewport constraints;
-- full rebuilding first and incremental `ChangeSet` application later.
-
-The reconciler must consume one immutable committed snapshot rather than the
-mutable staging DOM.
+The detailed design and follow-up stages are in
+`docs/dom_problem_7_taffy_trait_plan.md`.
 
 ## 8. Rendering and presentation are missing
 

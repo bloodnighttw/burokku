@@ -1,0 +1,550 @@
+use std::sync::Arc;
+
+use crate::ui::elements::PublishedDom;
+
+use super::{
+    computed::ComputedLayout,
+    error::LayoutError,
+    reconcile::reconcile_full,
+    tree::{compute_layout, TextMeasurer},
+    LogicalViewport,
+};
+
+/// MTS owner of the last complete computed layout and the text measurement
+/// implementation used by Taffy paragraph leaves.
+#[derive(Debug)]
+pub(crate) struct LayoutEngine<M> {
+    measurer: M,
+    current: Option<ComputedLayout>,
+}
+
+impl<M: TextMeasurer> LayoutEngine<M> {
+    pub(crate) fn new(measurer: M) -> Self {
+        Self {
+            measurer,
+            current: None,
+        }
+    }
+
+    pub(crate) fn current(&self) -> Option<&ComputedLayout> {
+        self.current.as_ref()
+    }
+
+    pub(crate) fn measurer_mut(&mut self) -> &mut M {
+        &mut self.measurer
+    }
+
+    /// Reconcile and compute one publication under an actual logical viewport.
+    ///
+    /// The previous complete state is replaced only after lowering, Taffy
+    /// computation, measurement, and computed-box validation all succeed.
+    pub(crate) fn compute(
+        &mut self,
+        publication: Arc<PublishedDom>,
+        viewport: LogicalViewport,
+    ) -> Result<&ComputedLayout, LayoutError> {
+        let text_generation = self.measurer.generation();
+        if self.current.as_ref().is_some_and(|current| {
+            current.revision() == publication.revision()
+                && current.viewport() == viewport
+                && current.text_generation() == text_generation
+        }) {
+            return Ok(self
+                .current
+                .as_ref()
+                .expect("the matching current layout was checked above"));
+        }
+
+        let mut scratch = reconcile_full(&publication, viewport)?;
+        compute_layout(&mut scratch, &mut self.measurer)?;
+        let after_generation = self.measurer.generation();
+        if after_generation != text_generation {
+            return Err(LayoutError::TextGenerationChanged {
+                before: text_generation,
+                after: after_generation,
+            });
+        }
+        let next = ComputedLayout::from_scratch(publication, scratch, text_generation)?;
+        self.current = Some(next);
+        Ok(self
+            .current
+            .as_ref()
+            .expect("a successfully computed layout was just installed"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use taffy::{geometry::Size, AvailableSpace};
+
+    use crate::ui::elements::{
+        styles::grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
+        Dom, DomPublisher, Element, ElementTag, PublishedDom,
+    };
+
+    use super::*;
+    use crate::ui::layout::{TextMeasureRequest, TextMeasurement};
+
+    #[derive(Clone, Debug)]
+    struct RecordedMeasure {
+        source: crate::ui::elements::NodeId,
+        text: String,
+        available_space: Size<AvailableSpace>,
+        final_width_selection: bool,
+    }
+
+    #[derive(Debug, Default)]
+    struct TestMeasurer {
+        calls: Vec<RecordedMeasure>,
+        fail: bool,
+        generation: u64,
+    }
+
+    impl TextMeasurer for TestMeasurer {
+        fn generation(&self) -> u64 {
+            self.generation
+        }
+
+        fn measure(&mut self, request: TextMeasureRequest<'_>) -> Result<TextMeasurement, String> {
+            if self.fail {
+                return Err("injected measurement failure".into());
+            }
+
+            self.calls.push(RecordedMeasure {
+                source: request.source(),
+                text: request.text().to_owned(),
+                available_space: request.available_space(),
+                final_width_selection: request.is_final_width_selection(),
+            });
+
+            let intrinsic_width = request.text().chars().count() as f32 * 10.0;
+            let available_width = match request.available_space().width {
+                AvailableSpace::Definite(width) => Some(width),
+                AvailableSpace::MinContent => Some(intrinsic_width.min(10.0)),
+                AvailableSpace::MaxContent => None,
+            };
+            let measured_width = request.known_dimensions().width.unwrap_or_else(|| {
+                available_width.map_or(intrinsic_width, |width| width.min(intrinsic_width))
+            });
+            let wrapping_width = available_width.unwrap_or(intrinsic_width).max(1.0);
+            let lines = if intrinsic_width == 0.0 {
+                1.0
+            } else {
+                (intrinsic_width / wrapping_width).ceil().max(1.0)
+            };
+            let measured_height = request.known_dimensions().height.unwrap_or(lines * 20.0);
+            let baseline = if request.text().starts_with("low") {
+                6.0
+            } else {
+                14.0
+            };
+            Ok(TextMeasurement::new(
+                Size {
+                    width: measured_width,
+                    height: measured_height,
+                },
+                Some(baseline),
+            ))
+        }
+    }
+
+    fn publication(dom: &Dom) -> Arc<PublishedDom> {
+        let (_publisher, reader) = DomPublisher::new(dom, |_| {});
+        reader.load()
+    }
+
+    fn viewport(width: f32, height: f32) -> LogicalViewport {
+        LogicalViewport::new(width, height).unwrap()
+    }
+
+    fn element(dom: &mut Dom, tag: ElementTag) -> crate::ui::elements::NodeId {
+        dom.create_element(Element::from_tag(tag))
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn app_without_window_produces_a_successful_empty_layout() {
+        let dom = Dom::new();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(800.0, 600.0))
+            .unwrap();
+
+        assert_eq!(computed.window(), None);
+        assert!(computed.is_empty());
+        assert_eq!(computed.revision(), dom.revision());
+    }
+
+    #[test]
+    fn window_uses_the_actual_viewport_and_detached_nodes_are_omitted() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let child = element(&mut dom, ElementTag::Div);
+        let detached = element(&mut dom, ElementTag::Grid);
+        dom.set_style_property(child, "width", "10.5px").unwrap();
+        dom.set_style_property(child, "height", "20px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, child).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(320.5, 240.25))
+            .unwrap();
+
+        let root = computed.box_for(window).unwrap().layout();
+        assert_close(root.size.width, 320.5);
+        assert_close(root.size.height, 240.25);
+        assert_close(computed.box_for(child).unwrap().layout().size.width, 10.5);
+        assert_eq!(
+            computed.box_for(child).unwrap().layout_parent(),
+            Some(window)
+        );
+        assert!(computed.box_for(detached).is_none());
+        assert_eq!(computed.layout_children(window), Some(vec![child]));
+        assert_eq!(computed.len(), 2);
+    }
+
+    #[test]
+    fn flex_and_grid_dispatch_to_their_taffy_algorithms() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let flex = element(&mut dom, ElementTag::Flex);
+        let first = element(&mut dom, ElementTag::Div);
+        let second = element(&mut dom, ElementTag::Div);
+        dom.set_style_property(flex, "width", "200px").unwrap();
+        dom.set_style_property(flex, "height", "30px").unwrap();
+        dom.set_style_property(first, "width", "40px").unwrap();
+        dom.set_style_property(first, "height", "20px").unwrap();
+        dom.set_style_property(second, "width", "60px").unwrap();
+        dom.set_style_property(second, "height", "20px").unwrap();
+
+        let grid = dom.create_element(Element::Grid {
+            style: Box::new(GridStyle {
+                template_columns: vec![
+                    GridTemplateComponent::Single(TrackSizingFunction::length(50.0)),
+                    GridTemplateComponent::Single(TrackSizingFunction::fraction(1.0)),
+                ],
+                ..GridStyle::default()
+            }),
+        });
+        let grid_first = element(&mut dom, ElementTag::Div);
+        let grid_second = element(&mut dom, ElementTag::Div);
+        dom.set_style_property(grid, "width", "200px").unwrap();
+        dom.set_style_property(grid, "height", "30px").unwrap();
+
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, flex).unwrap();
+        dom.append_child(flex, first).unwrap();
+        dom.append_child(flex, second).unwrap();
+        dom.append_child(window, grid).unwrap();
+        dom.append_child(grid, grid_first).unwrap();
+        dom.append_child(grid, grid_second).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(400.0, 300.0))
+            .unwrap();
+
+        assert_close(computed.box_for(first).unwrap().layout().location.x, 0.0);
+        assert_close(computed.box_for(second).unwrap().layout().location.x, 40.0);
+        assert_close(
+            computed.box_for(grid_first).unwrap().layout().size.width,
+            50.0,
+        );
+        assert_close(
+            computed.box_for(grid_second).unwrap().layout().size.width,
+            150.0,
+        );
+        assert_close(
+            computed.box_for(grid_second).unwrap().layout().location.x,
+            50.0,
+        );
+    }
+
+    #[test]
+    fn paragraph_descendants_flatten_into_one_measured_leaf() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let first_text = dom.create_text("hello ");
+        let nested = element(&mut dom, ElementTag::Text);
+        let second_text = dom.create_text("world");
+        dom.set_style_property(paragraph, "width", "100px").unwrap();
+        dom.set_style_property(paragraph, "padding", "5px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, paragraph).unwrap();
+        dom.append_child(paragraph, first_text).unwrap();
+        dom.append_child(paragraph, nested).unwrap();
+        dom.append_child(nested, second_text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+
+        assert_eq!(computed.len(), 2);
+        assert_eq!(computed.layout_children(paragraph), Some(Vec::new()));
+        assert_eq!(computed.text_owner(first_text), Some(paragraph));
+        assert_eq!(computed.text_owner(nested), Some(paragraph));
+        assert_eq!(computed.text_owner(second_text), Some(paragraph));
+        assert_close(
+            computed.box_for(paragraph).unwrap().layout().size.width,
+            100.0,
+        );
+        assert!(engine
+            .measurer
+            .calls
+            .iter()
+            .all(|call| call.source == paragraph && call.text == "hello world"));
+        let final_call = engine
+            .measurer
+            .calls
+            .iter()
+            .find(|call| call.final_width_selection)
+            .expect("paragraph selection performs a final-width measurement");
+        assert_eq!(
+            final_call.available_space.width,
+            AvailableSpace::Definite(90.0)
+        );
+    }
+
+    #[test]
+    fn paragraph_baselines_align_in_a_flex_container() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let flex = element(&mut dom, ElementTag::Flex);
+        let low = element(&mut dom, ElementTag::Text);
+        let high = element(&mut dom, ElementTag::Text);
+        let low_text = dom.create_text("low");
+        let high_text = dom.create_text("high");
+        dom.set_style_property(flex, "align-items", "baseline")
+            .unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, flex).unwrap();
+        dom.append_child(flex, low).unwrap();
+        dom.append_child(flex, high).unwrap();
+        dom.append_child(low, low_text).unwrap();
+        dom.append_child(high, high_text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+
+        let low_baseline = computed.box_for(low).unwrap().content_origin().y + 6.0;
+        let high_baseline = computed.box_for(high).unwrap().content_origin().y + 14.0;
+        assert_close(low_baseline, high_baseline);
+    }
+
+    #[test]
+    fn full_rebuild_tracks_reparenting_and_child_order_without_changing_ids() {
+        let mut staging = Dom::new();
+        let window = element(&mut staging, ElementTag::Window);
+        let first_parent = element(&mut staging, ElementTag::Div);
+        let second_parent = element(&mut staging, ElementTag::Div);
+        let child = element(&mut staging, ElementTag::Div);
+        staging.append_child(staging.root(), window).unwrap();
+        staging.append_child(window, first_parent).unwrap();
+        staging.append_child(window, second_parent).unwrap();
+        staging.append_child(first_parent, child).unwrap();
+        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        engine
+            .compute(reader.load(), viewport(300.0, 200.0))
+            .unwrap();
+        assert_eq!(
+            engine
+                .current()
+                .unwrap()
+                .box_for(child)
+                .unwrap()
+                .layout_parent(),
+            Some(first_parent)
+        );
+
+        staging.append_child(second_parent, child).unwrap();
+        staging.insert_child(window, 0, second_parent).unwrap();
+        publisher.checkpoint(&staging).unwrap();
+        let computed = engine
+            .compute(reader.load(), viewport(300.0, 200.0))
+            .unwrap();
+
+        assert_eq!(
+            computed.box_for(child).unwrap().layout_parent(),
+            Some(second_parent)
+        );
+        assert_eq!(
+            computed.layout_children(window),
+            Some(vec![second_parent, first_parent])
+        );
+        assert_eq!(computed.layout_children(second_parent), Some(vec![child]));
+    }
+
+    #[test]
+    fn measurement_failure_keeps_the_previous_complete_revision() {
+        let mut staging = Dom::new();
+        let window = element(&mut staging, ElementTag::Window);
+        let div = element(&mut staging, ElementTag::Div);
+        staging.append_child(staging.root(), window).unwrap();
+        staging.append_child(window, div).unwrap();
+        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+        engine
+            .compute(reader.load(), viewport(300.0, 200.0))
+            .unwrap();
+        let old_publication = Arc::clone(engine.current().unwrap().publication());
+        let old_revision = engine.current().unwrap().revision();
+
+        let paragraph = element(&mut staging, ElementTag::Text);
+        let text = staging.create_text("fails");
+        staging.append_child(window, paragraph).unwrap();
+        staging.append_child(paragraph, text).unwrap();
+        publisher.checkpoint(&staging).unwrap();
+        engine.measurer_mut().fail = true;
+
+        let error = engine
+            .compute(reader.load(), viewport(300.0, 200.0))
+            .unwrap_err();
+
+        assert!(matches!(error, LayoutError::TextMeasurement { .. }));
+        let current = engine.current().unwrap();
+        assert_eq!(current.revision(), old_revision);
+        assert!(Arc::ptr_eq(current.publication(), &old_publication));
+        assert!(current.box_for(paragraph).is_none());
+    }
+
+    #[test]
+    fn old_publication_is_retained_and_viewport_changes_recompute_the_root() {
+        let mut staging = Dom::new();
+        let window = element(&mut staging, ElementTag::Window);
+        staging.append_child(staging.root(), window).unwrap();
+        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
+        let first_publication = reader.load();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+        engine
+            .compute(Arc::clone(&first_publication), viewport(100.0, 80.0))
+            .unwrap();
+
+        staging
+            .set_attribute(window, "title".into(), "new".into())
+            .unwrap();
+        publisher.checkpoint(&staging).unwrap();
+        let newer = reader.load();
+        assert!(newer.revision() > first_publication.revision());
+        assert!(first_publication
+            .snapshot()
+            .attribute(window, "title")
+            .is_none());
+
+        let computed = engine
+            .compute(Arc::clone(&first_publication), viewport(200.0, 150.0))
+            .unwrap();
+        assert_eq!(computed.revision(), first_publication.revision());
+        assert_close(computed.box_for(window).unwrap().layout().size.width, 200.0);
+        assert!(Arc::ptr_eq(computed.publication(), &first_publication));
+    }
+
+    #[test]
+    fn identical_revision_and_viewport_reuse_the_computed_frame() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("cached");
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let published = publication(&dom);
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        engine
+            .compute(Arc::clone(&published), viewport(300.0, 200.0))
+            .unwrap();
+        let call_count = engine.measurer.calls.len();
+        engine
+            .compute(Arc::clone(&published), viewport(300.0, 200.0))
+            .unwrap();
+        assert_eq!(engine.measurer.calls.len(), call_count);
+
+        engine.measurer_mut().generation += 1;
+        engine
+            .compute(Arc::clone(&published), viewport(300.0, 200.0))
+            .unwrap();
+        assert!(engine.measurer.calls.len() > call_count);
+        assert_eq!(engine.current().unwrap().text_generation(), 1);
+    }
+
+    #[test]
+    fn absolute_content_origins_include_parent_padding_once() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let parent = element(&mut dom, ElementTag::Div);
+        let child = element(&mut dom, ElementTag::Div);
+        dom.set_style_property(parent, "padding", "7.5px").unwrap();
+        dom.set_style_property(child, "width", "20px").unwrap();
+        dom.set_style_property(child, "height", "10px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, parent).unwrap();
+        dom.append_child(parent, child).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+        let parent_box = computed.box_for(parent).unwrap();
+        let child_box = computed.box_for(child).unwrap();
+
+        assert_close(
+            parent_box.content_origin().x - parent_box.border_origin().x,
+            7.5,
+        );
+        assert_close(
+            parent_box.content_origin().y - parent_box.border_origin().y,
+            7.5,
+        );
+        assert_close(child_box.border_origin().x, parent_box.content_origin().x);
+        assert_close(child_box.border_origin().y, parent_box.content_origin().y);
+    }
+
+    #[test]
+    fn excessive_layout_depth_is_rejected_before_taffy_recursion() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        dom.append_child(dom.root(), window).unwrap();
+        let mut parent = window;
+        for _ in 0..=crate::ui::layout::reconcile::MAX_LAYOUT_DEPTH {
+            let child = element(&mut dom, ElementTag::Div);
+            dom.append_child(parent, child).unwrap();
+            parent = child;
+        }
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let error = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap_err();
+
+        assert!(matches!(error, LayoutError::TreeTooDeep { .. }));
+        assert!(engine.current().is_none());
+    }
+
+    #[test]
+    fn invalid_viewports_are_rejected_before_layout() {
+        assert!(matches!(
+            LogicalViewport::new(f32::NAN, 10.0),
+            Err(LayoutError::InvalidViewport { .. })
+        ));
+        assert!(matches!(
+            LogicalViewport::new(10.0, -1.0),
+            Err(LayoutError::InvalidViewport { .. })
+        ));
+    }
+}

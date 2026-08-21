@@ -9,7 +9,14 @@ license = "MIT"
 arc-swap = "1"
 runtime = { path = "../runtime" }
 slotmap = "1"
-taffy = { version = "0.11", features = ["parse"] }
+taffy = { version = "0.11", default-features = false, features = [
+    "std",
+    "block_layout",
+    "flexbox",
+    "grid",
+    "content_size",
+    "parse",
+] }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
 vello_common = { version = "0.2", default-features = false, features = ["std"] }
