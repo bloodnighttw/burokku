@@ -87,6 +87,7 @@ impl Runtime {
         let context = AsyncContext::full(&quickjs).await?;
         let role = builder.role;
         let macrotask_capacity = builder.macrotask_capacity;
+        let plugins = builder.plugins;
 
         context
             .with(move |context| {
@@ -100,15 +101,8 @@ impl Runtime {
             .await?;
 
         let (macrotasks, control, stopped) =
-            event_loop::install(&context, macrotask_capacity).await?;
-        context
-            .with(move |context| {
-                for plugin in &builder.plugins {
-                    plugin.install(&context)?;
-                }
-                installer(&context)
-            })
-            .await?;
+            event_loop::install(&context, macrotask_capacity, plugins).await?;
+        context.with(move |context| installer(&context)).await?;
 
         let driver = RuntimeDriver {
             context: Some(context),
@@ -236,12 +230,33 @@ impl std::fmt::Debug for RuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::Runtime;
-    use crate::{MacrotaskQueue, MacrotaskQueueError, RuntimeRole};
+    use crate::{MacrotaskQueue, MacrotaskQueueError, Plugin, RuntimeRole};
     use rquickjs::{prelude::Func, Ctx};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicI32, Ordering},
+        Arc, Mutex,
     };
+
+    struct RecordingCheckpoint {
+        current_value: Arc<AtomicI32>,
+        values: Arc<Mutex<Vec<i32>>>,
+    }
+
+    impl Plugin for RecordingCheckpoint {
+        fn install<'js>(&self, context: &Ctx<'js>) -> crate::Result<()> {
+            let current_value = self.current_value.clone();
+            context.globals().set(
+                "setCheckpointValue",
+                Func::from(move |value| current_value.store(value, Ordering::Release)),
+            )
+        }
+
+        fn checkpoint(&mut self) -> crate::Result<()> {
+            let value = self.current_value.load(Ordering::Acquire);
+            self.values.lock().unwrap().push(value);
+            Ok(())
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluates_javascript() {
@@ -334,6 +349,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn plugin_checkpoint_runs_after_microtasks_and_failed_macrotasks() {
+        let current_value = Arc::new(AtomicI32::new(0));
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::builder()
+            .plugin(RecordingCheckpoint {
+                current_value,
+                values: values.clone(),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        runtime
+            .eval::<()>(
+                "setCheckpointValue(1); \
+                 Promise.resolve().then(() => setCheckpointValue(2))",
+            )
+            .await
+            .unwrap();
+        assert_eq!(*values.lock().unwrap(), [2]);
+
+        assert!(runtime
+            .eval::<()>("setCheckpointValue(7); throw new Error('failed')")
+            .await
+            .is_err());
+        assert_eq!(*values.lock().unwrap(), [2, 7]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn explicitly_driven_runtime_executes_queued_work() {
         let (runtime, driver) = Runtime::builder().build_driven().await.unwrap();
         let driver = tokio::spawn(driver.run());
@@ -352,8 +396,11 @@ mod tests {
             .unwrap();
         let queue = runtime.macrotask_queue();
 
+        assert_eq!(queue.max_capacity(), 1);
+        assert_eq!(queue.depth(), 0);
         queue.try_enqueue(|_| Ok(())).unwrap();
         assert_eq!(queue.capacity(), 0);
+        assert_eq!(queue.depth(), 1);
         assert_eq!(
             queue.try_enqueue(|_| Ok(())),
             Err(MacrotaskQueueError::Full)

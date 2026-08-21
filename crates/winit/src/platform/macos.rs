@@ -8,7 +8,7 @@ use std::{
     sync::{atomic::Ordering, Arc, Weak},
 };
 
-use crate::window::WindowState;
+use crate::{event_loop::EventLoopWaker, window::WindowState};
 use crate::{
     ElementState, Error, KeyEvent, Modifiers, MouseButton, PhysicalPosition, PhysicalSize, Window,
     WindowAttributes, WindowEvent, WindowId,
@@ -415,7 +415,11 @@ impl PlatformEventLoop {
         })
     }
 
-    pub(crate) fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
+    pub(crate) fn create_window(
+        &mut self,
+        attributes: WindowAttributes,
+        event_loop_waker: EventLoopWaker,
+    ) -> crate::Result<Window> {
         if !(attributes.inner_size.width.is_finite()
             && attributes.inner_size.height.is_finite()
             && attributes.inner_size.width > 0.0
@@ -461,6 +465,7 @@ impl PlatformEventLoop {
                 physical_dimension(attributes.inner_size.height, scale_factor),
             ),
             scale_factor,
+            event_loop_waker,
         ));
 
         native_window.setTitle(&NSString::from_str(&attributes.title));
@@ -593,12 +598,14 @@ impl PlatformEventLoop {
                     ElementState::Released
                 },
                 button: mouse_button(event.buttonNumber()),
+                position: cursor_position(event, &state),
             }
         } else if event_type == NSEventType::ScrollWheel {
             WindowEvent::MouseWheel {
                 delta_x: event.scrollingDeltaX(),
                 delta_y: event.scrollingDeltaY(),
                 precise: event.hasPreciseScrollingDeltas(),
+                position: cursor_position(event, &state),
             }
         } else {
             return None;
