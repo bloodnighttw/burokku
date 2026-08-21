@@ -214,7 +214,7 @@ impl NodeKind {
                         | Element::Flex { .. }
                         | Element::Grid { .. }
                         | Element::Text { .. }
-                ) | Self::Text(_)
+                )
             ),
             // A styled <text> is a rich-text container: raw text nodes hold its
             // content, while nested <text> elements introduce styled text runs.
@@ -652,11 +652,12 @@ impl Dom {
         Ok(true)
     }
 
-    /// Replaces an element's children with one raw text node.
+    /// Replaces a styled text element's children with one raw text node.
     ///
     /// Existing children are detached rather than permanently removed so live
-    /// JavaScript wrappers can continue to use them. Text nodes are updated in
-    /// place. The app root rejects assignment because it cannot accept text.
+    /// JavaScript wrappers can continue to use them. Raw text nodes are updated
+    /// in place. App and non-text elements reject assignment because raw text
+    /// may only be attached beneath a styled text element.
     pub fn set_text_content(
         &mut self,
         id: NodeId,
@@ -666,8 +667,10 @@ impl Dom {
         let node = self.node(id).ok_or(DomError::NodeNotFound(id))?;
         match node.kind() {
             NodeKind::Text(_) => return self.set_text(id, text),
-            NodeKind::App => return Err(DomError::TextContentNotSupported(id)),
-            NodeKind::Element(_) => {}
+            NodeKind::Element(Element::Text { .. }) => {}
+            NodeKind::App | NodeKind::Element(_) => {
+                return Err(DomError::TextContentNotSupported(id));
+            }
         }
 
         if let [only_child] = node.children.as_slice() {
@@ -1606,7 +1609,7 @@ mod tests {
     #[test]
     fn removing_a_subtree_invalidates_descendants() {
         let mut dom = Dom::new();
-        let parent = dom.create_element(Element::Div {
+        let parent = dom.create_element(Element::Text {
             style: Box::default(),
         });
         let child = dom.create_text("content");
@@ -1619,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_elements_accept_text_nodes_directly() {
+    fn ordinary_elements_reject_text_nodes_without_mutation() {
         let mut dom = Dom::new();
         let parents = [
             dom.create_element(Element::Window {
@@ -1638,9 +1641,22 @@ mod tests {
 
         for parent in parents {
             let text = dom.create_text("content");
-            dom.append_child(parent, text).unwrap();
-            assert_eq!(dom.parent(text), Some(parent));
-            assert_eq!(dom.text(text), Some("content"));
+            let revision = dom.revision();
+            let parent_revisions = dom.node(parent).unwrap().revisions();
+            let text_revisions = dom.node(text).unwrap().revisions();
+
+            assert_eq!(
+                dom.append_child(parent, text),
+                Err(DomError::InvalidRelationship {
+                    parent,
+                    child: text,
+                })
+            );
+            assert!(dom.children(parent).unwrap().is_empty());
+            assert_eq!(dom.parent(text), None);
+            assert_eq!(dom.revision(), revision);
+            assert_eq!(dom.node(parent).unwrap().revisions(), parent_revisions);
+            assert_eq!(dom.node(text).unwrap().revisions(), text_revisions);
         }
     }
 
@@ -1708,7 +1724,7 @@ mod tests {
         let window = dom.create_element_tag(ElementTag::Window);
         let parent = dom.create_element_tag(ElementTag::Div);
         let first = dom.create_element_tag(ElementTag::Div);
-        let second = dom.create_text("second");
+        let second = dom.create_element_tag(ElementTag::Text);
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, parent).unwrap();
         dom.append_child(parent, first).unwrap();
@@ -1814,6 +1830,28 @@ mod tests {
             dom.set_text_content(dom.root(), "invalid"),
             Err(DomError::TextContentNotSupported(dom.root()))
         );
+
+        for tag in [
+            ElementTag::Window,
+            ElementTag::Div,
+            ElementTag::Flex,
+            ElementTag::Grid,
+        ] {
+            let non_text = dom.create_element_tag(tag);
+            let old_child = dom.create_element_tag(ElementTag::Div);
+            dom.append_child(non_text, old_child).unwrap();
+            let revision = dom.revision();
+            let children = dom.children(non_text).unwrap().to_vec();
+            let revisions = dom.node(non_text).unwrap().revisions();
+
+            assert_eq!(
+                dom.set_text_content(non_text, "invalid"),
+                Err(DomError::TextContentNotSupported(non_text))
+            );
+            assert_eq!(dom.children(non_text), Some(children.as_slice()));
+            assert_eq!(dom.node(non_text).unwrap().revisions(), revisions);
+            assert_eq!(dom.revision(), revision);
+        }
     }
 
     #[test]
@@ -1826,12 +1864,12 @@ mod tests {
 
         let detached_root = dom.create_element_tag(ElementTag::Div);
         let live_descendant = dom.create_element_tag(ElementTag::Div);
-        let sibling = dom.create_text("sibling");
+        let sibling = dom.create_element_tag(ElementTag::Text);
         dom.append_child(detached_root, live_descendant).unwrap();
         dom.append_child(detached_root, sibling).unwrap();
 
         let unreachable = dom.create_element_tag(ElementTag::Grid);
-        let unreachable_child = dom.create_text("unused");
+        let unreachable_child = dom.create_element_tag(ElementTag::Div);
         dom.append_child(unreachable, unreachable_child).unwrap();
         let before_reclaim = dom.revision();
 

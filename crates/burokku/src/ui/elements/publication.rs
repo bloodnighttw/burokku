@@ -240,9 +240,9 @@ impl DomPublisher {
     ///
     /// The initial staging state becomes the immutable baseline without
     /// emitting a notification.
-    /// 
+    ///
     /// you should pass your custom notifier, for example:
-    /// ```rust
+    /// ```ignore
     /// let (publisher, reader) = DomPublisher::new(&staging, {
     ///     let count = Arc::new(AtomicUsize::new(0));
     ///     let count_clone = count.clone();
@@ -394,10 +394,14 @@ mod tests {
         let div = staging.create_element(Element::Div {
             style: Box::default(),
         });
+        let paragraph = staging.create_element(Element::Text {
+            style: Box::default(),
+        });
         let text = staging.create_text("before");
         staging.append_child(staging.root(), window).unwrap();
         staging.append_child(window, div).unwrap();
-        staging.append_child(div, text).unwrap();
+        staging.append_child(div, paragraph).unwrap();
+        staging.append_child(paragraph, text).unwrap();
         staging
             .set_attribute(div, "role".into(), "status".into())
             .unwrap();
@@ -410,7 +414,7 @@ mod tests {
         assert_eq!(old_frame.snapshot().iter().count(), 1);
         assert!(!old_frame.snapshot().contains(window));
         assert_eq!(first_frame.revision(), first_revision);
-        assert_eq!(first_frame.snapshot().parent(text), Some(div));
+        assert_eq!(first_frame.snapshot().parent(text), Some(paragraph));
         assert_eq!(first_frame.snapshot().text(text), Some("before"));
         assert_eq!(
             first_frame.snapshot().attribute(div, "role"),
@@ -440,14 +444,14 @@ mod tests {
     #[test]
     fn no_op_and_invalid_mutations_do_not_publish() {
         let mut staging = Dom::new();
-        let div = staging.create_element(Element::Div {
+        let paragraph = staging.create_element(Element::Text {
             style: Box::default(),
         });
         let text = staging.create_text("same");
         staging
-            .set_attribute(div, "role".into(), "status".into())
+            .set_attribute(paragraph, "role".into(), "status".into())
             .unwrap();
-        staging.append_child(div, text).unwrap();
+        staging.append_child(paragraph, text).unwrap();
         let baseline_revision = staging.revision();
         let notification_count = Arc::new(AtomicUsize::new(0));
         let (mut publisher, reader) = DomPublisher::new(&staging, {
@@ -460,12 +464,12 @@ mod tests {
 
         staging.set_text(text, "same").unwrap();
         staging
-            .set_attribute(div, "role".into(), "status".into())
+            .set_attribute(paragraph, "role".into(), "status".into())
             .unwrap();
-        staging.append_child(div, text).unwrap();
-        staging.detach(div).unwrap();
+        staging.append_child(paragraph, text).unwrap();
+        staging.detach(paragraph).unwrap();
         assert!(matches!(
-            staging.append_child(text, div),
+            staging.append_child(text, paragraph),
             Err(super::super::DomError::InvalidRelationship { .. })
         ));
 
@@ -515,6 +519,9 @@ mod tests {
         let div = staging.create_element(Element::Div {
             style: Box::default(),
         });
+        let paragraph = staging.create_element(Element::Text {
+            style: Box::default(),
+        });
         let text = staging.create_text("before");
         let detached = staging.create_element(Element::Grid {
             style: Box::default(),
@@ -524,7 +531,8 @@ mod tests {
             .unwrap();
         staging.append_child(staging.root(), window).unwrap();
         staging.append_child(window, div).unwrap();
-        staging.append_child(div, text).unwrap();
+        staging.append_child(div, paragraph).unwrap();
+        staging.append_child(paragraph, text).unwrap();
 
         let snapshot = DomSnapshot::from_staging(&staging);
         let snapshot_revision = snapshot.revision();
@@ -541,24 +549,27 @@ mod tests {
         ));
         assert_eq!(snapshot.text(text), Some("before"));
         assert_eq!(snapshot.attribute(div, "role"), Some("status"));
-        assert_eq!(snapshot.parent(text), Some(div));
-        assert_eq!(snapshot.children(div), Some(&[text][..]));
-        assert_eq!(snapshot.node(text).unwrap().parent(), Some(div));
+        assert_eq!(snapshot.parent(text), Some(paragraph));
+        assert_eq!(snapshot.children(div), Some(&[paragraph][..]));
+        assert_eq!(snapshot.children(paragraph), Some(&[text][..]));
+        assert_eq!(snapshot.node(text).unwrap().parent(), Some(paragraph));
         assert_eq!(
             snapshot.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-            vec![snapshot.root(), window, div, text]
+            vec![snapshot.root(), window, div, paragraph, text]
         );
-        assert_eq!((&snapshot).into_iter().count(), 4);
+        assert_eq!((&snapshot).into_iter().count(), 5);
 
         staging.set_text(text, "after").unwrap();
         staging.remove_subtree(div).unwrap();
 
         assert_eq!(snapshot.revision(), snapshot_revision);
         assert_eq!(snapshot.text(text), Some("before"));
-        assert_eq!(snapshot.parent(text), Some(div));
+        assert_eq!(snapshot.parent(text), Some(paragraph));
         assert!(snapshot.contains(div));
+        assert!(snapshot.contains(paragraph));
         assert!(snapshot.contains(text));
         assert!(!staging.contains(div));
+        assert!(!staging.contains(paragraph));
         assert!(!staging.contains(text));
     }
 

@@ -2,9 +2,12 @@
 
 ## Status
 
-This document plans the complete text path. It does not add Parley or a shaping
-module yet. Those dependencies and modules should be introduced when Taffy
-measurement and Vello glyph rendering are implemented together.
+This document defines the complete text-path contract. The current-tree
+execution plan is in
+[`dom_problem_6_implementation_plan.md`](dom_problem_6_implementation_plan.md).
+It does not add Parley or a shaping module yet. Those dependencies and modules
+should be introduced when Taffy measurement and Vello glyph rendering are
+implemented together.
 
 The current foundation already has:
 
@@ -15,18 +18,19 @@ The current foundation already has:
 - validated style properties for font family, size, weight, color, line height,
   and wrapping.
 
-The missing work is DOM text behavior, paragraph/run collection, shaping,
-measurement, caching, and painting.
+The remaining work is paragraph/run collection, shaping, measurement, caching,
+and painting.
 
 ## Goals
 
-1. `textContent` and raw text updates have explicit DOM semantics.
-2. Nested `<text>` elements become inherited styled runs in one paragraph.
-3. Parley shapes each paragraph using the width constraints supplied by Taffy.
-4. Taffy receives correct intrinsic width and height for text leaves.
-5. Vello renders the exact Parley layout used during measurement.
-6. Text, style, width, and font changes invalidate the correct cached state.
-7. Every frame uses text, layout, and paint data from one committed DOM
+1. Raw text nodes can be attached only beneath `<text>` elements.
+2. `textContent` and raw text updates have explicit DOM semantics.
+3. Nested `<text>` elements become inherited styled runs in one paragraph.
+4. Parley shapes each paragraph using the width constraints supplied by Taffy.
+5. Taffy receives correct intrinsic width and height for text leaves.
+6. Vello renders the exact Parley layout used during measurement.
+7. Text, style, width, and font changes invalidate the correct cached state.
+8. Every frame uses text, layout, and paint data from one committed DOM
    revision.
 
 ## Non-goals for the first implementation
@@ -81,16 +85,23 @@ create inline boxes. Width, height, margin, padding, and background paint on a
 nested span are outside the initial contract. This limitation must be tested
 and documented rather than silently treated as a second block.
 
-### Raw text under a non-text element
+### Strict text placement
 
-The current DOM permits raw text beneath `Window`, `Div`, `Flex`, and `Grid`.
-Initially, each such raw text node becomes a standalone text leaf using
-`ComputedTextStyle::default()`. It is keyed by the raw node's `NodeId` and
-participates in the parent's normal Taffy child order.
+A raw `NodeKind::Text` may be attached only beneath `Element::Text`. A text
+element may contain raw text nodes and nested text elements recursively.
+`Window`, `Div`, `Flex`, and `Grid` may contain an explicit `Element::Text`, but
+must reject a raw text child.
 
-This provides deterministic behavior without implementing a browser inline
-formatting context. A later implementation may group adjacent raw text into
-anonymous paragraphs.
+```text
+valid:   <div><text>Hello <text>nested style</text></text></div>
+invalid: <div>Hello</div>
+```
+
+`app.createTextNode(...)` may create a detached node, but inserting it beneath a
+non-text parent must fail atomically. The DOM must not silently create an
+anonymous text element because that would change observable structure and
+wrapper identity. This contract deliberately avoids browser inline formatting
+inside ordinary containers.
 
 ### Empty text
 
@@ -113,17 +124,20 @@ Required behavior:
 - A getter on a raw text node returns its data.
 - A getter on an element concatenates descendant raw text in tree order.
 - A setter on a raw text node updates that node in place.
-- A setter on an element detaches its existing children and inserts one raw
+- A setter on `Element::Text` detaches its existing children and inserts one raw
   text child containing the assigned value.
-- Replaced children remain valid while retained by JavaScript wrappers. The
-  setter must not permanently reclaim them.
+- A setter on `App`, `Window`, `Div`, `Flex`, or `Grid` is rejected without
+  changing children or revisions.
+- Replaced text-element children remain valid while retained by JavaScript
+  wrappers. The setter must not permanently reclaim them.
 - Assigning the same effective value is a no-op where structure does not need
   to change.
 - `nodeValue` and `data` update only existing raw text nodes.
 
-The future QuickJS DOM facade maps JavaScript `textContent`, `nodeValue`, and
+The QuickJS DOM facade maps JavaScript `textContent`, `nodeValue`, and
 `Text.data` to these operations. `title.textContent = "Click counter"` must
-therefore construct a raw child synchronously in the BTS staging DOM.
+therefore construct a raw child synchronously when `title` is a text element;
+the same assignment on a non-text element must throw the mapped native error.
 
 ## Paragraph collection
 
@@ -232,11 +246,11 @@ later only with tests covering fractional display scales.
 - An outermost `Element::Text` is represented by one measured Taffy leaf.
 - Nested text elements and their raw children are consumed by that leaf and do
   not receive separate Taffy nodes.
-- A raw text node directly under a non-text element is represented by one
-  measured Taffy leaf using default typography.
+- Attached raw text outside an `Element::Text` is a DOM invariant violation and
+  must not receive a fallback Taffy node.
 
-The reconciler needs a mapping from each renderable text source `NodeId` to its
-Taffy leaf and cached paragraph state.
+The reconciler needs a mapping from each outer text source `NodeId` to its Taffy
+leaf and cached paragraph state.
 
 ### Measurement callback
 
@@ -364,17 +378,23 @@ the last valid presented scene where possible and schedule/report the failure.
 
 ## Implementation sequence
 
-### Phase 1: DOM text semantics
+### Phase 1: DOM text semantics and placement
 
-- Add native `text_content` and `set_text_content` operations.
+**Status: implemented.**
+
+- Restrict raw text children to `Element::Text`; retain recursive nested text
+  elements.
+- Reject raw insertion and `textContent` assignment on non-text containers
+  without mutation.
+- Keep native `text_content`, text-element `set_text_content`, and raw
+  `set_text` operations.
 - Preserve detached replaced children for live wrapper identity.
-- Add raw `nodeValue`/`data` behavior.
-- Add subtree concatenation and no-op tests.
-- Connect these operations to the future QuickJS DOM facade.
+- Keep raw `nodeValue`/`data` behavior.
+- Add subtree concatenation, no-op, invalid-parent, and facade error tests.
 
 ### Phase 2: Paragraph and run collection
 
-- Define paragraph roots and standalone raw text leaves.
+- Define outer text elements as the only paragraph roots.
 - Implement inherited style collection and adjacent-run merging.
 - Generate deterministic text/style fingerprints.
 - Add UTF-8, nested span, reparenting, empty-string, and deep-tree tests.
@@ -421,8 +441,14 @@ the last valid presented scene where possible and schedule/report the failure.
 
 ### DOM
 
+- Raw text insertion succeeds only beneath a text element.
+- Text elements can nest recursively and contain raw text.
+- Raw text insertion beneath `App`, `Window`, `Div`, `Flex`, or `Grid` fails
+  without mutation.
 - `textContent` getter concatenates nested descendant text in order.
-- `textContent` setter leaves one raw child and detaches previous children.
+- A text-element `textContent` setter leaves one raw child and detaches previous
+  children.
+- A non-text-element `textContent` setter fails without mutation.
 - `nodeValue` updates only raw text nodes.
 - Live wrappers to replaced children remain valid and detached.
 

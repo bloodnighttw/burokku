@@ -160,18 +160,21 @@ mod tests {
                     "globalThis.kept = {};\
                      kept.window = app.createElement('window');\
                      kept.div = app.createElement('div');\
+                     kept.paragraph = app.createElement('text');\
                      kept.text = app.createTextNode('before');\
                      kept.div.setAttribute('role', 'status');\
                      kept.div.style.setProperty('width', '20px');\
-                     kept.div.appendChild(kept.text);\
+                     kept.paragraph.appendChild(kept.text);\
+                     kept.div.appendChild(kept.paragraph);\
                      kept.window.appendChild(kept.div);\
                      app.appendChild(kept.window);\
                      kept.text.data = 'after';\
                      [\
                        app.firstChild === kept.window,\
                        kept.window.firstChild === kept.div,\
-                       kept.div.firstChild === kept.text,\
-                       kept.text.parentNode === kept.div,\
+                       kept.div.firstChild === kept.paragraph,\
+                       kept.paragraph.firstChild === kept.text,\
+                       kept.text.parentNode === kept.paragraph,\
                        kept.text.textContent === 'after',\
                        kept.div.getAttribute('role') === 'status',\
                        kept.div.style === kept.div.style,\
@@ -179,7 +182,10 @@ mod tests {
                      ]",
                 )
                 .unwrap();
-            assert_eq!(values, [true, true, true, true, true, true, true, true]);
+            assert_eq!(
+                values,
+                [true, true, true, true, true, true, true, true, true]
+            );
         });
 
         assert_eq!(reader.load().revision(), 0);
@@ -188,7 +194,8 @@ mod tests {
         let snapshot = published.snapshot();
         let window = snapshot.children(snapshot.root()).unwrap()[0];
         let div = snapshot.children(window).unwrap()[0];
-        let text = snapshot.children(div).unwrap()[0];
+        let paragraph = snapshot.children(div).unwrap()[0];
+        let text = snapshot.children(paragraph).unwrap()[0];
 
         assert!(matches!(
             snapshot.kind(window),
@@ -204,6 +211,89 @@ mod tests {
 
         plugin.checkpoint().unwrap();
         assert_eq!(notifications.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn facade_enforces_text_only_raw_children_without_partial_mutation() {
+        let (plugin, _) = DomPlugin::new(|_| {});
+        let (_runtime, context) = context();
+
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    "globalThis.strictParents = ['window', 'div', 'flex', 'grid']\
+                       .map(tag => app.createElement(tag));\
+                     globalThis.strictTexts = strictParents\
+                       .map(() => app.createTextNode('invalid'));\
+                     globalThis.strictGuard = app.createElement('div');\
+                     globalThis.strictGuardChild = app.createElement('grid');\
+                     strictGuard.appendChild(strictGuardChild);",
+                )
+                .unwrap();
+        });
+        let revision = plugin.state().staging.revision();
+
+        context.with(|context| {
+            let results: Vec<String> = context
+                .eval(
+                    "(() => {\
+                       const results = [];\
+                       for (let index = 0; index < strictParents.length; index++) {\
+                         try {\
+                           strictParents[index].appendChild(strictTexts[index]);\
+                           results.push('no error');\
+                         } catch (error) {\
+                           results.push(error.name);\
+                         }\
+                       }\
+                       try {\
+                         strictGuard.textContent = 'invalid';\
+                         results.push('no error');\
+                       } catch (error) {\
+                         results.push(error.name);\
+                       }\
+                       results.push(String(strictParents.every((parent, index) =>\
+                         parent.childNodes.length === 0\
+                           && strictTexts[index].parentNode === null)));\
+                       results.push(String(strictGuard.firstChild === strictGuardChild));\
+                       return results;\
+                     })()",
+                )
+                .unwrap();
+            assert_eq!(
+                results,
+                [
+                    "HierarchyRequestError",
+                    "HierarchyRequestError",
+                    "HierarchyRequestError",
+                    "HierarchyRequestError",
+                    "InvalidNodeTypeError",
+                    "true",
+                    "true",
+                ]
+            );
+        });
+        assert_eq!(plugin.state().staging.revision(), revision);
+
+        context.with(|context| {
+            assert!(context
+                .eval::<bool, _>(
+                    "globalThis.strictOuter = app.createElement('text');\
+                     globalThis.strictInner = app.createElement('text');\
+                     globalThis.strictOuterRaw = app.createTextNode('outer ');\
+                     globalThis.strictInnerRaw = app.createTextNode('inner');\
+                     strictOuter.appendChild(strictOuterRaw);\
+                     strictInner.appendChild(strictInnerRaw);\
+                     strictOuter.appendChild(strictInner);\
+                     strictOuter.childNodes.length === 2\
+                       && strictOuter.firstChild === strictOuterRaw\
+                       && strictOuter.lastChild === strictInner\
+                       && strictInner.firstChild === strictInnerRaw\
+                       && strictOuter.textContent === 'outer inner'",
+                )
+                .unwrap());
+        });
     }
 
     #[test]
@@ -251,7 +341,7 @@ mod tests {
                     "(() => {\
                        const root = app.createElement('div');\
                        const child = app.createElement('div');\
-                       const sibling = app.createTextNode('sibling');\
+                       const sibling = app.createElement('grid');\
                        root.appendChild(child);\
                        root.appendChild(sibling);\
                        globalThis.keptChild = child;\
@@ -274,7 +364,7 @@ mod tests {
                        const root = keptChild.parentNode;\
                        return root.childNodes.length === 2\
                          && root.firstChild === keptChild\
-                         && root.lastChild.textContent === 'sibling';\
+                         && root.lastChild.localName === 'grid';\
                      })()",
                 )
                 .unwrap());
@@ -447,8 +537,10 @@ mod tests {
         runtime
             .eval::<()>(
                 "globalThis.windowNode = app.createElement('window');\
+                 globalThis.paragraphNode = app.createElement('text');\
                  globalThis.textNode = app.createTextNode('before');\
-                 windowNode.appendChild(textNode);\
+                 paragraphNode.appendChild(textNode);\
+                 windowNode.appendChild(paragraphNode);\
                  app.appendChild(windowNode);\
                  Promise.resolve().then(() => { textNode.data = 'microtask' })",
             )
@@ -456,7 +548,8 @@ mod tests {
             .unwrap();
         let first = reader.load();
         let window = first.snapshot().children(first.snapshot().root()).unwrap()[0];
-        let text = first.snapshot().children(window).unwrap()[0];
+        let paragraph = first.snapshot().children(window).unwrap()[0];
+        let text = first.snapshot().children(paragraph).unwrap()[0];
         assert_eq!(first.snapshot().text(text), Some("microtask"));
         let first_revision = first.revision();
 

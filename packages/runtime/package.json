@@ -14,7 +14,7 @@
     }
   },
   "scripts": {
-    "build": "rm -rf dist && rolldown -c && tsc -p tsconfig.build.json",
+    "build": "tsc --noEmit && rm -rf dist && rolldown -c && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
