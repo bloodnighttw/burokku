@@ -144,27 +144,32 @@ genuinely reclaimed node should produce a stale `NodeId`.
 Problems 4 and 5 are one implementation workstream. The detailed contract and
 sequence are in `docs/dom_facade_lifetime_plan.md`.
 
-## 6. Text DOM behavior, shaping, and measurement are incomplete
+## 6. Text DOM behavior, shaping, and measurement
 
-The current foundation has raw `NodeKind::Text`, styled `Element::Text`,
-validated typography, inherited `ComputedTextStyle`, native/JavaScript text
-accessors, and a strict text child model. Raw text nodes can be attached only
-beneath `Element::Text`; text elements may nest recursively. Non-text
-`textContent` assignment is rejected without mutation.
+**Status: initial MTS text pipeline completed.** The implementation in
+`crates/burokku/src/ui/text/` now provides:
 
-It does not yet have a working layout and paint pipeline. Missing work includes:
+- iterative collection of nested styled text into fully inherited UTF-8 runs;
+- deterministic complete-input fingerprints;
+- reusable Parley font/layout contexts and complete style translation;
+- min-content, max-content, and exact finite-width shaping;
+- a bounded per-source shaped-layout cache keyed by input, width, and font
+  generation;
+- one measured Taffy leaf per outer text element, with nested text descendants
+  omitted from layout topology;
+- first-baseline propagation and exact final-content-width selection;
+- revision-safe retention of the selected `ShapedParagraph` in
+  `ComputedLayout`;
+- a Vello Hybrid glyph adapter that paints that same selected layout without
+  reshaping or copying font bytes;
+- deterministic tests using an embedded licensed Noto Sans fixture.
 
-- collecting nested styled text into inherited runs;
-- Parley shaping and glyph layout;
-- a Taffy measurement callback for paragraph leaves;
-- invalidating an enclosing paragraph when descendant text or style changes;
-- caching shaped paragraphs by revision, width constraint, and font state;
-- painting the exact shaped layout used for measurement.
-
-An outer styled text element should own one measured Taffy leaf. Nested styled
-text elements are runs within that paragraph and must not become independent
-Taffy layout nodes. There is no standalone raw-text Taffy leaf fallback for an
-invalid non-text parent.
+The current full-rebuild publication path correctly recollects descendant text
+and style changes. Incremental `text_dirty` batches remain a Problem 3
+optimization. The native scene/presentation host must call the glyph adapter as
+part of Problem 8, and live native viewport ownership remains Problem 10; until
+those workstreams land, text is computed and paint-ready but not presented by
+an end-to-end application host.
 
 The detailed implementation contract is in `docs/text_rendering_plan.md`.
 
@@ -190,10 +195,10 @@ It now provides:
 - a derived-topology boundary that can later represent positioned containing
   blocks separately from DOM and paint/stacking relationships.
 
-Remaining integration is tracked by the adjacent workstreams: Parley implements
-the real text measurer in Problem 6, the native host supplies live viewports in
-Problem 10, and a bounded incremental `ChangeSet` can replace full rebuilding
-after Problem 3 defines its protocol.
+Remaining integration is tracked by the adjacent workstreams: the Problem 8
+scene host consumes the selected Parley layout through the glyph adapter, the
+native host supplies live viewports in Problem 10, and a bounded incremental
+`ChangeSet` can replace full rebuilding after Problem 3 defines its protocol.
 
 The detailed design and follow-up stages are in
 `docs/dom_problem_7_taffy_trait_plan.md`.
