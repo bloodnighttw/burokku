@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     rc::{Rc, Weak},
     sync::Arc,
     time::{Duration, Instant},
@@ -47,6 +48,36 @@ impl EventLoopWaker {
     }
 }
 
+/// Buffers native events until the event loop is outside both the platform
+/// pump and the current application callback.
+///
+/// AppKit may synchronously emit events while an application callback creates
+/// or resizes a window. The platform handler must therefore only enqueue: if it
+/// called the application directly, it would reentrantly borrow the handler.
+#[derive(Clone, Default)]
+struct WindowEventQueue {
+    pending: Rc<RefCell<VecDeque<(WindowId, WindowEvent)>>>,
+}
+
+impl WindowEventQueue {
+    fn handler(&self) -> impl FnMut(WindowId, WindowEvent) + 'static {
+        let queue = self.clone();
+        move |window_id, event| queue.pending.borrow_mut().push_back((window_id, event))
+    }
+
+    fn drain(&self, mut dispatch: impl FnMut(WindowId, WindowEvent)) {
+        loop {
+            // Drop the queue borrow before dispatching. The application may
+            // synchronously cause another native event while handling this one.
+            let event = self.pending.borrow_mut().pop_front();
+            let Some((window_id, event)) = event else {
+                break;
+            };
+            dispatch(window_id, event);
+        }
+    }
+}
+
 /// A thread-safe handle for promptly waking an idle native event loop.
 ///
 /// Waking does not itself dispatch an application event. It causes the loop to
@@ -78,9 +109,9 @@ pub struct ActiveEventLoop {
 impl ActiveEventLoop {
     /// Create and show a native window on the event-loop thread.
     ///
-    /// Call this from `resumed` or `about_to_wait`. Creating a window directly
-    /// from a native `window_event` callback is not supported because the
-    /// platform event pump is already borrowed for dispatch.
+    /// Call this from an [`ApplicationHandler`] callback on the event-loop
+    /// thread. Native events emitted synchronously during creation are queued
+    /// until the current callback returns.
     pub fn create_window(&self, attributes: WindowAttributes) -> crate::Result<Window> {
         self.platform
             .upgrade()
@@ -172,24 +203,27 @@ impl EventLoop {
         }
         self.has_run = true;
 
-        let application = Rc::new(RefCell::new(application));
+        let mut application = application;
+        let events = WindowEventQueue::default();
+        self.platform.borrow().set_handler(events.handler());
 
-        self.platform.borrow().set_handler({
-            let application = application.clone();
-            let active = self.active.clone();
-            move |window_id, event| {
-                application
-                    .borrow_mut()
-                    .window_event(&active, window_id, event);
-            }
+        application.resumed(&self.active);
+        events.drain(|window_id, event| {
+            application.window_event(&self.active, window_id, event);
         });
 
-        application.borrow_mut().resumed(&self.active);
-
         while !self.active.exiting() {
+            // Native callbacks only fill `events`, so application code runs
+            // after the mutable platform borrow from `pump` has been released.
             self.platform.borrow_mut().pump();
+            events.drain(|window_id, event| {
+                application.window_event(&self.active, window_id, event);
+            });
 
-            application.borrow_mut().about_to_wait(&self.active);
+            application.about_to_wait(&self.active);
+            events.drain(|window_id, event| {
+                application.window_event(&self.active, window_id, event);
+            });
             if self.active.exiting() {
                 break;
             }
@@ -218,13 +252,64 @@ impl EventLoop {
             }
         }
 
-        application.borrow_mut().exiting(&self.active);
+        application.exiting(&self.active);
 
         self.platform.borrow().clear_handler();
 
-        match Rc::try_unwrap(application) {
-            Ok(application) => Ok(application.into_inner()),
-            Err(_) => unreachable!("the platform event handler retains the application"),
-        }
+        Ok(application)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_events_wait_until_the_application_callback_releases_its_borrow() {
+        let events = WindowEventQueue::default();
+        let mut native_handler = events.handler();
+        let application = Rc::new(RefCell::new(Vec::new()));
+
+        let active_callback = application.borrow_mut();
+        native_handler(WindowId(7), WindowEvent::Focused(true));
+        drop(active_callback);
+
+        events.drain(|window_id, event| {
+            application.borrow_mut().push((window_id, event));
+        });
+
+        assert_eq!(
+            *application.borrow(),
+            [(WindowId(7), WindowEvent::Focused(true))]
+        );
+    }
+
+    #[test]
+    fn events_emitted_during_dispatch_keep_fifo_order() {
+        let events = WindowEventQueue::default();
+        let mut native_handler = events.handler();
+        native_handler(WindowId(1), WindowEvent::Focused(true));
+        native_handler(WindowId(2), WindowEvent::Focused(false));
+
+        let reentrant_events = events.clone();
+        let mut received = Vec::new();
+        events.drain(|window_id, event| {
+            received.push((window_id, event));
+            if window_id == WindowId(1) {
+                reentrant_events
+                    .pending
+                    .borrow_mut()
+                    .push_back((WindowId(3), WindowEvent::CloseRequested));
+            }
+        });
+
+        assert_eq!(
+            received,
+            [
+                (WindowId(1), WindowEvent::Focused(true)),
+                (WindowId(2), WindowEvent::Focused(false)),
+                (WindowId(3), WindowEvent::CloseRequested),
+            ]
+        );
     }
 }
