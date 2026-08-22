@@ -78,6 +78,30 @@ impl WindowEventQueue {
     }
 }
 
+/// Clears an installed native event handler on every exit path, including
+/// cancellation while [`EventLoop::run_app`] is suspended at an await point.
+struct EventHandlerGuard<F: FnOnce()> {
+    clear: Option<F>,
+}
+
+impl<F: FnOnce()> EventHandlerGuard<F> {
+    fn new(clear: F) -> Self {
+        Self { clear: Some(clear) }
+    }
+
+    fn clear(&mut self) {
+        if let Some(clear) = self.clear.take() {
+            clear();
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for EventHandlerGuard<F> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 /// A thread-safe handle for promptly waking an idle native event loop.
 ///
 /// Waking does not itself dispatch an application event. It causes the loop to
@@ -206,6 +230,10 @@ impl EventLoop {
         let mut application = application;
         let events = WindowEventQueue::default();
         self.platform.borrow().set_handler(events.handler());
+        let mut handler_guard = EventHandlerGuard::new({
+            let platform = Rc::clone(&self.platform);
+            move || platform.borrow().clear_handler()
+        });
 
         application.resumed(&self.active);
         events.drain(|window_id, event| {
@@ -254,7 +282,7 @@ impl EventLoop {
 
         application.exiting(&self.active);
 
-        self.platform.borrow().clear_handler();
+        handler_guard.clear();
 
         Ok(application)
     }
@@ -262,7 +290,31 @@ impl EventLoop {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
     use super::*;
+
+    #[test]
+    fn cancelling_a_guarded_future_runs_handler_cleanup() {
+        let cleared = Rc::new(Cell::new(false));
+        let mut future = Box::pin({
+            let cleared = Rc::clone(&cleared);
+            async move {
+                let _handler_guard = EventHandlerGuard::new(move || cleared.set(true));
+                std::future::pending::<()>().await;
+            }
+        });
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert!(!cleared.get());
+
+        drop(future);
+        assert!(cleared.get());
+    }
 
     #[test]
     fn native_events_wait_until_the_application_callback_releases_its_borrow() {
