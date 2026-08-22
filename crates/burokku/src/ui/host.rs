@@ -236,8 +236,17 @@ impl ApplicationHandler for ApplicationHost {
                     .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
                 let _target_for_problem_9_dispatch = self.cursor_target;
             }
+            WindowEvent::Occluded(false) => {
+                // On macOS, WGPU can reject the first surface texture as
+                // occluded while AppKit is still making a newly shown window
+                // visible. Retry once AppKit confirms visibility; otherwise
+                // the next redraw may not arrive until the user resizes.
+                if let Some(window) = self.windows.current() {
+                    window.window().request_redraw();
+                }
+            }
             WindowEvent::Focused(_)
-            | WindowEvent::Occluded(_)
+            | WindowEvent::Occluded(true)
             | WindowEvent::KeyboardInput(_)
             | WindowEvent::ModifiersChanged(_)
             | WindowEvent::MouseWheel { .. } => {}
