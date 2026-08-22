@@ -444,8 +444,10 @@ characterization test; do not give measurement and painting separate empty-text
 special cases.
 
 Return typed errors for non-finite dimensions, malformed range coverage,
-unsupported style-table size, missing usable fonts, and invalid metrics. Do not
-insert a failed result into the cache.
+unsupported style-table size, and invalid metrics. When font resolution
+produces no glyphs for a non-whitespace paragraph, measure and paint explicit
+replacement boxes instead of failing the frame. Do not insert failed results
+into the cache.
 
 **Tests**
 

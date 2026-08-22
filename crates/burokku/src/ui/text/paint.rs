@@ -2,7 +2,7 @@ use glifo::{FontEmbolden, Glyph};
 use parley::{fontique::Synthesis, FontData, PositionedLayoutItem};
 use taffy::geometry::Point;
 use vello_common::{
-    kurbo::{Affine, Diagonal2},
+    kurbo::{Affine, Diagonal2, Rect, Stroke},
     paint::Color,
 };
 use vello_hybrid::{Resources, Scene};
@@ -45,6 +45,42 @@ impl GlyphBatch {
 
     pub(crate) fn glyphs(&self) -> &[Glyph] {
         &self.glyphs
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreparedReplacementBox {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    stroke_width: f32,
+    brush: TextBrush,
+}
+
+impl PreparedReplacementBox {
+    pub(crate) fn x(self) -> f32 {
+        self.x
+    }
+
+    pub(crate) fn y(self) -> f32 {
+        self.y
+    }
+
+    pub(crate) fn width(self) -> f32 {
+        self.width
+    }
+
+    pub(crate) fn height(self) -> f32 {
+        self.height
+    }
+
+    pub(crate) fn stroke_width(self) -> f32 {
+        self.stroke_width
+    }
+
+    pub(crate) fn brush(self) -> TextBrush {
+        self.brush
     }
 }
 
@@ -109,6 +145,48 @@ pub(crate) fn prepare_glyph_batches(
     Ok(batches)
 }
 
+/// Translate synthetic missing-glyph boxes into scene coordinates.
+pub(crate) fn prepare_replacement_boxes(
+    content_origin: Point<f32>,
+    paragraph: &ShapedParagraph,
+) -> Result<Vec<PreparedReplacementBox>, TextError> {
+    validate_coordinate(paragraph, "content origin x", content_origin.x)?;
+    validate_coordinate(paragraph, "content origin y", content_origin.y)?;
+
+    let mut prepared = Vec::new();
+    for line in paragraph.layout().lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::InlineBox(positioned) = item else {
+                continue;
+            };
+            let index = usize::try_from(positioned.id)
+                .expect("replacement box IDs fit usize on supported platforms");
+            let replacement = paragraph
+                .replacement_boxes()
+                .get(index)
+                .expect("replacement box IDs match retained paint metadata");
+            if !replacement.visible() {
+                continue;
+            }
+            let x = content_origin.x + positioned.x;
+            let y = content_origin.y + positioned.y;
+            validate_coordinate(paragraph, "replacement box x", x)?;
+            validate_coordinate(paragraph, "replacement box y", y)?;
+            validate_non_negative(paragraph, "replacement box width", positioned.width)?;
+            validate_non_negative(paragraph, "replacement box height", positioned.height)?;
+            prepared.push(PreparedReplacementBox {
+                x,
+                y,
+                width: positioned.width,
+                height: positioned.height,
+                stroke_width: replacement.stroke_width(),
+                brush: replacement.brush(),
+            });
+        }
+    }
+    Ok(prepared)
+}
+
 /// Submit an already-selected shaped paragraph to renderer-owned Vello state.
 pub(crate) fn paint_paragraph(
     scene: &mut Scene,
@@ -143,6 +221,18 @@ pub(crate) fn paint_paragraph(
         stats.runs += 1;
         stats.glyphs += batch.glyphs.len();
         builder.fill_glyphs(batch.glyphs.into_iter());
+    }
+
+    for replacement in prepare_replacement_boxes(content_origin, paragraph)? {
+        let [red, green, blue, alpha] = replacement.brush();
+        scene.set_paint(Color::from_rgba8(red, green, blue, alpha));
+        scene.set_stroke(Stroke::new(f64::from(replacement.stroke_width())));
+        scene.stroke_rect(&Rect::new(
+            f64::from(replacement.x()),
+            f64::from(replacement.y()),
+            f64::from(replacement.x() + replacement.width()),
+            f64::from(replacement.y() + replacement.height()),
+        ));
     }
     Ok(stats)
 }
@@ -274,6 +364,31 @@ mod tests {
         for batch in batches {
             assert!(batch.normalized_coords().len() < 64);
             let _synthesis = batch.synthesis();
+        }
+    }
+
+    #[test]
+    fn translates_missing_font_replacement_boxes() {
+        let mut engine = TextEngine::without_system_fonts();
+        let paragraph = engine
+            .shape(&paragraph_input(), TextConstraint::definite(200.0).unwrap())
+            .unwrap();
+        let zero = prepare_replacement_boxes(Point::ZERO, &paragraph).unwrap();
+        let translated = prepare_replacement_boxes(Point { x: 7.5, y: 11.25 }, &paragraph).unwrap();
+
+        assert!(!zero.is_empty());
+        assert!(zero
+            .iter()
+            .any(|replacement| replacement.brush() == [255, 0, 0, 255]));
+        assert!(zero
+            .iter()
+            .any(|replacement| replacement.brush() == [0, 0, 255, 255]));
+        assert_eq!(zero.len(), translated.len());
+        for (zero, translated) in zero.into_iter().zip(translated) {
+            assert!((translated.x() - zero.x() - 7.5).abs() < 0.001);
+            assert!((translated.y() - zero.y() - 11.25).abs() < 0.001);
+            assert_eq!(translated.width(), zero.width());
+            assert_eq!(translated.height(), zero.height());
         }
     }
 
