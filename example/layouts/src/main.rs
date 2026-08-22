@@ -1,6 +1,6 @@
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), burokku::BurokkuError> {
-    let mut script = include_str!("../dist/app.js").to_owned();
+    let mut script = include_str!("./app.js").to_owned();
     if std::env::var_os("BUROKKU_SMOKE").is_some() {
         script.push_str(
             "\nsetTimeout(() => {\n\
