@@ -6,7 +6,7 @@
 
 #![allow(
     dead_code,
-    reason = "the glyph adapter is connected to the native scene host in Problem 8"
+    reason = "cache diagnostics and structural glyph-batch accessors are regression-test APIs"
 )]
 
 mod collect;

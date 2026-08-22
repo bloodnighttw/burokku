@@ -1,26 +1,21 @@
-# Mixed Rust + TypeScript examples
+# Layout example
 
-Both example directories are self-contained mixed projects:
+`example/layouts` is a Rust binary that embeds `dist/app.js`, installs the
+Burokku application host, registers the bundled Noto Sans fixture, and presents
+the resulting Window through Taffy, Parley, Vello Hybrid, and WGPU.
 
-- `Cargo.toml` and `src/main.rs` define a local Rust binary crate that uses the
-  `burokku` library builder API.
-- `package.json`, `vite.config.ts`, and `src/main.ts` define a local Vite
-  TypeScript project that consumes the shared `@burokku/runtime` types and
-  typed DOM helpers from `packages/runtime`.
-- `pnpm dev` builds `dist/app.js` with Vite and then runs that directory's own
-  Cargo binary. The binary embeds the bundle with `include_str!` and passes it
-  to `Burokku`.
-
-Run either project from the workspace root:
+Run it from the workspace root:
 
 ```sh
-pnpm --filter @burokku/example-counter dev
-pnpm --filter @burokku/example-layouts dev
+cargo run -p burokku-example-layouts
 ```
 
-Headless integration checks use the same local binaries:
+For a bounded manual smoke check, set `BUROKKU_SMOKE`; the script removes its
+Window after a short interval and the host exits cleanly:
 
 ```sh
-pnpm --filter @burokku/example-counter check
-pnpm --filter @burokku/example-layouts check
+BUROKKU_SMOKE=1 cargo run -p burokku-example-layouts
 ```
+
+The checked-in JavaScript bundle exercises flex layout, nested inherited text
+runs, backgrounds, and multiple wrapped paragraphs.

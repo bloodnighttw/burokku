@@ -327,10 +327,6 @@ impl Dom {
     /// owner's control. Unit tests in this crate may create isolated arenas.
     ///
     /// this is to ensure only one instance of the DOM exists.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by the pending application bootstrap")
-    )]
     pub(crate) fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(Arc::new(Node {

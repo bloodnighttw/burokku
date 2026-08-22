@@ -137,6 +137,26 @@ impl Window {
     pub fn set_title(&self, title: &str) {
         self.platform.set_title(title);
     }
+
+    /// Request a new logical content size.
+    pub fn set_inner_size(&self, size: LogicalSize<f64>) -> crate::Result<()> {
+        if !(size.width.is_finite()
+            && size.height.is_finite()
+            && size.width > 0.0
+            && size.height > 0.0)
+        {
+            return Err(crate::Error::WindowCreation(
+                "inner size must contain positive finite dimensions".into(),
+            ));
+        }
+        self.platform.set_inner_size(size);
+        Ok(())
+    }
+
+    /// Close the native window while retaining this handle until it is dropped.
+    pub fn close(&self) {
+        self.platform.close();
+    }
 }
 
 impl std::fmt::Debug for Window {

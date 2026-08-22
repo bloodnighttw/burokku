@@ -7,7 +7,9 @@
 //! [`BurokkuBuilder::runtime_plugin`], while latency-sensitive plugins can be
 //! installed in MTS with [`BurokkuBuilder::main_runtime_plugin`].
 
+mod app;
 pub mod ui;
 
+pub use app::{Burokku, BurokkuBuilder, BurokkuError};
 pub use runtime;
 pub use runtime::{DualRuntime, DualRuntimeBuilder, Plugin};

@@ -15,11 +15,11 @@ into mergeable stages.
 
 ## Status
 
-Stages 0 through 5 are implemented for the MTS pipeline: dependency
-compatibility, styled-run collection, Parley shaping/cache, Taffy measurement,
-exact final-width selection, and the Vello glyph adapter. Stage 6 still depends
-on the native scene/presentation host from Problems 8 and 10. Stage 7 and
-incremental text-dirty batches remain follow-up work.
+Stages 0 through 6 are implemented for the initial full-rebuild pipeline:
+dependency compatibility, styled-run collection, Parley shaping/cache, Taffy
+measurement, exact final-width selection, Vello glyph submission, and native
+scene presentation. Stage 7 and incremental text-dirty batches remain follow-up
+work.
 
 ## Current-state findings
 
@@ -31,8 +31,8 @@ incremental text-dirty batches remain follow-up work.
 | Publication | `DomPublisher` atomically publishes immutable `PublishedDom { snapshot, changes }` values. `ChangeSet` currently has only `FullRebuild`. | All MTS text work must consume one retained publication. A full recollection per committed revision is the correctness-first invalidation strategy. |
 | Typography | `TextStyle`, `ComputedTextStyle`, `FontWeight`, `LineHeight`, `TextWrap`, and validated setters exist in `ui/elements/styles/text.rs`. | Reuse these authoritative values and add only MTS conversion code. Do not put Parley types in DOM nodes or snapshots. |
 | Taffy | The low-level trait engine reconciles one immutable publication, measures outer text leaves through the Parley engine, propagates baselines, and retains exact final-width selections. | Keep layout and selected text revision-matched while the future host supplies live viewports. |
-| Vello | `vello_hybrid` `0.2.0` has its `text` feature enabled. `ui/text/paint.rs` converts retained Parley runs to Glifo/Vello glyph submissions without reshaping or copying font bytes. | The Problem 8 scene host must invoke the adapter and own persistent `Resources`. |
-| Host integration | `ui.rs` registers crate-private `layout` and `text` modules, but no complete native window/renderer application host exists. | Final presentation integration remains explicitly dependent on Problems 8 and 10. |
+| Vello | `vello_hybrid` `0.2.0` has its `text` feature enabled. `ui/text/paint.rs` converts retained Parley runs to Glifo/Vello glyph submissions without reshaping or copying font bytes. | The scene host invokes the adapter with renderer-owned `Resources`. |
+| Host integration | `Burokku::builder()` assembles native Window ownership, live viewports, layout, scene planning, WGPU surfaces, and presentation. | Input-to-JavaScript dispatch remains Problem 9. |
 
 The current `NodeRevisions::{structure, style, content}` values do not summarize
 descendant changes into a paragraph root. The initial implementation must not
@@ -558,7 +558,7 @@ match at each boundary.
 
 ### Stage 5: Vello Hybrid paint adapter
 
-**Status: implemented; invocation by the native scene host remains Problem 8.**
+**Status: implemented and invoked by the native scene host.**
 
 Implement `ui/text/paint.rs` as an adapter from the retained Parley layout to
 renderer-owned Vello state. It should accept an existing

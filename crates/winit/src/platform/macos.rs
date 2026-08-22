@@ -10,8 +10,8 @@ use std::{
 
 use crate::{event_loop::EventLoopWaker, window::WindowState};
 use crate::{
-    ElementState, Error, KeyEvent, Modifiers, MouseButton, PhysicalPosition, PhysicalSize, Window,
-    WindowAttributes, WindowEvent, WindowId,
+    ElementState, Error, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition,
+    PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId,
 };
 use dispatch2::MainThreadBound;
 use objc2::{
@@ -369,6 +369,20 @@ impl PlatformWindow {
             .expect("Window::request_redraw must be called on the main thread");
         self.inner.get(mtm).view.setNeedsDisplay(true);
     }
+
+    pub(crate) fn set_inner_size(&self, size: LogicalSize<f64>) {
+        let mtm = MainThreadMarker::new()
+            .expect("Window::set_inner_size must be called on the main thread");
+        self.inner
+            .get(mtm)
+            .window
+            .setContentSize(NSSize::new(size.width, size.height));
+    }
+
+    pub(crate) fn close(&self) {
+        let mtm = MainThreadMarker::new().expect("Window::close must be called on the main thread");
+        self.inner.get(mtm).window.close();
+    }
 }
 
 impl HasWindowHandle for PlatformWindow {
@@ -402,9 +416,13 @@ impl PlatformEventLoop {
     pub(crate) fn new() -> crate::Result<Self> {
         let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
         let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         app.finishLaunching();
-        app.activate();
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        // Command-line binaries have no application bundle to activate them.
+        // Match winit's default behavior and bring the first native Window in
+        // front of the launching terminal.
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
 
         Ok(Self {
             app,
@@ -488,6 +506,8 @@ impl PlatformEventLoop {
         let delegate = WindowDelegate::new(self.mtm, state.clone(), self.dispatcher.clone());
         native_window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         native_window.center();
+        #[allow(deprecated)]
+        self.app.activateIgnoringOtherApps(true);
         native_window.makeKeyAndOrderFront(None);
 
         self.windows
@@ -505,6 +525,10 @@ impl PlatformEventLoop {
 
     pub(crate) fn clear_handler(&self) {
         self.dispatcher.clear_handler();
+    }
+
+    pub(crate) fn flush_windows(&self) {
+        autoreleasepool(|_| self.app.updateWindows());
     }
 
     pub(crate) fn pump(&mut self) {

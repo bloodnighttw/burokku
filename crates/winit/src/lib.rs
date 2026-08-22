@@ -30,6 +30,8 @@ pub enum Error {
     NotMainThread,
     #[error("the event loop has already been run")]
     AlreadyRun,
+    #[error("the active event loop is no longer available")]
+    EventLoopUnavailable,
     #[error("window creation failed: {0}")]
     WindowCreation(String),
     #[error("burokku-winit does not support this platform yet")]
