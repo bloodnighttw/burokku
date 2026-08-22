@@ -5,9 +5,12 @@ use std::{
 
 use taffy::{geometry::Size, Dimension, Layout, Position, Style};
 
-use crate::ui::elements::{
-    traits::Styles, ChangeSet, DomSnapshot, Element, NodeId as DomNodeId, NodeKind, NodeRevisions,
-    PublishedDom,
+use crate::ui::{
+    elements::{
+        traits::Styles, ChangeSet, DomSnapshot, Element, NodeId as DomNodeId, NodeKind,
+        NodeRevisions, PublishedDom,
+    },
+    text::{collect_paragraph, ParagraphInput},
 };
 
 use super::{
@@ -18,22 +21,6 @@ use super::{
 };
 
 pub(super) const MAX_LAYOUT_DEPTH: usize = 512;
-
-#[derive(Clone, Debug)]
-pub(super) struct ParagraphInput {
-    source: DomNodeId,
-    text: String,
-}
-
-impl ParagraphInput {
-    pub(super) fn source(&self) -> DomNodeId {
-        self.source
-    }
-
-    pub(super) fn text(&self) -> &str {
-        &self.text
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(super) enum LayoutRole {
@@ -159,13 +146,16 @@ pub(super) fn reconcile_full(
                     next.layout_parent,
                     next.source_order,
                 )?;
-                let input = collect_paragraph(
-                    snapshot,
-                    next.dom_id,
-                    next.depth,
-                    &mut seen_dom,
-                    &mut scratch.text_owner,
-                )?;
+                let collected =
+                    collect_paragraph(snapshot, next.dom_id, next.depth, MAX_LAYOUT_DEPTH)?;
+                let (input, descendants) = collected.into_parts();
+                scratch.text_owner.insert(next.dom_id, next.dom_id);
+                for descendant in descendants {
+                    if !seen_dom.insert(descendant) {
+                        return Err(LayoutError::DuplicateDomNode(descendant));
+                    }
+                    scratch.text_owner.insert(descendant, next.dom_id);
+                }
                 insert_state(
                     &mut scratch.nodes,
                     layout_id,
@@ -265,64 +255,6 @@ fn schedule_children(
         });
     }
     Ok(())
-}
-
-fn collect_paragraph(
-    snapshot: &DomSnapshot,
-    source: DomNodeId,
-    source_depth: usize,
-    seen_dom: &mut HashSet<DomNodeId>,
-    text_owner: &mut HashMap<DomNodeId, DomNodeId>,
-) -> Result<ParagraphInput, LayoutError> {
-    text_owner.insert(source, source);
-    let children = snapshot
-        .children(source)
-        .ok_or(LayoutError::MissingDomNode(source))?;
-    let mut pending = children
-        .iter()
-        .enumerate()
-        .rev()
-        .map(|(_, &id)| (id, source, source_depth + 1))
-        .collect::<Vec<_>>();
-    let mut text = String::new();
-
-    while let Some((id, parent, depth)) = pending.pop() {
-        if depth > MAX_LAYOUT_DEPTH {
-            return Err(LayoutError::TreeTooDeep {
-                node: id,
-                limit: MAX_LAYOUT_DEPTH,
-            });
-        }
-        if snapshot.parent(id) != Some(parent) {
-            return Err(LayoutError::InvalidDomRelationship { parent, child: id });
-        }
-        if !seen_dom.insert(id) {
-            return Err(LayoutError::DuplicateDomNode(id));
-        }
-        text_owner.insert(id, source);
-
-        let node = snapshot.node(id).ok_or(LayoutError::MissingDomNode(id))?;
-        match node.kind() {
-            NodeKind::Text(value) => text.push_str(value),
-            NodeKind::Element(Element::Text { .. }) => {
-                pending.extend(
-                    node.children()
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .map(|(_, &child)| (child, id, depth + 1)),
-                );
-            }
-            NodeKind::App | NodeKind::Element(_) => {
-                return Err(LayoutError::InvalidParagraphChild {
-                    paragraph: source,
-                    child: id,
-                });
-            }
-        }
-    }
-
-    Ok(ParagraphInput { source, text })
 }
 
 fn insert_state(

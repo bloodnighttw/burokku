@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 arc-swap = "1"
+glifo = { version = "0.3.0", default-features = false, features = ["std"] }
+parley = "0.11.1"
 runtime = { path = "../runtime" }
 slotmap = "1"
 taffy = { version = "0.11", default-features = false, features = [
@@ -20,6 +22,6 @@ taffy = { version = "0.11", default-features = false, features = [
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
 vello_common = { version = "0.2", default-features = false, features = ["std"] }
-vello_hybrid = { version = "0.2", default-features = false, features = ["wgpu"] }
+vello_hybrid = { version = "0.2", default-features = false, features = ["text", "wgpu"] }
 wgpu = { version = "29", features = ["std", "wgsl"] }
 winit = { package = "burokku-winit", path = "../winit" }

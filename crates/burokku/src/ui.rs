@@ -5,3 +5,4 @@
 pub(crate) mod dom_plugin;
 pub mod elements;
 pub(crate) mod layout;
+pub(crate) mod text;

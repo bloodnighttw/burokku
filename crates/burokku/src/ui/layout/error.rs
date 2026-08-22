@@ -1,11 +1,14 @@
 use thiserror::Error;
 
-use crate::ui::elements::NodeId;
+use crate::ui::{elements::NodeId, text::TextError};
 
 use super::topology::LayoutId;
 
 #[derive(Debug, Error)]
 pub(crate) enum LayoutError {
+    #[error(transparent)]
+    Text(#[from] TextError),
+
     #[error("logical viewport must be finite and non-negative, got {width}x{height}")]
     InvalidViewport { width: f32, height: f32 },
 
@@ -67,6 +70,9 @@ pub(crate) enum LayoutError {
 
     #[error("text measurement generation changed during layout from {before} to {after}")]
     TextGenerationChanged { before: u64, after: u64 },
+
+    #[error("paragraph {0:?} has a stale or mismatched final shaped-text selection")]
+    InvalidTextSelection(NodeId),
 
     #[error("paragraph {paragraph:?} returned invalid {field} value {value}")]
     InvalidTextMetric {

@@ -1,12 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use taffy::{geometry::Point, Layout};
 
-use crate::ui::elements::{NodeId as DomNodeId, PublishedDom};
+use crate::ui::{
+    elements::{NodeId as DomNodeId, PublishedDom},
+    text::ShapedParagraph,
+};
 
 use super::{
     error::LayoutError,
-    reconcile::{LayoutNodeState, ScratchLayout},
+    reconcile::{LayoutNodeState, LayoutRole, ScratchLayout},
     topology::{LayoutId, LayoutTopology},
     LogicalViewport,
 };
@@ -48,6 +51,7 @@ pub(crate) struct ComputedLayout {
     nodes: HashMap<LayoutId, LayoutNodeState>,
     boxes: HashMap<DomNodeId, ComputedBox>,
     text_owner: HashMap<DomNodeId, DomNodeId>,
+    selected_text: HashMap<DomNodeId, Rc<ShapedParagraph>>,
 }
 
 impl ComputedLayout {
@@ -55,8 +59,10 @@ impl ComputedLayout {
         publication: Arc<PublishedDom>,
         scratch: ScratchLayout,
         text_generation: u64,
+        selected_text: HashMap<DomNodeId, Rc<ShapedParagraph>>,
     ) -> Result<Self, LayoutError> {
         let boxes = build_boxes(&scratch)?;
+        validate_selected_text(&scratch, &selected_text)?;
         Ok(Self {
             revision: scratch.revision,
             viewport: scratch.viewport,
@@ -67,6 +73,7 @@ impl ComputedLayout {
             text_owner: scratch.text_owner,
             publication,
             boxes,
+            selected_text,
         })
     }
 
@@ -106,6 +113,10 @@ impl ComputedLayout {
         self.text_owner.get(&id).copied()
     }
 
+    pub(crate) fn selected_text(&self, source: DomNodeId) -> Option<&Rc<ShapedParagraph>> {
+        self.selected_text.get(&source)
+    }
+
     pub(crate) fn layout_children(&self, id: DomNodeId) -> Option<Vec<DomNodeId>> {
         let layout_id = self.topology.layout_id(id)?;
         Some(
@@ -116,6 +127,27 @@ impl ComputedLayout {
                 .collect(),
         )
     }
+}
+
+fn validate_selected_text(
+    scratch: &ScratchLayout,
+    selected: &HashMap<DomNodeId, Rc<ShapedParagraph>>,
+) -> Result<(), LayoutError> {
+    for (&source, paragraph) in selected {
+        let Some(layout_id) = scratch.topology.layout_id(source) else {
+            return Err(LayoutError::InvalidTextSelection(source));
+        };
+        let Some(state) = scratch.nodes.get(&layout_id) else {
+            return Err(LayoutError::InvalidTextSelection(source));
+        };
+        let LayoutRole::Paragraph { input } = &state.role else {
+            return Err(LayoutError::InvalidTextSelection(source));
+        };
+        if paragraph.source() != source || paragraph.fingerprint() != input.fingerprint() {
+            return Err(LayoutError::InvalidTextSelection(source));
+        }
+    }
+    Ok(())
 }
 
 fn build_boxes(scratch: &ScratchLayout) -> Result<HashMap<DomNodeId, ComputedBox>, LayoutError> {
