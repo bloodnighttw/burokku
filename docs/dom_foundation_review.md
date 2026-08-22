@@ -165,11 +165,9 @@ sequence are in `docs/dom_facade_lifetime_plan.md`.
 - deterministic tests using an embedded licensed Noto Sans fixture.
 
 The current full-rebuild publication path correctly recollects descendant text
-and style changes. Incremental `text_dirty` batches remain a Problem 3
-optimization. The native scene/presentation host must call the glyph adapter as
-part of Problem 8, and live native viewport ownership remains Problem 10; until
-those workstreams land, text is computed and paint-ready but not presented by
-an end-to-end application host.
+and style changes. The scene host now consumes the exact selected paragraph and
+presents it through Vello under the native logical viewport. Incremental
+`text_dirty` batches remain a Problem 3 optimization.
 
 The detailed implementation contract is in `docs/text_rendering_plan.md`.
 
@@ -195,32 +193,34 @@ It now provides:
 - a derived-topology boundary that can later represent positioned containing
   blocks separately from DOM and paint/stacking relationships.
 
-Remaining integration is tracked by the adjacent workstreams: the Problem 8
-scene host consumes the selected Parley layout through the glyph adapter, the
-native host supplies live viewports in Problem 10, and a bounded incremental
-`ChangeSet` can replace full rebuilding after Problem 3 defines its protocol.
+The scene host now consumes selected Parley layouts and native window events
+supply live viewports. A bounded incremental `ChangeSet` can replace full
+rebuilding after Problem 3 defines its protocol.
 
 The detailed design and follow-up stages are in
 `docs/dom_problem_7_taffy_trait_plan.md`.
 
-## 8. Rendering and presentation are missing
+## 8. Rendering and presentation
 
-Vello dependencies exist, but there is no scene construction or presentation
-pipeline.
+**Status: initial implementation completed.** The MTS host now:
 
-Required work:
+- lowers computed boxes into a deterministic parent-before-child scene plan;
+- paints element backgrounds and the exact Parley layouts selected by Taffy;
+- applies the logical-to-physical scale once at the Vello scene root;
+- retains revision-tagged paint and hit-test data;
+- creates and resizes WGPU surfaces plus Vello Hybrid renderer resources;
+- handles timeout, occlusion, outdated, lost, and suboptimal surface outcomes;
+- presents only complete frames and records their DOM revision;
+- requests redraw after committed publications and native resize events.
 
-- convert computed Taffy layout and paint data into a Vello scene;
-- render backgrounds and shaped text;
-- separate layout invalidation from paint invalidation;
-- cache paint data without mixing revisions;
-- retain one committed snapshot through layout and scene construction;
-- track the DOM revision represented by the presented frame;
-- request redraw after a new committed revision.
+Incremental separation of layout-dirty and paint-only changes remains blocked on
+Problem 3. Positioned stacking contexts, overflow clips, transforms, and other
+advanced paint properties remain future style-contract work.
 
 ## 9. Events are missing
 
-There is no complete path from native input to a JavaScript listener.
+Revision-tagged hit regions and reverse-paint-order hit testing now exist, but
+there is no complete path from native input to a JavaScript listener.
 
 Required work:
 
@@ -235,31 +235,33 @@ Required work:
 At minimum, the current application contract requires click registration and
 dispatch.
 
-## 10. Native Window lifecycle integration is missing
+## 10. Native Window lifecycle integration
 
-The agreed tree permits a script/framework-created `Window` under the permanent
-app root, but no implementation connects that element to a native window.
-
-The host must define and implement:
+**Status: initial single-window implementation completed.** The host provides:
 
 - `DOM NodeId -> native WindowId` ownership;
-- native creation when a `Window` is committed under `app`;
-- resize propagation into viewport constraints and redraw;
-- removal and replacement behavior during framework reconciliation;
-- native close behavior and JavaScript notification;
-- cleanup of GPU surfaces, Taffy state, and event targets;
-- shutdown behavior after the final native window closes.
+- native creation from a committed `Window` and its requested size/title;
+- physical resize and scale-factor propagation into logical viewport layout;
+- transactional replacement and removal behavior;
+- WGPU surface, Vello resource, and computed-frame cleanup;
+- shutdown after native close or removal of the final committed Window.
 
-The current tree allows one attached window. Multi-window behavior should not be
-claimed until the tree and lifecycle contracts explicitly support it.
+Forwarding native close as a JavaScript event remains part of Problem 9. The
+current tree and host intentionally support one attached window only.
 
-## 11. End-to-end application integration is absent
+## 11. End-to-end application integration
 
-The crate exposes the tree arena and style model, but it does not yet assemble
-the native event loop, dual runtimes, staging DOM plugin, publisher, reconciler,
-renderer, and event bridge into a usable application host.
+**Status: initial visible application host completed.** Public
+`Burokku::builder()` now assembles the custom native event loop, dual QuickJS
+runtimes, BTS DOM plugin and publication notifier, native Window manager,
+Taffy/Parley layout, Vello scene construction, and WGPU presentation. The
+`example/layouts` binary embeds its JavaScript bundle and licensed test font.
 
-End-to-end tests must eventually verify this complete flow:
+Tests verify script-to-publication, lifecycle specification, layout-to-scene
+planning, revision retention, hit data, and failure boundaries. A macOS smoke
+mode removes the example Window after its first interval for manual end-to-end
+checks. Native input-to-JavaScript dispatch remains Problem 9, so the complete
+future flow is:
 
 ```text
 JavaScript app factory and mutations

@@ -3,7 +3,7 @@
 #![allow(
     dead_code,
     unused_imports,
-    reason = "the layout engine is connected to the native application host in Problem 10"
+    reason = "diagnostic and future incremental-topology APIs are retained and regression-tested"
 )]
 
 mod cache;

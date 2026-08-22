@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -71,9 +71,24 @@ struct ActiveEventLoopState {
 #[derive(Clone)]
 pub struct ActiveEventLoop {
     state: Rc<ActiveEventLoopState>,
+    platform: Weak<RefCell<crate::platform::PlatformEventLoop>>,
+    waker: EventLoopWaker,
 }
 
 impl ActiveEventLoop {
+    /// Create and show a native window on the event-loop thread.
+    ///
+    /// Call this from `resumed` or `about_to_wait`. Creating a window directly
+    /// from a native `window_event` callback is not supported because the
+    /// platform event pump is already borrowed for dispatch.
+    pub fn create_window(&self, attributes: WindowAttributes) -> crate::Result<Window> {
+        self.platform
+            .upgrade()
+            .ok_or(crate::Error::EventLoopUnavailable)?
+            .borrow_mut()
+            .create_window(attributes, self.waker.clone())
+    }
+
     pub fn set_control_flow(&self, control_flow: ControlFlow) {
         self.state.control_flow.set(control_flow);
     }
@@ -95,12 +110,13 @@ pub struct EventLoop {
     active: ActiveEventLoop,
     waker: EventLoopWaker,
     has_run: bool,
-    platform: crate::platform::PlatformEventLoop,
+    platform: Rc<RefCell<crate::platform::PlatformEventLoop>>,
 }
 
 impl EventLoop {
     pub fn new() -> crate::Result<Self> {
-        let platform = crate::platform::PlatformEventLoop::new()?;
+        let platform = Rc::new(RefCell::new(crate::platform::PlatformEventLoop::new()?));
+        let waker = EventLoopWaker::default();
 
         Ok(Self {
             active: ActiveEventLoop {
@@ -108,8 +124,10 @@ impl EventLoop {
                     control_flow: Cell::new(ControlFlow::Wait),
                     exiting: Cell::new(false),
                 }),
+                platform: Rc::downgrade(&platform),
+                waker: waker.clone(),
             },
-            waker: EventLoopWaker::default(),
+            waker,
             has_run: false,
             platform,
         })
@@ -120,7 +138,14 @@ impl EventLoop {
     /// This must be called on the platform event-loop thread, before or during
     /// [`run_app`](Self::run_app). On macOS, that is the process main thread.
     pub fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
-        self.platform.create_window(attributes, self.waker.clone())
+        self.active.create_window(attributes)
+    }
+
+    /// Flush pending native window ordering before the asynchronous event loop
+    /// starts. This is useful when renderer initialization happens after the
+    /// first Window is created.
+    pub fn flush_windows(&self) {
+        self.platform.borrow().flush_windows();
     }
 
     /// Return a thread-safe handle that wakes this event loop from `Wait`.
@@ -149,7 +174,7 @@ impl EventLoop {
 
         let application = Rc::new(RefCell::new(application));
 
-        self.platform.set_handler({
+        self.platform.borrow().set_handler({
             let application = application.clone();
             let active = self.active.clone();
             move |window_id, event| {
@@ -162,7 +187,7 @@ impl EventLoop {
         application.borrow_mut().resumed(&self.active);
 
         while !self.active.exiting() {
-            self.platform.pump();
+            self.platform.borrow_mut().pump();
 
             application.borrow_mut().about_to_wait(&self.active);
             if self.active.exiting() {
@@ -195,7 +220,7 @@ impl EventLoop {
 
         application.borrow_mut().exiting(&self.active);
 
-        self.platform.clear_handler();
+        self.platform.borrow().clear_handler();
 
         match Rc::try_unwrap(application) {
             Ok(application) => Ok(application.into_inner()),

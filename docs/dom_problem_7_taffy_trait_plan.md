@@ -19,11 +19,11 @@ IDs, style conversion, low-level Taffy traits, complete-output caches, viewport
 root constraints, paragraph measurement hooks, baseline propagation, computed
 absolute boxes, failure-atomic replacement, and focused regression tests.
 
-The Parley-backed `TextMeasurer`, final-width shaped-layout selection, and Vello
-glyph adapter are now implemented with Problem 6. Native Window host wiring,
-scene/stacking integration, and the incremental `ChangeSet` path remain
-coordinated with Problems 10, 8, and 3 respectively. The text-specific work is
-detailed in
+The Parley-backed `TextMeasurer`, final-width shaped-layout selection, native
+Window viewport wiring, revision-tagged Vello scene planning, and WGPU
+presentation are now implemented. Positioned stacking contexts and the
+incremental `ChangeSet` path remain coordinated with future style work and
+Problem 3 respectively. The text-specific work is detailed in
 [`dom_problem_6_implementation_plan.md`](dom_problem_6_implementation_plan.md).
 
 ## Decision summary
@@ -64,8 +64,8 @@ detailed in
 | Styles | Every element style already converts to `taffy::Style<String>` through `Styles::to_taffy_style`. Authoritative grid data uses thread-safe Burokku types and converts on MTS. | Convert once while building the sidecar. Do not implement Taffy's many style traits directly on authoritative DOM structs and do not store `taffy::Style` in a publication. |
 | Future positioning | `CommonStyle` does not yet expose CSS-like `position`, inset, or `z-index`. Taffy 0.11 supports only `Relative` and `Absolute`, does not mutate/reparent its input tree, and does not implement stacking contexts. | Make effective layout parentage an explicit derived topology now. Lower future absolute/fixed relationships before Taffy and compute z-index ordering after layout in a separate paint tree. |
 | Text | Outer text roots are collected into inherited runs and shaped by the reusable Parley engine. Exact final-width layouts and baselines are retained for paint. | The layout tree supports one paragraph leaf role and an error-aware text callback without inventing raw-text fallback nodes. |
-| Taffy | `Cargo.lock` resolves Taffy `0.11.0`. No `TaffyTree` or layout module exists. | Implement and characterize the exact 0.11 low-level interfaces before host integration. |
-| Window host | Native Window ownership and resize propagation are still Problem 10. | Expose a viewport-parameterized layout API now. Problem 10 later supplies the actual logical viewport. |
+| Taffy | `Cargo.lock` resolves Taffy `0.11.0`; `ui/layout/` implements the low-level traits without a `TaffyTree` mirror. | Retain the characterized interfaces and full-rebuild fallback. |
+| Window host | The single committed Window owns a native window and resize/scale events supply its actual logical viewport. | Keep multi-window behavior out of scope until the DOM contract changes. |
 
 ## Relevant Taffy 0.11 API
 

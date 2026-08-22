@@ -9,9 +9,10 @@ a Vello Hybrid glyph adapter using the selected layout. The current-tree
 execution details are in
 [`dom_problem_6_implementation_plan.md`](dom_problem_6_implementation_plan.md).
 
-Native scene construction and presentation still depend on Problems 8 and 10.
-The current full-rebuild path is the correctness fallback until Problem 3 adds
-bounded incremental text-dirty batches.
+The native host now builds and presents Vello scenes from the exact selected
+layouts under live Window viewports. The current full-rebuild path remains the
+correctness fallback until Problem 3 adds bounded incremental text-dirty
+batches.
 
 The current foundation already has:
 
@@ -426,8 +427,7 @@ the last valid presented scene where possible and schedule/report the failure.
 
 ### Phase 5: Vello glyph painting
 
-**Status: paint adapter implemented; native scene-host invocation remains
-Problem 8.**
+**Status: implemented and invoked by the revision-tagged native scene host.**
 
 - Enable the Vello Hybrid `text` feature.
 - Convert Parley glyph runs and font resources into Vello glyph submissions.
