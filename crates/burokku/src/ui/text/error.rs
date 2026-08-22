@@ -38,9 +38,6 @@ pub(crate) enum TextError {
     #[error("paragraph {paragraph:?} has {count} styled runs, exceeding the supported limit")]
     TooManyStyledRuns { paragraph: NodeId, count: usize },
 
-    #[error("paragraph {0:?} could not resolve a usable font")]
-    MissingUsableFont(NodeId),
-
     #[error("paragraph {paragraph:?} produced invalid {field} metric {value}")]
     InvalidMetric {
         paragraph: NodeId,

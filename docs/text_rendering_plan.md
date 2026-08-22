@@ -450,8 +450,8 @@ change batches remain Problem 3.**
 - Record cache hits, misses, evictions, and shaped glyph counts.
 - Bound paragraph length, run count, cache variants, and font fallback work if
   untrusted scripts can create adversarial content.
-- Test missing fonts, malformed font data, RTL text, combining marks, emoji,
-  CJK wrapping, and very long unbroken strings.
+- Test missing-font replacement boxes, malformed font data, RTL text,
+  combining marks, emoji, CJK wrapping, and very long unbroken strings.
 
 ## Required tests
 

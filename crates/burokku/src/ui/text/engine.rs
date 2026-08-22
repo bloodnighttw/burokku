@@ -7,8 +7,9 @@ use std::{
 #[cfg(test)]
 use parley::fontique::{Collection, CollectionOptions, SourceCache};
 use parley::{
-    fontique::Blob, Alignment, AlignmentOptions, FontContext, FontFamily, FontWeight, Layout,
-    LayoutContext, LineHeight as ParleyLineHeight, StyleProperty, TextWrapMode,
+    fontique::Blob, Alignment, AlignmentOptions, FontContext, FontFamily, FontWeight, InlineBox,
+    InlineBoxKind, Layout, LayoutContext, LineHeight as ParleyLineHeight, StyleProperty,
+    TextWrapMode,
 };
 
 use crate::ui::elements::{
@@ -83,6 +84,28 @@ impl ShapedTextMetrics {
     }
 }
 
+/// Paint metadata for one Parley-positioned missing-glyph box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReplacementBox {
+    stroke_width: f32,
+    brush: TextBrush,
+    visible: bool,
+}
+
+impl ReplacementBox {
+    pub(crate) fn stroke_width(self) -> f32 {
+        self.stroke_width
+    }
+
+    pub(crate) fn brush(self) -> TextBrush {
+        self.brush
+    }
+
+    pub(crate) fn visible(self) -> bool {
+        self.visible
+    }
+}
+
 /// Retained Parley result shared by Taffy measurement and scene construction.
 #[derive(Debug)]
 pub(crate) struct ShapedParagraph {
@@ -91,6 +114,7 @@ pub(crate) struct ShapedParagraph {
     constraint: TextConstraint,
     layout: Layout<TextBrush>,
     metrics: ShapedTextMetrics,
+    replacement_boxes: Vec<ReplacementBox>,
 }
 
 impl ShapedParagraph {
@@ -112,6 +136,10 @@ impl ShapedParagraph {
 
     pub(crate) fn metrics(&self) -> ShapedTextMetrics {
         self.metrics
+    }
+
+    pub(crate) fn replacement_boxes(&self) -> &[ReplacementBox] {
+        &self.replacement_boxes
     }
 }
 
@@ -293,6 +321,23 @@ impl TextEngine {
             });
         }
 
+        let layout = self.build_layout(input, false);
+        if input
+            .text()
+            .chars()
+            .any(|character| !character.is_whitespace())
+            && !has_positioned_glyphs(&layout)
+        {
+            return Ok(self.build_layout(input, true));
+        }
+        Ok(layout)
+    }
+
+    fn build_layout(
+        &mut self,
+        input: &ParagraphInput,
+        replacement_boxes: bool,
+    ) -> Layout<TextBrush> {
         let mut builder =
             self.layout_context
                 .ranged_builder(&mut self.font_context, input.text(), 1.0, false);
@@ -304,27 +349,27 @@ impl TextEngine {
                 builder.push(property, run.range());
             }
         }
-        let layout = builder.build(input.text());
-        if input
-            .text()
-            .chars()
-            .any(|character| !character.is_whitespace())
-        {
-            let mut probe = layout.clone();
-            probe.break_all_lines(None);
-            let has_glyph = probe.lines().any(|line| {
-                line.items().any(|item| match item {
-                    parley::PositionedLayoutItem::GlyphRun(run) => {
-                        run.positioned_glyphs().next().is_some()
+        if replacement_boxes {
+            let mut id = 0;
+            for run in input.runs() {
+                let style = run.style();
+                for (relative_index, character) in input.text()[run.range()].char_indices() {
+                    if character == '\n' {
+                        continue;
                     }
-                    parley::PositionedLayoutItem::InlineBox(_) => false,
-                })
-            });
-            if !has_glyph {
-                return Err(TextError::MissingUsableFont(input.source()));
+                    let whitespace = character.is_whitespace();
+                    builder.push_inline_box(InlineBox {
+                        id,
+                        kind: InlineBoxKind::InFlow,
+                        index: run.range().start + relative_index,
+                        width: replacement_advance(style, whitespace),
+                        height: style.font_size.max(0.5),
+                    });
+                    id += 1;
+                }
             }
         }
-        Ok(layout)
+        builder.build(input.text())
     }
 }
 
@@ -359,6 +404,7 @@ fn shape_variant(
         source: input.source(),
         fingerprint: input.fingerprint(),
         constraint,
+        replacement_boxes: replacement_boxes(input, &layout),
         layout,
         metrics: ShapedTextMetrics {
             width,
@@ -366,6 +412,51 @@ fn shape_variant(
             first_baseline,
         },
     })
+}
+
+fn has_positioned_glyphs(layout: &Layout<TextBrush>) -> bool {
+    let mut probe = layout.clone();
+    probe.break_all_lines(None);
+    let has_glyphs = probe.lines().any(|line| {
+        line.items().any(|item| match item {
+            parley::PositionedLayoutItem::GlyphRun(run) => run.positioned_glyphs().next().is_some(),
+            parley::PositionedLayoutItem::InlineBox(_) => false,
+        })
+    });
+    has_glyphs
+}
+
+fn replacement_boxes(input: &ParagraphInput, layout: &Layout<TextBrush>) -> Vec<ReplacementBox> {
+    let has_inline_boxes = layout.lines().any(|line| {
+        line.items()
+            .any(|item| matches!(item, parley::PositionedLayoutItem::InlineBox(_)))
+    });
+    if !has_inline_boxes {
+        return Vec::new();
+    }
+
+    input
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            let style = run.style();
+            input.text()[run.range()]
+                .chars()
+                .filter(|character| *character != '\n')
+                .map(move |character| ReplacementBox {
+                    stroke_width: (style.font_size / 16.0).clamp(0.5, 2.0),
+                    brush: {
+                        let color = style.color;
+                        [color.red, color.green, color.blue, color.alpha]
+                    },
+                    visible: !character.is_whitespace(),
+                })
+        })
+        .collect()
+}
+
+fn replacement_advance(style: &ComputedTextStyle, whitespace: bool) -> f32 {
+    style.font_size * if whitespace { 0.33 } else { 0.6 }
 }
 
 fn style_properties(style: &ComputedTextStyle) -> [StyleProperty<'_, TextBrush>; 6] {
@@ -587,15 +678,43 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_fonts_for_non_whitespace_text() {
+    fn missing_fonts_produce_measured_replacement_boxes() {
         let input = input_with_style(source(), "no font", test_style(), Vec::new());
         let mut engine = TextEngine::without_system_fonts();
 
-        let error = engine
-            .shape(&input, TextConstraint::MaxContent)
-            .unwrap_err();
+        let paragraph = engine.shape(&input, TextConstraint::MaxContent).unwrap();
 
-        assert!(matches!(error, TextError::MissingUsableFont(_)));
+        assert_eq!(
+            paragraph
+                .replacement_boxes()
+                .iter()
+                .filter(|replacement| replacement.visible())
+                .count(),
+            6
+        );
+        assert!(paragraph.metrics().width() > 0.0);
+        assert!(paragraph.metrics().height() > 0.0);
+        assert!(paragraph.metrics().first_baseline().is_some());
+    }
+
+    #[test]
+    fn missing_font_replacement_boxes_wrap_to_the_selected_width() {
+        let input = input_with_style(source(), "a b c d", test_style(), Vec::new());
+        let mut engine = TextEngine::without_system_fonts();
+
+        let paragraph = engine
+            .shape(&input, TextConstraint::definite(20.0).unwrap())
+            .unwrap();
+        assert_eq!(
+            paragraph
+                .replacement_boxes()
+                .iter()
+                .filter(|replacement| replacement.visible())
+                .count(),
+            4
+        );
+        assert!(paragraph.layout().lines().count() > 1);
+        assert!(paragraph.metrics().height() > test_style().font_size);
     }
 
     #[test]
