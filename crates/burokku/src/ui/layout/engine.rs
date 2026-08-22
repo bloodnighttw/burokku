@@ -1,12 +1,17 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
-use crate::ui::elements::PublishedDom;
+use taffy::{geometry::Size, AvailableSpace};
+
+use crate::ui::{
+    elements::PublishedDom,
+    text::{TextConstraint, TextEngine},
+};
 
 use super::{
     computed::ComputedLayout,
     error::LayoutError,
     reconcile::reconcile_full,
-    tree::{compute_layout, TextMeasurer},
+    tree::{compute_layout, TextMeasureRequest, TextMeasurement, TextMeasurer},
     LogicalViewport,
 };
 
@@ -56,7 +61,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         }
 
         let mut scratch = reconcile_full(&publication, viewport)?;
-        compute_layout(&mut scratch, &mut self.measurer)?;
+        let selected_text = compute_layout(&mut scratch, &mut self.measurer)?;
         let after_generation = self.measurer.generation();
         if after_generation != text_generation {
             return Err(LayoutError::TextGenerationChanged {
@@ -64,7 +69,10 @@ impl<M: TextMeasurer> LayoutEngine<M> {
                 after: after_generation,
             });
         }
-        let next = ComputedLayout::from_scratch(publication, scratch, text_generation)?;
+        let active_text_sources = selected_text.keys().copied().collect::<HashSet<_>>();
+        let next =
+            ComputedLayout::from_scratch(publication, scratch, text_generation, selected_text)?;
+        self.measurer.retain_sources(&active_text_sources);
         self.current = Some(next);
         Ok(self
             .current
@@ -73,9 +81,49 @@ impl<M: TextMeasurer> LayoutEngine<M> {
     }
 }
 
+impl TextMeasurer for TextEngine {
+    fn generation(&self) -> u64 {
+        TextEngine::generation(self)
+    }
+
+    fn measure(&mut self, request: TextMeasureRequest<'_>) -> Result<TextMeasurement, String> {
+        let known = request.known_dimensions();
+        let constraint = match known.width {
+            Some(width) => TextConstraint::definite(width),
+            None => match request.available_space().width {
+                AvailableSpace::MinContent => Ok(TextConstraint::MinContent),
+                AvailableSpace::MaxContent => Ok(TextConstraint::MaxContent),
+                AvailableSpace::Definite(width) => TextConstraint::definite(width),
+            },
+        }
+        .map_err(|error| error.to_string())?;
+        let shaped = self
+            .shape(request.paragraph(), constraint)
+            .map_err(|error| error.to_string())?;
+        let metrics = shaped.metrics();
+        let size = Size {
+            width: known.width.unwrap_or(metrics.width()),
+            height: known.height.unwrap_or(metrics.height()),
+        };
+        if request.is_final_width_selection() {
+            Ok(TextMeasurement::with_shaped(
+                size,
+                metrics.first_baseline(),
+                shaped,
+            ))
+        } else {
+            Ok(TextMeasurement::new(size, metrics.first_baseline()))
+        }
+    }
+
+    fn retain_sources(&mut self, sources: &HashSet<crate::ui::elements::NodeId>) {
+        TextEngine::retain_sources(self, sources);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{rc::Rc, sync::Arc};
 
     use taffy::{geometry::Size, AvailableSpace};
 
@@ -546,5 +594,66 @@ mod tests {
             LogicalViewport::new(10.0, -1.0),
             Err(LayoutError::InvalidViewport { .. })
         ));
+    }
+
+    #[test]
+    fn parley_engine_retains_the_exact_final_width_selection() {
+        const TEST_FONT: &[u8] = include_bytes!("../../../testdata/fonts/NotoSans-Regular.ttf");
+
+        let mut staging = Dom::new();
+        let window = element(&mut staging, ElementTag::Window);
+        let paragraph = element(&mut staging, ElementTag::Text);
+        let first = staging.create_text("hello ");
+        let nested = element(&mut staging, ElementTag::Text);
+        let second = staging.create_text("styled text");
+        staging
+            .set_style_property(paragraph, "font-family", "Noto Sans")
+            .unwrap();
+        staging
+            .set_style_property(paragraph, "width", "100px")
+            .unwrap();
+        staging
+            .set_style_property(paragraph, "padding", "5px")
+            .unwrap();
+        staging
+            .set_style_property(nested, "color", "#ff0000")
+            .unwrap();
+        staging.append_child(staging.root(), window).unwrap();
+        staging.append_child(window, paragraph).unwrap();
+        staging.append_child(paragraph, first).unwrap();
+        staging.append_child(paragraph, nested).unwrap();
+        staging.append_child(nested, second).unwrap();
+        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
+        let mut text = TextEngine::new();
+        text.register_font_data(TEST_FONT.to_vec()).unwrap();
+        let mut engine = LayoutEngine::new(text);
+
+        let computed = engine
+            .compute(reader.load(), viewport(300.0, 200.0))
+            .unwrap();
+        let first_selection = Rc::clone(computed.selected_text(paragraph).unwrap());
+
+        assert_eq!(first_selection.constraint().definite_value(), Some(90.0));
+        assert_eq!(first_selection.source(), paragraph);
+        assert_eq!(first_selection.layout().scale(), 1.0);
+        assert!(first_selection.layout().lines().any(|line| line
+            .items()
+            .any(|item| matches!(item, parley::PositionedLayoutItem::GlyphRun(run) if run.style().brush == [255, 0, 0, 255]))));
+
+        staging
+            .set_style_property(nested, "font-size", "28px")
+            .unwrap();
+        publisher.checkpoint(&staging).unwrap();
+        let computed = engine
+            .compute(reader.load(), viewport(300.0, 200.0))
+            .unwrap();
+        let second_selection = computed.selected_text(paragraph).unwrap();
+
+        assert_ne!(
+            first_selection.fingerprint(),
+            second_selection.fingerprint()
+        );
+        assert!(!Rc::ptr_eq(&first_selection, second_selection));
+        assert_eq!(computed.revision(), staging.revision());
     }
 }

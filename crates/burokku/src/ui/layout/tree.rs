@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use taffy::util::ResolveOrZero;
 use taffy::{
@@ -10,18 +10,20 @@ use taffy::{
     Overflow, RunMode, Style, TraversePartialTree, TraverseTree,
 };
 
-use crate::ui::elements::NodeId as DomNodeId;
+use crate::ui::{
+    elements::NodeId as DomNodeId,
+    text::{ParagraphInput, ShapedParagraph},
+};
 
 use super::{
     error::LayoutError,
-    reconcile::{LayoutNodeState, LayoutRole, ParagraphInput, ScratchLayout},
+    reconcile::{LayoutNodeState, LayoutRole, ScratchLayout},
     topology::{LayoutId, LayoutTopology},
 };
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TextMeasureRequest<'a> {
-    source: DomNodeId,
-    text: &'a str,
+    paragraph: &'a ParagraphInput,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     final_width_selection: bool,
@@ -29,11 +31,15 @@ pub(crate) struct TextMeasureRequest<'a> {
 
 impl<'a> TextMeasureRequest<'a> {
     pub(crate) fn source(self) -> DomNodeId {
-        self.source
+        self.paragraph.source()
     }
 
     pub(crate) fn text(self) -> &'a str {
-        self.text
+        self.paragraph.text()
+    }
+
+    pub(crate) fn paragraph(self) -> &'a ParagraphInput {
+        self.paragraph
     }
 
     pub(crate) fn known_dimensions(self) -> Size<Option<f32>> {
@@ -49,10 +55,11 @@ impl<'a> TextMeasureRequest<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct TextMeasurement {
     size: Size<f32>,
     first_baseline: Option<f32>,
+    shaped: Option<Rc<ShapedParagraph>>,
 }
 
 impl TextMeasurement {
@@ -60,15 +67,32 @@ impl TextMeasurement {
         Self {
             size,
             first_baseline,
+            shaped: None,
         }
     }
 
-    pub(crate) fn size(self) -> Size<f32> {
+    pub(crate) fn with_shaped(
+        size: Size<f32>,
+        first_baseline: Option<f32>,
+        shaped: Rc<ShapedParagraph>,
+    ) -> Self {
+        Self {
+            size,
+            first_baseline,
+            shaped: Some(shaped),
+        }
+    }
+
+    pub(crate) fn size(&self) -> Size<f32> {
         self.size
     }
 
-    pub(crate) fn first_baseline(self) -> Option<f32> {
+    pub(crate) fn first_baseline(&self) -> Option<f32> {
         self.first_baseline
+    }
+
+    pub(crate) fn shaped(&self) -> Option<&Rc<ShapedParagraph>> {
+        self.shaped.as_ref()
     }
 }
 
@@ -80,14 +104,18 @@ pub(crate) trait TextMeasurer {
     }
 
     fn measure(&mut self, request: TextMeasureRequest<'_>) -> Result<TextMeasurement, String>;
+
+    /// Drop persistent shaping state for paragraph sources absent from the
+    /// latest successfully computed frame.
+    fn retain_sources(&mut self, _sources: &std::collections::HashSet<DomNodeId>) {}
 }
 
 pub(super) fn compute_layout<M: TextMeasurer>(
     scratch: &mut ScratchLayout,
     measurer: &mut M,
-) -> Result<(), LayoutError> {
+) -> Result<HashMap<DomNodeId, Rc<ShapedParagraph>>, LayoutError> {
     let Some(root) = scratch.topology.root() else {
-        return Ok(());
+        return Ok(HashMap::new());
     };
     let available_space = Size {
         width: AvailableSpace::Definite(scratch.viewport.width()),
@@ -98,11 +126,12 @@ pub(super) fn compute_layout<M: TextMeasurer>(
         nodes: &mut scratch.nodes,
         measurer,
         first_error: None,
+        selected_text: HashMap::new(),
     };
     taffy::compute_root_layout(&mut tree, root.into_taffy(), available_space);
     match tree.first_error {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => Ok(tree.selected_text),
     }
 }
 
@@ -121,6 +150,7 @@ struct DerivedLayoutTree<'a, M> {
     nodes: &'a mut std::collections::HashMap<LayoutId, LayoutNodeState>,
     measurer: &'a mut M,
     first_error: Option<LayoutError>,
+    selected_text: HashMap<DomNodeId, Rc<ShapedParagraph>>,
 }
 
 impl<M> DerivedLayoutTree<'_, M> {
@@ -197,7 +227,7 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
             |_, _| 0.0,
             |known_dimensions, available_space| {
                 self.measure_paragraph(&paragraph, known_dimensions, available_space, false)
-                    .map_or(Size::ZERO, TextMeasurement::size)
+                    .map_or(Size::ZERO, |measurement| measurement.size())
             },
         );
 
@@ -242,6 +272,10 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
                     .first_baseline()
                     .map(|baseline| border.top + padding.top + baseline),
             };
+            if let Some(shaped) = measurement.shaped() {
+                self.selected_text
+                    .insert(paragraph.source(), Rc::clone(shaped));
+            }
         }
         output
     }
@@ -280,8 +314,7 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
             }
         };
         let request = TextMeasureRequest {
-            source: paragraph.source(),
-            text: paragraph.text(),
+            paragraph,
             known_dimensions,
             available_space,
             final_width_selection,
