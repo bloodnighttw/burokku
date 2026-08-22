@@ -88,13 +88,10 @@ impl TextMeasurer for TextEngine {
 
     fn measure(&mut self, request: TextMeasureRequest<'_>) -> Result<TextMeasurement, String> {
         let known = request.known_dimensions();
-        let constraint = match known.width {
-            Some(width) => TextConstraint::definite(width),
-            None => match request.available_space().width {
-                AvailableSpace::MinContent => Ok(TextConstraint::MinContent),
-                AvailableSpace::MaxContent => Ok(TextConstraint::MaxContent),
-                AvailableSpace::Definite(width) => TextConstraint::definite(width),
-            },
+        let constraint = match request.available_space().width {
+            AvailableSpace::MinContent => Ok(TextConstraint::MinContent),
+            AvailableSpace::MaxContent => Ok(TextConstraint::MaxContent),
+            AvailableSpace::Definite(width) => TextConstraint::definite(width),
         }
         .map_err(|error| error.to_string())?;
         let shaped = self
@@ -594,6 +591,40 @@ mod tests {
             LogicalViewport::new(10.0, -1.0),
             Err(LayoutError::InvalidViewport { .. })
         ));
+    }
+
+    #[test]
+    fn parley_measurement_wraps_at_the_content_box_width() {
+        const TEST_FONT: &[u8] = include_bytes!("../../../testdata/fonts/NotoSans-Regular.ttf");
+
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let flex = element(&mut dom, ElementTag::Flex);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("a bb cc a bb cc a bb cc a bb cc a bb cc");
+        dom.set_style_property(flex, "width", "60px").unwrap();
+        dom.set_style_property(paragraph, "font-family", "Noto Sans")
+            .unwrap();
+        dom.set_style_property(paragraph, "padding", "5px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, flex).unwrap();
+        dom.append_child(flex, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let mut text = TextEngine::without_system_fonts();
+        text.register_font_data(TEST_FONT.to_vec()).unwrap();
+        let mut engine = LayoutEngine::new(text);
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 300.0))
+            .unwrap();
+        let paragraph_box = computed.box_for(paragraph).unwrap();
+        let selected = computed.selected_text(paragraph).unwrap();
+
+        assert_eq!(selected.constraint().definite_value(), Some(50.0));
+        assert_close(
+            paragraph_box.layout().size.height,
+            selected.metrics().height() + 10.0,
+        );
     }
 
     #[test]
