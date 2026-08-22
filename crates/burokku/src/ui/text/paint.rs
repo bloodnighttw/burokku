@@ -217,7 +217,7 @@ mod tests {
     }
 
     fn shaped() -> Rc<ShapedParagraph> {
-        let mut engine = TextEngine::new();
+        let mut engine = TextEngine::without_system_fonts();
         engine.register_font_data(TEST_FONT.to_vec()).unwrap();
         engine
             .shape(&paragraph_input(), TextConstraint::definite(200.0).unwrap())

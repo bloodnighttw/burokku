@@ -624,7 +624,7 @@ mod tests {
         staging.append_child(paragraph, nested).unwrap();
         staging.append_child(nested, second).unwrap();
         let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
-        let mut text = TextEngine::new();
+        let mut text = TextEngine::without_system_fonts();
         text.register_font_data(TEST_FONT.to_vec()).unwrap();
         let mut engine = LayoutEngine::new(text);
 
@@ -639,6 +639,18 @@ mod tests {
         assert!(first_selection.layout().lines().any(|line| line
             .items()
             .any(|item| matches!(item, parley::PositionedLayoutItem::GlyphRun(run) if run.style().brush == [255, 0, 0, 255]))));
+        let glyph_batches = crate::ui::text::paint::prepare_glyph_batches(
+            computed.box_for(paragraph).unwrap().content_origin(),
+            &first_selection,
+        )
+        .unwrap();
+        assert!(
+            glyph_batches
+                .iter()
+                .map(|batch| batch.glyphs().len())
+                .sum::<usize>()
+                > 0
+        );
 
         staging
             .set_style_property(nested, "font-size", "28px")

@@ -174,7 +174,7 @@ impl TextEngine {
     /// Create an engine with no platform fonts. Intended for deterministic
     /// fixtures that explicitly register a licensed embedded font.
     #[cfg(test)]
-    fn without_system_fonts() -> Self {
+    pub(crate) fn without_system_fonts() -> Self {
         Self::with_font_context(FontContext {
             collection: Collection::new(CollectionOptions {
                 shared: false,
@@ -286,6 +286,13 @@ impl TextEngine {
     }
 
     fn build_unbroken(&mut self, input: &ParagraphInput) -> Result<Layout<TextBrush>, TextError> {
+        if input.runs().len() >= usize::from(u16::MAX) {
+            return Err(TextError::TooManyStyledRuns {
+                paragraph: input.source(),
+                count: input.runs().len(),
+            });
+        }
+
         let mut builder =
             self.layout_context
                 .ranged_builder(&mut self.font_context, input.text(), 1.0, false);
@@ -297,7 +304,27 @@ impl TextEngine {
                 builder.push(property, run.range());
             }
         }
-        Ok(builder.build(input.text()))
+        let layout = builder.build(input.text());
+        if input
+            .text()
+            .chars()
+            .any(|character| !character.is_whitespace())
+        {
+            let mut probe = layout.clone();
+            probe.break_all_lines(None);
+            let has_glyph = probe.lines().any(|line| {
+                line.items().any(|item| match item {
+                    parley::PositionedLayoutItem::GlyphRun(run) => {
+                        run.positioned_glyphs().next().is_some()
+                    }
+                    parley::PositionedLayoutItem::InlineBox(_) => false,
+                })
+            });
+            if !has_glyph {
+                return Err(TextError::MissingUsableFont(input.source()));
+            }
+        }
+        Ok(layout)
     }
 }
 
@@ -557,6 +584,18 @@ mod tests {
         assert!(min.metrics().width() <= max.metrics().width());
         assert!(empty.metrics().width() >= 0.0);
         assert!(empty.metrics().height() >= 0.0);
+    }
+
+    #[test]
+    fn rejects_missing_fonts_for_non_whitespace_text() {
+        let input = input_with_style(source(), "no font", test_style(), Vec::new());
+        let mut engine = TextEngine::without_system_fonts();
+
+        let error = engine
+            .shape(&input, TextConstraint::MaxContent)
+            .unwrap_err();
+
+        assert!(matches!(error, TextError::MissingUsableFont(_)));
     }
 
     #[test]

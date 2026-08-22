@@ -2,12 +2,16 @@
 
 ## Status
 
-This document defines the complete text-path contract. The current-tree
-execution plan is in
+The initial MTS text pipeline is implemented. It includes inherited run
+collection, deterministic fingerprints, Parley shaping and bounded width
+caching, Taffy measured leaves and baselines, exact final-width selection, and
+a Vello Hybrid glyph adapter using the selected layout. The current-tree
+execution details are in
 [`dom_problem_6_implementation_plan.md`](dom_problem_6_implementation_plan.md).
-It does not add Parley or a shaping module yet. Those dependencies and modules
-should be introduced when Taffy measurement and Vello glyph rendering are
-implemented together.
+
+Native scene construction and presentation still depend on Problems 8 and 10.
+The current full-rebuild path is the correctness fallback until Problem 3 adds
+bounded incremental text-dirty batches.
 
 The current foundation already has:
 
@@ -394,12 +398,16 @@ the last valid presented scene where possible and schedule/report the failure.
 
 ### Phase 2: Paragraph and run collection
 
+**Status: implemented.**
+
 - Define outer text elements as the only paragraph roots.
 - Implement inherited style collection and adjacent-run merging.
 - Generate deterministic text/style fingerprints.
 - Add UTF-8, nested span, reparenting, empty-string, and deep-tree tests.
 
 ### Phase 3: Parley shaping
+
+**Status: implemented.**
 
 - Add the pinned Parley dependency.
 - Add reusable `TextEngine` contexts.
@@ -409,6 +417,8 @@ the last valid presented scene where possible and schedule/report the failure.
 
 ### Phase 4: Taffy measured leaves
 
+**Status: implemented.**
+
 - Reconcile paragraph roots into measured Taffy leaves.
 - Implement definite, min-content, and max-content measurement.
 - Add bounded width-variant caching.
@@ -416,12 +426,18 @@ the last valid presented scene where possible and schedule/report the failure.
 
 ### Phase 5: Vello glyph painting
 
+**Status: paint adapter implemented; native scene-host invocation remains
+Problem 8.**
+
 - Enable the Vello Hybrid `text` feature.
 - Convert Parley glyph runs and font resources into Vello glyph submissions.
 - Render from the measured cached layout.
 - Verify content-box offsets, clipping, colors, nested styles, and Unicode.
 
 ### Phase 6: Commit integration and invalidation
+
+**Status: full-rebuild revision consistency is implemented; incremental
+change batches remain Problem 3.**
 
 - Carry text-dirty sources in committed change sets.
 - Remove cache entries for deleted nodes.

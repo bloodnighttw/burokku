@@ -13,6 +13,14 @@ already implemented in the current tree, resolves the integration details that
 are specific to the current dependency versions, and divides the remaining work
 into mergeable stages.
 
+## Status
+
+Stages 0 through 5 are implemented for the MTS pipeline: dependency
+compatibility, styled-run collection, Parley shaping/cache, Taffy measurement,
+exact final-width selection, and the Vello glyph adapter. Stage 6 still depends
+on the native scene/presentation host from Problems 8 and 10. Stage 7 and
+incremental text-dirty batches remain follow-up work.
+
 ## Current-state findings
 
 | Area | Current implementation | Planning consequence |
@@ -22,9 +30,9 @@ into mergeable stages.
 | JavaScript facade | `textContent`, `nodeValue`, and `TextNode.data` delegate to native operations. Native errors expose invalid placement, and runtime typings restrict child kinds and writable text properties. | No new JavaScript text API is needed for shaping; framework fixtures must use explicit text elements. |
 | Publication | `DomPublisher` atomically publishes immutable `PublishedDom { snapshot, changes }` values. `ChangeSet` currently has only `FullRebuild`. | All MTS text work must consume one retained publication. A full recollection per committed revision is the correctness-first invalidation strategy. |
 | Typography | `TextStyle`, `ComputedTextStyle`, `FontWeight`, `LineHeight`, `TextWrap`, and validated setters exist in `ui/elements/styles/text.rs`. | Reuse these authoritative values and add only MTS conversion code. Do not put Parley types in DOM nodes or snapshots. |
-| Taffy | Styles convert to `taffy::Style<String>`, but there is no `TaffyTree`, DOM-to-Taffy map, reconciler, or layout frame. The lockfile currently resolves Taffy `0.11.0`. | Problem 6 needs a text-aware portion of problem 7. Implement it behind a viewport-parameterized MTS layout API so it can be tested before the native window host exists. |
-| Vello | `vello_hybrid` `0.2.0` is present with `default-features = false` and only `wgpu`; its `text` feature is therefore disabled. There is no scene/presentation host. | Enable `text`, add a pure Parley-to-glyph adapter, and integrate it with renderer-owned `Scene` and `Resources` when problem 8 provides them. |
-| Host integration | `ui.rs` currently exposes only `dom_plugin` and `elements`; no application host, native-window owner, computed layout state, or renderer exists. | Keep collection, shaping, caching, and measured layout independently testable. Final presentation integration is explicitly dependent on problems 7, 8, and 10. |
+| Taffy | The low-level trait engine reconciles one immutable publication, measures outer text leaves through the Parley engine, propagates baselines, and retains exact final-width selections. | Keep layout and selected text revision-matched while the future host supplies live viewports. |
+| Vello | `vello_hybrid` `0.2.0` has its `text` feature enabled. `ui/text/paint.rs` converts retained Parley runs to Glifo/Vello glyph submissions without reshaping or copying font bytes. | The Problem 8 scene host must invoke the adapter and own persistent `Resources`. |
+| Host integration | `ui.rs` registers crate-private `layout` and `text` modules, but no complete native window/renderer application host exists. | Final presentation integration remains explicitly dependent on Problems 8 and 10. |
 
 The current `NodeRevisions::{structure, style, content}` values do not summarize
 descendant changes into a paragraph root. The initial implementation must not
@@ -300,6 +308,8 @@ must be rejected at the attempted mutation.
 
 ### Stage 0: dependency and API compatibility spike
 
+**Status: implemented.**
+
 Update `crates/burokku/Cargo.toml` in a small, compile-tested change:
 
 - add and lock Parley `0.11.1`;
@@ -343,6 +353,8 @@ a test oracle.
 
 ### Stage 1: paragraph collection and fingerprints
 
+**Status: implemented.**
+
 Implement `ui/text/collect.rs` against `DomSnapshot`.
 
 Collection algorithm for an outer text element:
@@ -380,6 +392,8 @@ those modules cannot disagree about which nodes are consumed.
   input.
 
 ### Stage 2: reusable Parley engine and cache
+
+**Status: implemented.**
 
 Implement an MTS-only `TextEngine` containing:
 
@@ -449,6 +463,8 @@ insert a failed result into the cache.
 
 ### Stage 3: text-aware full Taffy reconciliation
 
+**Status: implemented using Taffy's low-level trait API.**
+
 Implement the first full-rebuild reconciler as a coordinated subset of problem
 7. It should consume one `&PublishedDom` and an explicit logical viewport.
 
@@ -466,21 +482,11 @@ Representation rules:
   fallback Taffy leaf;
 - child order follows the committed snapshot exactly.
 
-Use a context such as:
-
-```rust
-struct TextLeafContext {
-    source: NodeId,
-    input: Rc<ParagraphInput>,
-}
-```
-
-The Taffy measure closure captures `&mut TextEngine`. In Taffy `0.11`, the
-`available_space` passed to a leaf measure callback has already had the leaf's
-margin, padding, border, and scrollbar inset handling applied. The callback must
-return Parley's content size only; it must not subtract or add padding again.
-Characterization tests against the pinned Taffy version should enforce this
-assumption.
+Each paragraph `LayoutRole` retains an `Rc<ParagraphInput>`. The temporary
+low-level Taffy trait adapter borrows `&mut TextEngine`; its `compute_leaf_layout`
+measurement closure returns Parley's content size only. Taffy remains
+responsible for margin, padding, border, scrollbar insets, explicit dimensions,
+and the final box.
 
 Handle width modes explicitly and defensively:
 
@@ -490,15 +496,12 @@ Handle width modes explicitly and defensively:
 - known dimensions remain Taffy's authority. Use the content width reflected in
   `available_space` to line-break text needed for an unknown height.
 
-Run with Taffy rounding disabled. Compute into a temporary tree and maps; publish
-that computed state internally only after reconciliation and layout succeed.
-
-Taffy `0.11`'s `TaffyTree::compute_layout_with_measure` callback returns only a
-`Size`, not a typographic baseline. Retain Parley's baseline metrics for glyph
-painting, but treat Taffy's measured-leaf baseline fallback as an explicit first
-implementation limitation. Add a characterization test and do not claim true
-text-baseline alignment until Taffy exposes it or the project adopts a custom
-layout-tree adapter that can return `LayoutOutput::first_baselines`.
+Run with Taffy rounding disabled. Compute into temporary topology and sidecars;
+replace the current computed frame only after reconciliation, shaping, layout,
+final-width selection, and finite-value validation succeed. The low-level trait
+adapter writes Parley's first typographic baseline into
+`LayoutOutput::first_baselines`, including the outer paragraph's top border and
+padding exactly once.
 
 **Tests**
 
@@ -517,6 +520,8 @@ layout-tree adapter that can return `LayoutOutput::first_baselines`.
   published.
 
 ### Stage 4: final-width selection and revision-safe computed frames
+
+**Status: implemented.**
 
 After Taffy computes layout:
 
@@ -552,6 +557,8 @@ match at each boundary.
 - NodeId generation reuse cannot retrieve a reclaimed node's cache entry.
 
 ### Stage 5: Vello Hybrid paint adapter
+
+**Status: implemented; invocation by the native scene host remains Problem 8.**
 
 Implement `ui/text/paint.rs` as an adapter from the retained Parley layout to
 renderer-owned Vello state. It should accept an existing
