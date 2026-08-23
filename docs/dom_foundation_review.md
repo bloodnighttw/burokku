@@ -157,15 +157,14 @@ sequence are in `docs/dom_facade_lifetime_plan.md`.
   generation;
 - one measured Taffy leaf per outer text element, with nested text descendants
   omitted from layout topology;
-- first-baseline propagation and exact final-content-width selection;
-- revision-safe retention of the selected `ShapedParagraph` in
-  `ComputedLayout`;
-- a Vello Hybrid glyph adapter that paints that same selected layout without
+- first-baseline propagation and exact final-content-width resolution;
+- revision-safe retention of the final `ShapedParagraph` in `ComputedLayout`;
+- a Vello Hybrid glyph adapter that paints that same final layout without
   reshaping or copying font bytes;
 - deterministic tests using an embedded licensed Noto Sans fixture.
 
 The current full-rebuild publication path correctly recollects descendant text
-and style changes. The scene host now consumes the exact selected paragraph and
+and style changes. The scene host now consumes the exact final paragraph and
 presents it through Vello under the native logical viewport. Incremental
 `text_dirty` batches remain a Problem 3 optimization.
 
@@ -193,7 +192,7 @@ It now provides:
 - a derived-topology boundary that can later represent positioned containing
   blocks separately from DOM and paint/stacking relationships.
 
-The scene host now consumes selected Parley layouts and native window events
+The scene host now consumes final Parley layouts and native window events
 supply live viewports. A bounded incremental `ChangeSet` can replace full
 rebuilding after Problem 3 defines its protocol.
 
@@ -205,7 +204,8 @@ The detailed design and follow-up stages are in
 **Status: initial implementation completed.** The MTS host now:
 
 - lowers computed boxes into a deterministic parent-before-child scene plan;
-- paints element backgrounds and the exact Parley layouts selected by Taffy;
+- paints element backgrounds and the exact final Parley layouts resolved after
+  Taffy;
 - applies the logical-to-physical scale once at the Vello scene root;
 - retains revision-tagged paint and hit-test data;
 - creates and resizes WGPU surfaces plus Vello Hybrid renderer resources;

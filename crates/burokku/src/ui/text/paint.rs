@@ -101,7 +101,7 @@ impl GlyphPaintStats {
     }
 }
 
-/// Prepare exact glyph runs from the shaped layout selected after Taffy.
+/// Prepare exact glyph runs from the final shaped layout resolved after Taffy.
 ///
 /// Parley's `positioned_glyphs` already contains each run's horizontal offset
 /// and baseline. This adapter adds only the paragraph content-box origin.
@@ -188,7 +188,7 @@ pub(crate) fn prepare_replacement_boxes(
     Ok(prepared)
 }
 
-/// Submit an already-selected shaped paragraph to renderer-owned Vello state.
+/// Submit a resolved final shaped paragraph to renderer-owned Vello state.
 pub(crate) fn paint_paragraph(
     scene: &mut Scene,
     resources: &mut Resources,
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_colored_glyph_runs_from_the_selected_layout() {
+    fn prepares_colored_glyph_runs_from_the_final_layout() {
         let shaped = shaped();
 
         let batches = prepare_glyph_batches(Point { x: 10.0, y: 20.0 }, &shaped).unwrap();

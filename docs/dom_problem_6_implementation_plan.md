@@ -17,9 +17,9 @@ into mergeable stages.
 
 Stages 0 through 6 are implemented for the initial full-rebuild pipeline:
 dependency compatibility, styled-run collection, Parley shaping/cache, Taffy
-measurement, exact final-width selection, Vello glyph submission, and native
-scene presentation. Stage 7 and incremental text-dirty batches remain follow-up
-work.
+measurement, exact final-width paragraph resolution, Vello glyph submission,
+and native scene presentation. Stage 7 and incremental text-dirty batches remain
+follow-up work.
 
 ## Current-state findings
 
@@ -30,7 +30,7 @@ work.
 | JavaScript facade | `textContent`, `nodeValue`, and `TextNode.data` delegate to native operations. Native errors expose invalid placement, and runtime typings restrict child kinds and writable text properties. | No new JavaScript text API is needed for shaping; framework fixtures must use explicit text elements. |
 | Publication | `DomPublisher` atomically publishes immutable `PublishedDom { snapshot, changes }` values. `ChangeSet` currently has only `FullRebuild`. | All MTS text work must consume one retained publication. A full recollection per committed revision is the correctness-first invalidation strategy. |
 | Typography | `TextStyle`, `ComputedTextStyle`, `FontWeight`, `LineHeight`, `TextWrap`, and validated setters exist in `ui/elements/styles/text.rs`. | Reuse these authoritative values and add only MTS conversion code. Do not put Parley types in DOM nodes or snapshots. |
-| Taffy | The low-level trait engine reconciles one immutable publication, measures outer text leaves through the Parley engine, propagates baselines, and retains exact final-width selections. | Keep layout and selected text revision-matched while the future host supplies live viewports. |
+| Taffy | The low-level trait engine reconciles one immutable publication, measures outer text leaves through the Parley engine, propagates baselines, and retains exact final-width paragraphs. | Keep layout and final paragraphs revision-matched while the future host supplies live viewports. |
 | Vello | `vello_hybrid` `0.2.0` has its `text` feature enabled. `ui/text/paint.rs` converts retained Parley runs to Glifo/Vello glyph submissions without reshaping or copying font bytes. | The scene host invokes the adapter with renderer-owned `Resources`. |
 | Host integration | `Burokku::builder()` assembles native Window ownership, live viewports, layout, scene planning, WGPU surfaces, and presentation. | Input-to-JavaScript dispatch remains Problem 9. |
 
@@ -51,7 +51,7 @@ reparenting changes.
 - shape and line-break those runs with Parley;
 - cache reusable shaping and bounded width variants on MTS;
 - represent each paragraph source as one measured Taffy leaf;
-- select a final shaped layout from the actual Taffy content-box width;
+- resolve a final shaped layout from the actual Taffy content-box width;
 - submit that exact layout's glyphs to Vello Hybrid;
 - retain revision consistency from publication through computed layout and
   scene construction;
@@ -184,7 +184,7 @@ Canonicalize negative zero to zero and reject negative, NaN, and infinite finite
 widths. Keep one active input/font/config entry and two to four width variants
 per source initially; replacing the input drops that source's old variants.
 Cache entries may be reused across DOM revisions when their complete inputs are
-equal, but the selected-layout map and computed frame must always carry the
+equal, but the final-paragraph map and computed frame must always carry the
 publication revision they represent.
 
 A fingerprint is an accelerator, not proof of equality. Store the canonical
@@ -194,8 +194,8 @@ hash collision cannot produce stale text.
 ### 6. Measurement and painting share one final layout
 
 Taffy `0.11` may probe a measured leaf more than once, and it may skip the
-measure callback when both dimensions are already known. Therefore, "the last
-layout requested by the callback" is not a valid paint selection.
+measure callback when both dimensions are already known. Therefore, the last
+layout requested by the callback does not identify the final paint paragraph.
 
 Use two steps:
 
@@ -204,9 +204,9 @@ Use two steps:
 2. After `compute_layout_with_measure`, traverse all text leaves, read each
    final `taffy::Layout::content_box_width()`, obtain the matching finite-width
    Parley variant, and store that exact retained layout in the computed frame's
-   selected-layout map.
+   final-paragraph map.
 
-Painting reads only the selected-layout map. It never reshapes and never guesses
+Painting reads only the final-paragraph map. It never reshapes and never guesses
 which measurement probe became final.
 
 ### 7. Logical coordinates remain unscaled
@@ -224,7 +224,7 @@ quantization later becomes scale-dependent.
 
 ### 8. Computed-state replacement is atomic on MTS
 
-Build reconciliation, layout, and final text selection into a temporary
+Build reconciliation, layout, and final paragraph resolution into a temporary
 computed value tagged with the target revision. Replace the last valid computed
 state only after every step succeeds. A shaping, Taffy, or paint-preparation
 error must not mark the target revision as computed or presented.
@@ -239,7 +239,7 @@ crates/burokku/src/ui/
 ├── layout.rs
 ├── layout/
 │   ├── reconcile.rs     # snapshot -> full Taffy tree and source maps
-│   ├── measure.rs       # Taffy callback and final-width selection
+│   ├── measure.rs       # Taffy callback and final paragraph resolution
 │   └── computed.rs      # revision-tagged temporary/committed MTS state
 ├── text.rs
 └── text/
@@ -256,7 +256,7 @@ boundaries:
 - collection depends only on immutable DOM/style data;
 - shaping and cache do not depend on Vello;
 - Taffy measurement calls the text engine but does not paint;
-- painting consumes an already-selected layout and cannot shape;
+- painting consumes an already-resolved final layout and cannot shape;
 - renderer-owned `vello_hybrid::Resources` remains outside the text engine.
 
 `crates/burokku/src/ui.rs` should expose these modules only at the minimum
@@ -501,8 +501,8 @@ Handle width modes explicitly and defensively:
 
 Run with Taffy rounding disabled. Compute into temporary topology and sidecars;
 replace the current computed frame only after reconciliation, shaping, layout,
-final-width selection, and finite-value validation succeed. The low-level trait
-adapter writes Parley's first typographic baseline into
+final paragraph resolution, and finite-value validation succeed. The low-level
+trait adapter writes Parley's first typographic baseline into
 `LayoutOutput::first_baselines`, including the outer paragraph's top border and
 padding exactly once.
 
@@ -522,7 +522,7 @@ padding exactly once.
 - a retained old `PublishedDom` can finish layout while a newer revision is
   published.
 
-### Stage 4: final-width selection and revision-safe computed frames
+### Stage 4: final paragraph resolution and revision-safe computed frames
 
 **Status: implemented.**
 
@@ -531,7 +531,7 @@ After Taffy computes layout:
 1. traverse every mapped text leaf;
 2. read its final content-box width from the Taffy layout;
 3. retrieve or create the exact matching finite-width Parley variant;
-4. retain it in `selected_text: HashMap<NodeId, Rc<ShapedParagraph>>`;
+4. retain it in `final_paragraphs: HashMap<NodeId, Rc<ShapedParagraph>>`;
 5. record the target DOM revision on the computed frame;
 6. prune cache sources not present in the new reachable source set.
 
@@ -541,7 +541,7 @@ The computed frame should expose enough read-only data for scene construction:
 revision
 DOM NodeId -> Taffy NodeId
 final Taffy layouts
-text source -> selected shaped paragraph
+text source -> final shaped paragraph
 text descendant -> source owner
 ```
 
@@ -551,10 +551,10 @@ match at each boundary.
 
 **Tests**
 
-- the selected variant matches the final content width rather than merely the
+- the final paragraph matches the final content width rather than merely the
   last measurement callback;
-- a leaf with both explicit dimensions still receives a paintable selected
-  layout even if Taffy skipped measurement;
+- a leaf with both explicit dimensions still receives a paintable final
+  paragraph even if Taffy skipped measurement;
 - a failed final reshape leaves the preceding computed frame current;
 - deleting a paragraph evicts its source entries;
 - NodeId generation reuse cannot retrieve a reclaimed node's cache entry.
@@ -600,7 +600,8 @@ and variation data without depending on private Vello scene internals.
 - font size, weight, font selection, variations, and synthesis reach Glifo;
 - content origin includes Taffy padding exactly once;
 - the first baseline is not applied twice;
-- the adapter consumes the exact `Rc<ShapedParagraph>` selected after Taffy;
+- the adapter consumes the exact final `Rc<ShapedParagraph>` resolved after
+  Taffy;
 - a small headless pixel smoke test uses the embedded font and explicit
   tolerances when GPU test infrastructure is available.
 
@@ -614,7 +615,7 @@ For each redraw:
 1. load `PublishedDomReader` once and retain that `Arc<PublishedDom>`;
 2. obtain the current logical viewport from the committed native `Window`;
 3. reconcile and lay out only when the loaded revision or viewport requires it;
-4. finalize text selections;
+4. resolve final paragraphs;
 5. build backgrounds and text into a scratch Vello scene from the same
    publication and computed revision, then replace the current scene only after
    construction succeeds;
@@ -698,11 +699,11 @@ Problem 6 is complete for the initial contract when all of the following hold:
   constraints without double-counting padding;
 - cache reuse is bounded and keyed by complete input, width mode, font
   generation, and shaping configuration;
-- final scene construction uses the exact Parley layout selected from Taffy's
+- final scene construction uses the exact Parley layout resolved from Taffy's
   final content-box width;
 - font data is shared without per-frame byte copies;
-- publication, computed layout, selected text, scene, and presented frame carry
-  one matching DOM revision;
+- publication, computed layout, final paragraphs, scene, and presented frame
+  carry one matching DOM revision;
 - failure retains the last complete computed/presented revision;
 - the example program in `text_rendering_plan.md` renders and updates visible
   glyphs end to end.

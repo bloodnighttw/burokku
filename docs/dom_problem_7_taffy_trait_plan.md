@@ -19,7 +19,7 @@ IDs, style conversion, low-level Taffy traits, complete-output caches, viewport
 root constraints, paragraph measurement hooks, baseline propagation, computed
 absolute boxes, failure-atomic replacement, and focused regression tests.
 
-The Parley-backed `TextMeasurer`, final-width shaped-layout selection, native
+The Parley-backed `TextMeasurer`, final-width paragraph resolution, native
 Window viewport wiring, revision-tagged Vello scene planning, and WGPU
 presentation are now implemented. Positioned stacking contexts and the
 incremental `ChangeSet` path remain coordinated with future style work and
@@ -46,7 +46,7 @@ Problem 3 respectively. The text-specific work is detailed in
    node.
 7. Run `compute_root_layout` into scratch topology/sidecars and replace the last
    complete layout only after reconciliation, measurement, validation, and
-   final text selection all succeed.
+   final paragraph resolution all succeed.
 8. Start with a full lowering for every `ChangeSet::FullRebuild`. Incremental
    batches later update the derived topology and sidecars transactionally.
 9. Treat future `z-index` as paint/stacking state, not as a Taffy property.
@@ -138,7 +138,7 @@ BTS staging Dom
     -> lower snapshot into scratch LayoutTopology + node sidecars
     -> trait adapter borrows topology + scratch sidecars + TextEngine
     -> Taffy compute_root_layout
-    -> final paragraph-width selection
+    -> final paragraph resolution
     -> finite/layout invariant validation
     -> atomically replace MTS ComputedLayout
     -> build paint/stacking tree from the same revision
@@ -273,7 +273,7 @@ struct ScratchLayout {
     topology: LayoutTopology,
     nodes: HashMap<LayoutId, LayoutNodeState>,
     text_owner: HashMap<DomNodeId, DomNodeId>,
-    selected_text: HashMap<DomNodeId, Rc<ShapedParagraph>>,
+    final_paragraphs: HashMap<DomNodeId, Rc<ShapedParagraph>>,
 }
 
 struct ComputedLayout {
@@ -283,7 +283,7 @@ struct ComputedLayout {
     window: Option<DomNodeId>,
     topology: LayoutTopology, // private derived state
     boxes: HashMap<DomNodeId, ComputedBox>,
-    selected_text: HashMap<DomNodeId, Rc<ShapedParagraph>>,
+    final_paragraphs: HashMap<DomNodeId, Rc<ShapedParagraph>>,
     text_owner: HashMap<DomNodeId, DomNodeId>,
 }
 ```
@@ -349,8 +349,8 @@ For every publication carrying `ChangeSet::FullRebuild`:
 11. Validate topology mappings, parent uniqueness, root, acyclicity, child
     order, sidecar membership, and paragraph leaf status.
 12. Run Taffy only after the complete scratch representation validates.
-13. Build absolute boxes and exact final paragraph selections by traversing the
-    same derived topology.
+13. Build absolute boxes and resolve the exact final paragraphs by traversing
+    the same derived topology.
 14. Prune persistent text-cache sources and publish the new computed state only
     after the complete layout succeeds.
 
@@ -496,12 +496,12 @@ remains whatever Taffy 0.11's selected block/flex/grid algorithms provide; do
 not claim browser inline-baseline behavior for an intervening `Div`.
 
 Taffy may request several constraints and may later choose a different final
-width. After root layout, repeat the Problem 6 final-selection pass:
+width. After root layout, repeat the Problem 6 final paragraph-resolution pass:
 
 - read each paragraph leaf's final content-box width;
 - retrieve or build the exact finite-width Parley variant;
-- retain it in `selected_text` for this revision;
-- make painting consume only that selected object.
+- retain it in `final_paragraphs` for this revision;
+- make painting consume only that final paragraph.
 
 Nested text nodes remain absent from Taffy regardless of which text variants are
 measured.
@@ -522,7 +522,7 @@ Use this policy:
    or write algorithm caches.
 5. After `compute_root_layout` returns, propagate the latched error and discard
    all scratch layout state.
-6. Validate every committed layout size, location, inset, and selected text
+6. Validate every committed layout size, location, inset, and final paragraph
    metric as finite before replacement.
 7. Leave the previous `ComputedLayout` and scene current after any failure.
 
@@ -716,8 +716,8 @@ old containing-block, removal, and source-order information to invalidate state
 that no longer exists in the target topology. If it does not, fall back to a
 full rebuild.
 
-Commit the incrementally reconciled state only after layout and final text
-selection succeed, just like the full path.
+Commit the incrementally reconciled state only after layout and final paragraph
+resolution succeed, just like the full path.
 
 ## Dependency configuration
 
@@ -765,7 +765,7 @@ crates/burokku/src/ui/
 ├── paint.rs            # Problem 8 scene/paint boundary
 ├── paint/
 │   └── stacking.rs     # future stacking contexts and final paint order
-└── text/               # paragraph collection, Parley engine/cache, selection
+└── text/               # paragraph collection, Parley engine/cache, resolution
 ```
 
 Suggested file-level changes:
@@ -778,7 +778,7 @@ Suggested file-level changes:
 | `crates/burokku/src/ui/elements/styles/common.rs` | Later add the explicit Burokku position/inset/z-index contract; keep layout-affecting and stacking-only invalidation distinguishable. |
 | `crates/burokku/src/ui/layout*` | Add `LayoutId`, derived topology, sidecars, full lowering, trait implementations, layout entry point, errors, and computed boxes. |
 | `crates/burokku/src/ui/elements/publication.rs` | No first-pass protocol change. Continue consuming `FullRebuild`; extend only when a real incremental batch exists. |
-| `crates/burokku/src/ui/text*` | Supply paragraph inputs, fallible measurement, baselines, and final-width selected layouts. |
+| `crates/burokku/src/ui/text*` | Supply paragraph inputs, fallible measurement, baselines, and final-width resolved layouts. |
 | future Window host | Supply the actual logical viewport and coalesce commit/resize redraw requests. |
 | future renderer/paint modules | Build a revision-matched stacking-context tree and paint order from the publication plus `ComputedLayout`. |
 
@@ -838,12 +838,12 @@ full rebuild.
 - Measure min-content, max-content, and definite widths through
   `compute_leaf_layout`.
 - Return the first typographic baseline in `LayoutOutput`.
-- Select exact final-width layouts after Taffy.
+- Resolve exact final-width layouts after Taffy.
 - Keep nested spans out of Taffy and retain owner mappings.
 
 **Exit criteria:** one outer paragraph creates one measured leaf, flex/grid
 baseline behavior is deterministic on cache hits and misses, and painting can
-consume the exact selected Parley object.
+consume the exact final Parley object.
 
 ### Stage 4: Window host and frame integration
 
@@ -943,7 +943,7 @@ stacking-only updates preserve those results.
 
 - Min-content, max-content, and finite constraints reach the expected Parley
   variants.
-- Explicit text dimensions still produce a selected paint layout if Taffy skips
+- Explicit text dimensions still produce a final paint paragraph if Taffy skips
   intrinsic measurement.
 - Padding contributes exactly once to text size and origin.
 - Parley's first baseline includes the outer box's top inset exactly once.
@@ -963,7 +963,7 @@ stacking-only updates preserve those results.
   static-position cases.
 - Negative, auto/zero, and positive z-index groups obey nested stacking-context
   boundaries and stable source-order ties.
-- A z-index-only change preserves computed Taffy geometry and text selection.
+- A z-index-only change preserves computed Taffy geometry and final paragraphs.
 - Hit testing in reverse presented paint order selects the topmost painted node.
 
 ## Validation commands
@@ -1000,8 +1000,8 @@ Problem 7 is complete for the initial full-rebuild contract when:
   style, and text changes;
 - text measurement returns complete dimensions and typographic baselines without
   cache-dependent results;
-- final computed boxes and selected paragraphs all carry the publication
-  revision and viewport used to produce them;
+- final computed boxes and final paragraphs all carry the publication revision
+  and viewport used to produce them;
 - any failure leaves the previous complete computed/presented state intact;
 - the topology abstraction can later represent containing-block reparenting
   without changing DOM identity or the Taffy trait surface;
