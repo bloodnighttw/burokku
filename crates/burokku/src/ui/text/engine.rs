@@ -314,12 +314,12 @@ impl TextEngine {
     }
 
     fn build_unbroken(&mut self, input: &ParagraphInput) -> Result<Layout<TextBrush>, TextError> {
-        if input.runs().len() >= usize::from(u16::MAX) {
-            return Err(TextError::TooManyStyledRuns {
-                paragraph: input.source(),
-                count: input.runs().len(),
-            });
-        }
+        assert!(
+            input.runs().len() < usize::from(u16::MAX),
+            "paragraph {:?} has {} styled runs, exceeding the supported limit",
+            input.source(),
+            input.runs().len()
+        );
 
         let layout = self.build_layout(input, false);
         if input
@@ -715,6 +715,21 @@ mod tests {
         );
         assert!(paragraph.layout().lines().count() > 1);
         assert!(paragraph.metrics().height() > test_style().font_size);
+    }
+
+    #[test]
+    #[should_panic(expected = "styled runs, exceeding the supported limit")]
+    fn excessive_styled_runs_panic() {
+        let count = usize::from(u16::MAX);
+        let text = "a".repeat(count);
+        let style = test_style();
+        let runs = (0..count)
+            .map(|index| StyledTextRun::new(index..index + 1, style.clone()))
+            .collect();
+        let input = ParagraphInput::new(source(), style, text, runs);
+        let mut engine = engine();
+
+        let _ = engine.shape(&input, TextConstraint::MaxContent);
     }
 
     #[test]

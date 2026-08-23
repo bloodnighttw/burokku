@@ -120,12 +120,11 @@ pub(super) fn reconcile_full(
     schedule_children(snapshot, window, window_layout, 1, &mut pending)?;
 
     while let Some(next) = pending.pop() {
-        if next.depth > MAX_LAYOUT_DEPTH {
-            return Err(LayoutError::TreeTooDeep {
-                node: next.dom_id,
-                limit: MAX_LAYOUT_DEPTH,
-            });
-        }
+        assert!(
+            next.depth <= MAX_LAYOUT_DEPTH,
+            "layout tree exceeds the supported depth of {MAX_LAYOUT_DEPTH} at node {:?}",
+            next.dom_id
+        );
         if !seen_dom.insert(next.dom_id) {
             return Err(LayoutError::DuplicateDomNode(next.dom_id));
         }

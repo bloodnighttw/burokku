@@ -561,7 +561,8 @@ mod tests {
     }
 
     #[test]
-    fn excessive_layout_depth_is_rejected_before_taffy_recursion() {
+    #[should_panic(expected = "layout tree exceeds the supported depth")]
+    fn excessive_layout_depth_panics_before_taffy_recursion() {
         let mut dom = Dom::new();
         let window = element(&mut dom, ElementTag::Window);
         dom.append_child(dom.root(), window).unwrap();
@@ -573,12 +574,7 @@ mod tests {
         }
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let error = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap_err();
-
-        assert!(matches!(error, LayoutError::TreeTooDeep { .. }));
-        assert!(engine.current().is_none());
+        let _ = engine.compute(publication(&dom), viewport(300.0, 200.0));
     }
 
     #[test]

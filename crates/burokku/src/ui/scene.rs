@@ -182,9 +182,9 @@ impl BuiltScene {
     ) -> Result<Self, SceneError> {
         let plan = ScenePlan::from_layout(computed, physical_size, scale_factor)?;
         let width = u16::try_from(physical_size.width)
-            .map_err(|_| SceneError::TargetTooLarge(physical_size))?;
+            .expect("scene target width was validated before Vello construction");
         let height = u16::try_from(physical_size.height)
-            .map_err(|_| SceneError::TargetTooLarge(physical_size))?;
+            .expect("scene target height was validated before Vello construction");
         let mut scene = Scene::new(width, height);
         scene.set_transform(Affine::scale(scale_factor));
         let mut glyph_runs = 0;
@@ -250,9 +250,10 @@ fn validate_target(size: PhysicalSize<u32>, scale_factor: f64) -> Result<(), Sce
     if size.width == 0 || size.height == 0 {
         return Err(SceneError::EmptyTarget);
     }
-    if size.width > u32::from(u16::MAX) || size.height > u32::from(u16::MAX) {
-        return Err(SceneError::TargetTooLarge(size));
-    }
+    assert!(
+        size.width <= u32::from(u16::MAX) && size.height <= u32::from(u16::MAX),
+        "physical target {size:?} exceeds Vello Hybrid's u16 scene dimensions"
+    );
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return Err(SceneError::InvalidScaleFactor(scale_factor));
     }
@@ -277,9 +278,6 @@ fn validate_rect(node: NodeId, rect: LogicalRect) -> Result<(), SceneError> {
 pub(crate) enum SceneError {
     #[error("cannot build a scene for a zero-sized target")]
     EmptyTarget,
-
-    #[error("physical target {0:?} exceeds Vello Hybrid's u16 scene dimensions")]
-    TargetTooLarge(PhysicalSize<u32>),
 
     #[error("display scale factor must be positive and finite, got {0}")]
     InvalidScaleFactor(f64),
@@ -375,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_physical_targets_and_scale() {
+    fn rejects_empty_physical_targets_and_invalid_scale() {
         let (layout, ..) = computed_fixture();
         let computed = layout.current().unwrap();
 
@@ -387,9 +385,17 @@ mod tests {
             ScenePlan::from_layout(computed, PhysicalSize::new(10, 10), f64::NAN),
             Err(SceneError::InvalidScaleFactor(_))
         ));
-        assert!(matches!(
-            ScenePlan::from_layout(computed, PhysicalSize::new(70_000, 10), 1.0),
-            Err(SceneError::TargetTooLarge(_))
-        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds Vello Hybrid's u16 scene dimensions")]
+    fn oversized_physical_targets_panic() {
+        let (layout, ..) = computed_fixture();
+
+        let _ = ScenePlan::from_layout(
+            layout.current().unwrap(),
+            PhysicalSize::new(70_000, 10),
+            1.0,
+        );
     }
 }
