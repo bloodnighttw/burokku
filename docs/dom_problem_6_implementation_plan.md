@@ -30,7 +30,7 @@ follow-up work.
 | JavaScript facade | `textContent`, `nodeValue`, and `TextNode.data` delegate to native operations. Native errors expose invalid placement, and runtime typings restrict child kinds and writable text properties. | No new JavaScript text API is needed for shaping; framework fixtures must use explicit text elements. |
 | Publication | `DomPublisher` atomically publishes immutable `PublishedDom { snapshot, changes }` values. `ChangeSet` currently has only `FullRebuild`. | All MTS text work must consume one retained publication. A full recollection per committed revision is the correctness-first invalidation strategy. |
 | Typography | `TextStyle`, `ComputedTextStyle`, `FontWeight`, `LineHeight`, `TextWrap`, and validated setters exist in `ui/elements/styles/text.rs`. | Reuse these authoritative values and add only MTS conversion code. Do not put Parley types in DOM nodes or snapshots. |
-| Taffy | The low-level trait engine reconciles one immutable publication, measures outer text leaves through the Parley engine, propagates baselines, and retains exact final-width paragraphs. | Keep layout and final paragraphs revision-matched while the future host supplies live viewports. |
+| Taffy | The low-level trait engine reconciles one immutable publication, measures outer text leaves through the Parley engine, propagates baselines, and retains exact final-width paragraphs. | Keep each computed layout and its final paragraphs revision-matched while the host supplies live viewports; a presented frame may lag that computed revision. |
 | Vello | `vello_hybrid` `0.2.0` has its `text` feature enabled. `ui/text/paint.rs` converts retained Parley runs to Glifo/Vello glyph submissions without reshaping or copying font bytes. | The scene host invokes the adapter with renderer-owned `Resources`. |
 | Host integration | `Burokku::builder()` assembles native Window ownership, live viewports, layout, scene planning, WGPU surfaces, and presentation. | Input-to-JavaScript dispatch remains Problem 9. |
 
@@ -53,8 +53,9 @@ reparenting changes.
 - represent each paragraph source as one measured Taffy leaf;
 - resolve a final shaped layout from the actual Taffy content-box width;
 - submit that exact layout's glyphs to Vello Hybrid;
-- retain revision consistency from publication through computed layout and
-  scene construction;
+- retain one publication within each candidate computation and revision-tag the
+  computed layout, candidate scene, and successfully presented frame
+  independently;
 - add deterministic unit, integration, and structural rendering tests.
 
 ### Out of scope for the first implementation
@@ -222,15 +223,19 @@ For the first implementation:
 Display scale is therefore not a text-cache key yet. Add it only if shaping or
 quantization later becomes scale-dependent.
 
-### 8. Computed-state replacement is atomic on MTS
+### 8. Computed-layout replacement is atomic on MTS
 
 Build reconciliation, layout, and final paragraph resolution into a temporary
-computed value tagged with the target revision. Replace the last valid computed
-state only after every step succeeds. A shaping, Taffy, or paint-preparation
-error must not mark the target revision as computed or presented.
+computed value tagged with the target revision. Replace the last valid
+`ComputedLayout` only after those layout-stage steps succeed. A shaping, Taffy,
+or final-paragraph error must not mark the target revision as computed.
 
-The persistent text cache may retain individually valid entries created before
-a later step failed; the visible computed frame must remain all-old or all-new.
+Scene construction and presentation are later, separately tagged stages. They
+may fail after a newer `ComputedLayout` has been installed; that does not roll
+back the computed layout or the authoritative DOM publication. The persistent
+text cache may retain individually valid entries created before a later step
+failed, while the last successfully presented scene and hit-test plan remain
+active where the existing surface is still usable.
 
 ## Proposed module layout
 
@@ -443,10 +448,11 @@ Preserve Parley's native empty-text result and lock it down with a
 characterization test; do not give measurement and painting separate empty-text
 special cases.
 
-Return typed errors for non-finite dimensions, malformed range coverage, and
-invalid metrics. Exceeding the internal layout-depth or styled-run limits is an
-unsupported programming condition and panics. When font resolution produces no
-glyphs for a non-whitespace paragraph, measure and paint explicit replacement
+Return typed errors for non-finite dimensions, malformed range coverage,
+invalid metrics, and styled-run resource limits. Paragraph collection is
+iterative and does not impose a separate nesting-depth limit. Accepted DOM
+input must not intentionally unwind the renderer. When font resolution produces
+no glyphs for a non-whitespace paragraph, measure and paint explicit replacement
 boxes instead of failing the frame. Do not insert failed results into the
 cache.
 
@@ -610,23 +616,28 @@ and variation data without depending on private Vello scene internals.
 This stage lands with the application host, native window lifecycle, and Vello
 renderer workstreams rather than creating a second temporary host.
 
-For each redraw:
+For each update and redraw:
 
-1. load `PublishedDomReader` once and retain that `Arc<PublishedDom>`;
-2. obtain the current logical viewport from the committed native `Window`;
-3. reconcile and lay out only when the loaded revision or viewport requires it;
-4. resolve final paragraphs;
-5. build backgrounds and text into a scratch Vello scene from the same
-   publication and computed revision, then replace the current scene only after
-   construction succeeds;
-6. render/present and record that revision only after success;
-7. if a newer commit arrived during the frame, schedule another redraw rather
-   than switching snapshots mid-frame.
+1. observe one latest `Arc<PublishedDom>` independently from applying its native
+   `WindowSpec`, and retain it as the content target;
+2. obtain the actual logical viewport from the active native `Window`;
+3. reconcile and lay out only when the target revision or viewport requires it;
+4. resolve final paragraphs and install only a complete `ComputedLayout`;
+5. build backgrounds and text into a candidate Vello scene from that computed
+   revision;
+6. render/present and record the candidate revision only after success;
+7. if a newer commit arrived during the frame, schedule another redraw and
+   coalesce directly to the newer publication rather than switching snapshots
+   mid-frame.
 
-The existing commit notifier already runs after publication. The future host
-should coalesce those notifications into redraw demand. A shaping or layout
-failure should report the target revision and retain the previous valid scene
-where possible.
+The commit notifier runs after publication and redraw demand is coalesced. The
+latest DOM publication remains authoritative even when rendering it fails; no
+DOM rollback or rejected-revision registry is used. After a frame has been
+presented, layout, text, or scene candidate failures are recorded with their
+revision and stage while the last successfully presented scene/hit-test plan
+remains active. The unchanged failing target is not immediately retried. Before
+the first successful frame, the same failures remain fatal because there is no
+usable UI to retain.
 
 **Integration tests**
 
@@ -636,7 +647,8 @@ where possible.
 - changing `TextNode.data`, `textContent`, or a nested text style changes the
   next presented revision;
 - a commit during scene construction is deferred to the next frame;
-- measurement, painting, hit-test data, and presentation record one revision;
+- each successfully presented frame's measurement, painting, hit-test data, and
+  presentation record one revision even when it lags the latest publication;
 - removing the final paragraph clears its Taffy and text-cache state.
 
 ### Stage 7: incremental invalidation and performance follow-up
@@ -702,8 +714,11 @@ Problem 6 is complete for the initial contract when all of the following hold:
 - final scene construction uses the exact Parley layout resolved from Taffy's
   final content-box width;
 - font data is shared without per-frame byte copies;
-- publication, computed layout, final paragraphs, scene, and presented frame
-  carry one matching DOM revision;
-- failure retains the last complete computed/presented revision;
+- every computed layout, candidate scene, and presented frame carries the
+  revision that produced it, while those stage revisions may temporarily
+  differ as rendering lags or coalesces publications;
+- a candidate failure leaves the latest DOM authoritative and, where the active
+  surface remains usable, retains the last successfully presented scene and
+  hit-test plan without rolling back the DOM;
 - the example program in `text_rendering_plan.md` renders and updates visible
   glyphs end to end.

@@ -203,16 +203,29 @@ The detailed design and follow-up stages are in
 
 **Status: initial implementation completed.** The MTS host now:
 
+- observes the latest immutable publication separately from best-effort native
+  WindowSpec application;
 - lowers computed boxes into a deterministic parent-before-child scene plan;
 - paints element backgrounds and the exact final Parley layouts resolved after
   Taffy;
 - applies the logical-to-physical scale once at the Vello scene root;
-- retains revision-tagged paint and hit-test data;
+- revision-tags the latest publication, computed layout, candidate scene, and
+  successfully presented frame independently, allowing normal pipeline lag and
+  coalescing;
+- keeps hit testing paired with the last successfully presented scene rather
+  than a newer unpresented layout;
 - creates and resizes WGPU surfaces plus Vello Hybrid renderer resources;
+- treats layout/text/scene and oversized-target candidate failures as
+  recoverable after a frame exists, retaining the active Window, renderer, and
+  presented plan without immediately retrying the unchanged target;
 - handles timeout, occlusion, outdated, lost, and suboptimal surface outcomes;
+- keeps active-renderer presentation, platform, device, and invariant failures
+  fatal;
 - presents only complete frames and records their DOM revision;
-- requests redraw after committed publications and native resize events.
+- never rolls back JavaScript-visible DOM state because rendering failed.
 
+A recoverable frame failure is an internal revision- and stage-tagged diagnostic,
+not the terminal result returned when the user later closes normally.
 Incremental separation of layout-dirty and paint-only changes remains blocked on
 Problem 3. Positioned stacking contexts, overflow clips, transforms, and other
 advanced paint properties remain future style-contract work.
@@ -242,12 +255,22 @@ dispatch.
 - `DOM NodeId -> native WindowId` ownership;
 - native creation from a committed `Window` and its requested size/title;
 - physical resize and scale-factor propagation into logical viewport layout;
-- transactional replacement and removal behavior;
+- candidate native Window and renderer preparation before committing a true
+  replacement, so renderer-creation failure closes only the candidate and keeps
+  the old Window/renderer/frame;
+- old-window destruction only after the replacement renderer is installed;
+- immediate committed removal of the final Window;
+- best-effort same-ID size/title updates: validate first, request size before
+  changing title, update the stored spec only after success, and use the
+  resulting actual viewport without attempting platform rollback;
 - WGPU surface, Vello resource, and computed-frame cleanup;
 - shutdown after native close or removal of the final committed Window.
 
 Forwarding native close as a JavaScript event remains part of Problem 9. The
-current tree and host intentionally support one attached window only.
+current tree and host intentionally support one attached window only. Policy
+and handoff ordering are covered through pure test seams; a real macOS
+Window/WGPU replacement smoke test remains manual because the repository has no
+headless native GPU harness.
 
 ## 11. End-to-end application integration
 

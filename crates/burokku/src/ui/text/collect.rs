@@ -31,8 +31,7 @@ struct PendingNode {
 /// Flatten one outer styled-text subtree into inherited UTF-8 runs.
 ///
 /// Traversal is iterative so script-created nesting cannot overflow the Rust
-/// stack. `source_depth` is the source's depth in the containing layout tree;
-/// `max_depth` therefore applies consistently across ordinary and text nodes.
+/// stack.
 pub(crate) fn collect_paragraph(
     snapshot: &DomSnapshot,
     source: NodeId,
@@ -335,18 +334,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "paragraph tree exceeds the supported depth")]
-    fn nesting_beyond_the_layout_depth_limit_panics_without_recursing() {
+    fn deeply_nested_paragraph_collects_iteratively() {
+        const DEPTH: usize = 256;
+
         let mut dom = Dom::new();
         let paragraph = element(&mut dom, ElementTag::Text);
         let mut parent = paragraph;
-        for _ in 0..8 {
+        for _ in 0..DEPTH {
             let child = element(&mut dom, ElementTag::Text);
             dom.append_child(parent, child).unwrap();
             parent = child;
         }
-        let publication = publication(&dom);
+        let raw = dom.create_text("deep");
+        dom.append_child(parent, raw).unwrap();
 
-        let _ = collect_paragraph(publication.snapshot(), paragraph);
+        let (input, descendants) = collect(&dom, paragraph).into_parts();
+
+        assert_eq!(input.text(), "deep");
+        assert_eq!(descendants.len(), DEPTH + 1);
+        assert_eq!(descendants.last(), Some(&raw));
     }
 }

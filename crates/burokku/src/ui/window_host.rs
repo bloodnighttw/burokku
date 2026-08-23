@@ -148,6 +148,20 @@ impl<T> PreparedReplacement<T> {
             .expect("an uncommitted replacement retains its candidate");
         current.replace(candidate)
     }
+
+    fn commit_with_dependent<R>(
+        self,
+        current: &mut Option<T>,
+        active_dependent: &mut Option<R>,
+        candidate_dependent: R,
+    ) -> (Option<T>, Option<R>) {
+        // Install the already-prepared dependent resource first. Committing
+        // the candidate itself is infallible, so no failure can leave the
+        // active Window without its matching dependent resource.
+        let previous_dependent = active_dependent.replace(candidate_dependent);
+        let previous = self.commit(current);
+        (previous, previous_dependent)
+    }
 }
 
 impl<T> Drop for PreparedReplacement<T> {
@@ -176,8 +190,17 @@ impl PreparedWindow {
         self.replacement.candidate().window()
     }
 
-    pub(crate) fn commit(self, manager: &mut WindowManager) -> Option<NativeWindow> {
-        self.replacement.commit(&mut manager.current)
+    pub(crate) fn commit_with<R>(
+        self,
+        manager: &mut WindowManager,
+        active_dependent: &mut Option<R>,
+        candidate_dependent: R,
+    ) -> (Option<NativeWindow>, Option<R>) {
+        self.replacement.commit_with_dependent(
+            &mut manager.current,
+            active_dependent,
+            candidate_dependent,
+        )
     }
 }
 
@@ -225,14 +248,14 @@ impl WindowManager {
                 if current.spec == spec {
                     return Ok(WindowChange::Unchanged);
                 }
-                if current.spec.title != spec.title {
-                    current.window.set_title(&spec.title);
-                }
-                if current.spec.inner_size != spec.inner_size {
-                    current.window.set_inner_size(spec.inner_size)?;
-                }
-                current.spec = spec;
-                current.window.request_redraw();
+                let window = &current.window;
+                apply_same_window_update(
+                    &mut current.spec,
+                    spec,
+                    |size| window.set_inner_size(size),
+                    |title| window.set_title(title),
+                    || window.request_redraw(),
+                )?;
                 Ok(WindowChange::Updated)
             }
             (Some(_), Some(spec)) => {
@@ -252,6 +275,29 @@ impl WindowManager {
             current.window.close();
         }
     }
+}
+
+fn apply_same_window_update<E>(
+    current: &mut WindowSpec,
+    desired: WindowSpec,
+    mut set_inner_size: impl FnMut(LogicalSize<f64>) -> Result<(), E>,
+    mut set_title: impl FnMut(&str),
+    mut request_redraw: impl FnMut(),
+) -> Result<(), E> {
+    debug_assert_eq!(current.dom_id, desired.dom_id);
+
+    // WindowSpec::from_publication validated the complete desired spec before
+    // this function is reached. Perform the fallible operation first so a
+    // reported size failure cannot leave the title or committed spec changed.
+    if current.inner_size != desired.inner_size {
+        set_inner_size(desired.inner_size)?;
+    }
+    if current.title != desired.title {
+        set_title(&desired.title);
+    }
+    *current = desired;
+    request_redraw();
+    Ok(())
 }
 
 impl Drop for WindowManager {
@@ -287,7 +333,11 @@ pub(crate) enum WindowHostError {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc, sync::Arc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        sync::Arc,
+    };
 
     use crate::ui::elements::{Dom, DomPublisher, ElementTag};
 
@@ -302,60 +352,184 @@ mod tests {
     struct ReplacementProbe {
         id: u8,
         closed: Rc<Cell<bool>>,
+        events: Rc<RefCell<Vec<String>>>,
     }
 
     fn close_probe(probe: &ReplacementProbe) {
         probe.closed.set(true);
+        probe
+            .events
+            .borrow_mut()
+            .push(format!("window {} closed", probe.id));
+    }
+
+    #[derive(Debug)]
+    struct DependentProbe {
+        id: u8,
+        events: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Drop for DependentProbe {
+        fn drop(&mut self) {
+            self.events
+                .borrow_mut()
+                .push(format!("dependent {} dropped", self.id));
+        }
+    }
+
+    fn replacement_probe(
+        id: u8,
+        closed: &Rc<Cell<bool>>,
+        events: &Rc<RefCell<Vec<String>>>,
+    ) -> ReplacementProbe {
+        ReplacementProbe {
+            id,
+            closed: Rc::clone(closed),
+            events: Rc::clone(events),
+        }
+    }
+
+    fn window_spec(dom_id: NodeId, title: &str, width: f64, height: f64) -> WindowSpec {
+        WindowSpec {
+            dom_id,
+            title: title.into(),
+            inner_size: LogicalSize::new(width, height),
+        }
     }
 
     #[test]
-    fn failed_candidate_setup_aborts_only_the_candidate() {
+    fn failed_candidate_setup_keeps_active_window_and_dependent() {
+        let events = Rc::new(RefCell::new(Vec::new()));
         let active_closed = Rc::new(Cell::new(false));
         let candidate_closed = Rc::new(Cell::new(false));
-        let current = Some(ReplacementProbe {
-            id: 1,
-            closed: Rc::clone(&active_closed),
-        });
+        let current = Some(replacement_probe(1, &active_closed, &events));
+        let active_dependent = Some(10_u8);
 
         let setup = {
             let _prepared = PreparedReplacement::new(
-                ReplacementProbe {
-                    id: 2,
-                    closed: Rc::clone(&candidate_closed),
-                },
+                replacement_probe(2, &candidate_closed, &events),
                 close_probe,
             );
-            Err::<(), _>("injected renderer creation failure")
+            Err::<u8, _>("injected dependent creation failure")
         };
 
-        assert_eq!(setup, Err("injected renderer creation failure"));
+        assert_eq!(setup, Err("injected dependent creation failure"));
         assert_eq!(current.as_ref().map(|probe| probe.id), Some(1));
+        assert_eq!(active_dependent, Some(10));
         assert!(!active_closed.get());
         assert!(candidate_closed.get());
+        assert_eq!(&*events.borrow(), &["window 2 closed"]);
     }
 
     #[test]
-    fn committing_candidate_returns_the_previous_active_value() {
+    fn successful_handoff_installs_dependent_before_old_window_closes() {
+        let events = Rc::new(RefCell::new(Vec::new()));
         let active_closed = Rc::new(Cell::new(false));
         let candidate_closed = Rc::new(Cell::new(false));
-        let mut current = Some(ReplacementProbe {
+        let mut current = Some(replacement_probe(1, &active_closed, &events));
+        let mut active_dependent = Some(DependentProbe {
             id: 1,
-            closed: Rc::clone(&active_closed),
+            events: Rc::clone(&events),
         });
         let prepared = PreparedReplacement::new(
-            ReplacementProbe {
-                id: 2,
-                closed: Rc::clone(&candidate_closed),
-            },
+            replacement_probe(2, &candidate_closed, &events),
             close_probe,
         );
+        let candidate_dependent = DependentProbe {
+            id: 2,
+            events: Rc::clone(&events),
+        };
 
-        let previous = prepared.commit(&mut current).unwrap();
+        let (previous_window, previous_dependent) = prepared.commit_with_dependent(
+            &mut current,
+            &mut active_dependent,
+            candidate_dependent,
+        );
 
-        assert_eq!(previous.id, 1);
         assert_eq!(current.as_ref().map(|probe| probe.id), Some(2));
-        assert!(!active_closed.get());
+        assert_eq!(
+            active_dependent.as_ref().map(|dependent| dependent.id),
+            Some(2)
+        );
+        assert!(events.borrow().is_empty());
+
+        drop(previous_dependent);
+        let previous_window = previous_window.unwrap();
+        close_probe(&previous_window);
+
+        assert_eq!(
+            &*events.borrow(),
+            &["dependent 1 dropped", "window 1 closed"]
+        );
+        assert!(active_closed.get());
         assert!(!candidate_closed.get());
+    }
+
+    #[test]
+    fn same_window_size_failure_keeps_spec_and_title_untouched() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        let original = window_spec(window, "old", 800.0, 600.0);
+        let desired = window_spec(window, "new", 1024.0, 768.0);
+        let mut current = original.clone();
+        let events = Rc::new(RefCell::new(Vec::new()));
+
+        let result = apply_same_window_update(
+            &mut current,
+            desired,
+            {
+                let events = Rc::clone(&events);
+                move |_| {
+                    events.borrow_mut().push("size");
+                    Err("injected size failure")
+                }
+            },
+            {
+                let events = Rc::clone(&events);
+                move |_| events.borrow_mut().push("title")
+            },
+            {
+                let events = Rc::clone(&events);
+                move || events.borrow_mut().push("redraw")
+            },
+        );
+
+        assert_eq!(result, Err("injected size failure"));
+        assert_eq!(current, original);
+        assert_eq!(&*events.borrow(), &["size"]);
+    }
+
+    #[test]
+    fn successful_same_window_update_commits_spec_and_requests_redraw() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        let mut current = window_spec(window, "old", 800.0, 600.0);
+        let desired = window_spec(window, "new", 1024.0, 768.0);
+        let events = Rc::new(RefCell::new(Vec::new()));
+
+        let result: Result<(), ()> = apply_same_window_update(
+            &mut current,
+            desired.clone(),
+            {
+                let events = Rc::clone(&events);
+                move |_| {
+                    events.borrow_mut().push("size");
+                    Ok(())
+                }
+            },
+            {
+                let events = Rc::clone(&events);
+                move |_| events.borrow_mut().push("title")
+            },
+            {
+                let events = Rc::clone(&events);
+                move || events.borrow_mut().push("redraw")
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(current, desired);
+        assert_eq!(&*events.borrow(), &["size", "title", "redraw"]);
     }
 
     #[test]

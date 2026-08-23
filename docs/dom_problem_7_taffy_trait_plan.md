@@ -17,7 +17,8 @@ The initial full-rebuild engine is implemented in
 `crates/burokku/src/ui/layout/`. It includes the derived topology, stable layout
 IDs, style conversion, low-level Taffy traits, complete-output caches, viewport
 root constraints, paragraph measurement hooks, baseline propagation, computed
-absolute boxes, failure-atomic replacement, and focused regression tests.
+absolute boxes, layout-stage failure-atomic replacement, and focused regression
+tests.
 
 The Parley-backed `TextMeasurer`, final-width paragraph resolution, native
 Window viewport wiring, revision-tagged Vello scene planning, and WGPU
@@ -147,7 +148,10 @@ BTS staging Dom
 
 The topology, adapter, node sidecars, and future paint tree are MTS-only. They do
 not need `Arc<Mutex<_>>` or other cross-thread synchronization. The publication
-is the only shared DOM boundary.
+is the only shared DOM boundary. Each arrow is revision-tagged, but the latest
+publication, current `ComputedLayout`, and successfully presented scene may
+carry different revisions temporarily as rendering lags or skips intermediate
+publications.
 
 ## Three distinct relations
 
@@ -295,7 +299,8 @@ The exact public/private split may differ, but preserve these rules:
 - renderer-, hit-test-, and event-facing state remains keyed by DOM `NodeId`;
 - paragraph input is owned and does not borrow the publication;
 - renderer-facing state is read-only and revision tagged;
-- the last complete frame remains unchanged while scratch state is computed.
+- the last complete `ComputedLayout` remains unchanged while layout scratch
+  state is computed; later scene or presentation state is a separate stage.
 
 ### Topology is lowered from the snapshot
 
@@ -524,7 +529,10 @@ Use this policy:
    all scratch layout state.
 6. Validate every committed layout size, location, inset, and final paragraph
    metric as finite before replacement.
-7. Leave the previous `ComputedLayout` and scene current after any failure.
+7. A layout-stage failure leaves the previous `ComputedLayout` current. If a
+   later scene stage fails after layout succeeded, the newer computed layout may
+   remain current while the last successfully presented scene/hit-test plan
+   remains active. Neither case rolls back the latest DOM publication.
 
 Do not panic or use `catch_unwind` for expected shaping or invalid-input errors.
 Impossible IDs inside a prevalidated adapter are internal bugs and should carry
@@ -560,6 +568,14 @@ A native resize invalidates layout even when the DOM revision did not change.
 Key reuse therefore requires both `(revision, viewport)`. Display scale is not
 part of this key under the initial logical-coordinate and unquantized text
 policy.
+
+Same-ID Window updates are best-effort rather than strictly transactional:
+validate the complete requested spec first, issue the fallible size request
+before changing the title, and update the stored spec only after those calls
+succeed. A platform-accepted resize is not rolled back; the resulting actual
+native viewport remains authoritative. For a true replacement, prepare the
+candidate renderer before destroying the old Window. Removing the final Window
+remains an immediate committed lifecycle operation.
 
 If the product instead wants a fixed-size canvas inside a resizable native
 window, define that as a separate element/style behavior. Do not leave Window
@@ -663,9 +679,10 @@ and positioning metadata. It must define, at minimum:
 
 Do not implement z-index as one global integer sort: that breaks nested stacking
 contexts. Scene construction follows `paint_order`, and pointer hit testing
-walks the successfully presented order in reverse. Geometry, stacking data,
-scene, hit-test order, and presentation must all carry the same DOM revision and
-viewport.
+walks the successfully presented order in reverse. The geometry and stacking
+data used to build one candidate scene must match that scene's revision and
+viewport; once presented, its hit-test order remains paired with its pixels even
+if a newer publication or computed layout is already pending.
 
 A z-index-only change is paint/stacking dirty and normally must not clear Taffy
 geometry caches. A position or inset change is layout-topology dirty and may
@@ -780,7 +797,7 @@ Suggested file-level changes:
 | `crates/burokku/src/ui/elements/publication.rs` | No first-pass protocol change. Continue consuming `FullRebuild`; extend only when a real incremental batch exists. |
 | `crates/burokku/src/ui/text*` | Supply paragraph inputs, fallible measurement, baselines, and final-width resolved layouts. |
 | future Window host | Supply the actual logical viewport and coalesce commit/resize redraw requests. |
-| future renderer/paint modules | Build a revision-matched stacking-context tree and paint order from the publication plus `ComputedLayout`. |
+| future renderer/paint modules | Build a revision-tagged stacking-context tree and paint order from one `ComputedLayout`; the presented result may lag later computed state. |
 
 ## Implementation stages
 
@@ -848,13 +865,19 @@ consume the exact final Parley object.
 ### Stage 4: Window host and frame integration
 
 - Pass actual logical native viewport dimensions into the engine.
-- Load and retain one `Arc<PublishedDom>` per frame.
+- Observe and retain one latest `Arc<PublishedDom>` as the content target,
+  independently from best-effort native WindowSpec application.
 - Recompute on revision or viewport changes and reuse on exact matches.
-- Coalesce notifier and resize redraw requests.
-- Preserve the preceding computed/presented frame after a failed update.
+- Coalesce notifier and resize redraw requests without immediately retrying an
+  unchanged failed candidate.
+- Keep layout-stage replacement atomic, but allow computed state to advance
+  beyond the last successfully presented scene.
+- Preserve the last presented scene/hit-test plan after a recoverable candidate
+  failure while leaving the latest DOM publication authoritative.
 
-**Exit criteria:** commit and resize paths never mix revisions or viewports and
-do not hold the BTS DOM mutex during layout.
+**Exit criteria:** each layout/scene candidate uses one tagged publication and
+actual viewport, stage revisions may differ through normal pipeline lag, and no
+layout work holds the BTS DOM mutex.
 
 ### Stage 5: future positioned topology and stacking boundary
 
@@ -1002,7 +1025,10 @@ Problem 7 is complete for the initial full-rebuild contract when:
   cache-dependent results;
 - final computed boxes and final paragraphs all carry the publication revision
   and viewport used to produce them;
-- any failure leaves the previous complete computed/presented state intact;
+- a layout-stage failure leaves the previous complete `ComputedLayout` intact,
+  while a later scene failure may leave newer computed state alongside the last
+  successfully presented scene/hit-test plan; the latest DOM is never rolled
+  back;
 - the topology abstraction can later represent containing-block reparenting
   without changing DOM identity or the Taffy trait surface;
 - future paint ordering is explicitly owned by a stacking-context tree rather

@@ -26,6 +26,15 @@ pub(crate) enum TextError {
         reason: &'static str,
     },
 
+    #[error(
+        "paragraph {paragraph:?} has {count} styled runs, exceeding the supported limit of {limit}"
+    )]
+    TooManyStyledRuns {
+        paragraph: NodeId,
+        count: usize,
+        limit: usize,
+    },
+
     #[error("text width constraint must be finite and non-negative, got {width}")]
     InvalidConstraint { width: f32 },
 
