@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use taffy::{geometry::Size, Dimension, Layout, Position, Style};
+use taffy::{geometry::Size, Dimension, Display, Layout, Position, Style};
 
 use crate::ui::{
     elements::{
@@ -38,6 +38,12 @@ pub(super) struct LayoutNodeState {
     pub(super) unrounded: Layout,
 }
 
+impl LayoutNodeState {
+    pub(super) fn final_content_width(&self) -> f32 {
+        self.unrounded.content_box_width()
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ScratchLayout {
     pub(super) revision: u64,
@@ -46,6 +52,41 @@ pub(super) struct ScratchLayout {
     pub(super) topology: LayoutTopology,
     pub(super) nodes: HashMap<LayoutId, LayoutNodeState>,
     pub(super) text_owner: HashMap<DomNodeId, DomNodeId>,
+}
+
+impl ScratchLayout {
+    pub(super) fn visible_paragraph_ids(&self) -> Result<Vec<LayoutId>, LayoutError> {
+        visible_paragraph_ids(&self.topology, &self.nodes)
+    }
+}
+
+pub(super) fn visible_paragraph_ids(
+    topology: &LayoutTopology,
+    nodes: &HashMap<LayoutId, LayoutNodeState>,
+) -> Result<Vec<LayoutId>, LayoutError> {
+    let Some(root) = topology.root() else {
+        return Ok(Vec::new());
+    };
+
+    let mut paragraphs = Vec::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let state = nodes
+            .get(&id)
+            .ok_or(LayoutError::MissingLayoutSidecar(id))?;
+        if state.style.display == Display::None {
+            continue;
+        }
+        if matches!(&state.role, LayoutRole::Paragraph { .. }) {
+            paragraphs.push(id);
+        }
+
+        let children = topology
+            .children(id)
+            .ok_or(LayoutError::MissingLayoutNode(id))?;
+        pending.extend(children.iter().rev().copied());
+    }
+    Ok(paragraphs)
 }
 
 struct PendingNode {

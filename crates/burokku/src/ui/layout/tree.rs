@@ -12,12 +12,12 @@ use taffy::{
 
 use crate::ui::{
     elements::NodeId as DomNodeId,
-    text::{ParagraphInput, ShapedParagraph},
+    text::{ParagraphInput, ShapedParagraph, TextConstraint},
 };
 
 use super::{
     error::LayoutError,
-    reconcile::{LayoutNodeState, LayoutRole, ScratchLayout},
+    reconcile::{visible_paragraph_ids, LayoutNodeState, LayoutRole, ScratchLayout},
     topology::{LayoutId, LayoutTopology},
 };
 
@@ -50,6 +50,8 @@ impl<'a> TextMeasureRequest<'a> {
         self.available_space
     }
 
+    /// Whether this request resolves the paint paragraph after Taffy has
+    /// completed the node's unrounded layout.
     pub(crate) fn is_final_paragraph_resolution(self) -> bool {
         self.final_paragraph_resolution
     }
@@ -103,6 +105,8 @@ pub(crate) trait TextMeasurer {
         0
     }
 
+    /// Measure one paragraph request. Final paragraph-resolution requests must
+    /// return the exact shaped variant through [`TextMeasurement::with_shaped`].
     fn measure(&mut self, request: TextMeasureRequest<'_>) -> Result<TextMeasurement, String>;
 
     /// Drop persistent shaping state for paragraph sources absent from the
@@ -126,13 +130,15 @@ pub(super) fn compute_layout<M: TextMeasurer>(
         nodes: &mut scratch.nodes,
         measurer,
         first_error: None,
-        final_paragraphs: HashMap::new(),
     };
     taffy::compute_root_layout(&mut tree, root.into_taffy(), available_space);
-    match tree.first_error {
-        Some(error) => Err(error),
-        None => Ok(tree.final_paragraphs),
+    if let Some(error) = tree.first_error.take() {
+        return Err(error);
     }
+
+    // Measurement callbacks are speculative and may be skipped by exact cache
+    // hits. Resolve paint paragraphs only from the completed unrounded boxes.
+    tree.resolve_final_paragraphs()
 }
 
 struct LayoutChildIter<'a>(std::slice::Iter<'a, LayoutId>);
@@ -150,7 +156,6 @@ struct DerivedLayoutTree<'a, M> {
     nodes: &'a mut std::collections::HashMap<LayoutId, LayoutNodeState>,
     measurer: &'a mut M,
     first_error: Option<LayoutError>,
-    final_paragraphs: HashMap<DomNodeId, Rc<ShapedParagraph>>,
 }
 
 impl<M> DerivedLayoutTree<'_, M> {
@@ -253,7 +258,7 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
             - border.right
             - scrollbar_width)
             .max(0.0);
-        let final_measurement = self.measure_paragraph(
+        let baseline_measurement = self.measure_paragraph(
             &paragraph,
             Size {
                 width: Some(content_width),
@@ -263,21 +268,67 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
                 width: AvailableSpace::Definite(content_width),
                 height: input.available_space.height,
             },
-            true,
+            false,
         );
-        if let Some(measurement) = final_measurement {
+        if let Some(measurement) = baseline_measurement {
             output.first_baselines = Point {
                 x: None,
                 y: measurement
                     .first_baseline()
                     .map(|baseline| border.top + padding.top + baseline),
             };
-            if let Some(shaped) = measurement.shaped() {
-                self.final_paragraphs
-                    .insert(paragraph.source(), Rc::clone(shaped));
-            }
         }
         output
+    }
+
+    fn resolve_final_paragraphs(
+        &mut self,
+    ) -> Result<HashMap<DomNodeId, Rc<ShapedParagraph>>, LayoutError> {
+        let paragraph_ids = visible_paragraph_ids(self.topology, self.nodes)?;
+        let mut final_paragraphs = HashMap::with_capacity(paragraph_ids.len());
+        for layout_id in paragraph_ids {
+            let (source, paragraph, content_width) = {
+                let state = self
+                    .nodes
+                    .get(&layout_id)
+                    .ok_or(LayoutError::MissingLayoutSidecar(layout_id))?;
+                let LayoutRole::Paragraph { input } = &state.role else {
+                    return Err(LayoutError::InvalidFinalParagraph(state.dom_id));
+                };
+                (state.dom_id, Rc::clone(input), state.final_content_width())
+            };
+
+            let Some(measurement) = self.measure_paragraph(
+                &paragraph,
+                Size {
+                    width: Some(content_width),
+                    height: None,
+                },
+                Size {
+                    width: AvailableSpace::Definite(content_width),
+                    height: AvailableSpace::MaxContent,
+                },
+                true,
+            ) else {
+                return Err(self
+                    .first_error
+                    .take()
+                    .unwrap_or(LayoutError::InvalidFinalParagraph(source)));
+            };
+            let Some(shaped) = measurement.shaped().cloned() else {
+                return Err(LayoutError::InvalidFinalParagraph(source));
+            };
+            let expected_constraint = TextConstraint::definite(content_width)
+                .map_err(|_| LayoutError::InvalidFinalParagraph(source))?;
+            if shaped.source() != source
+                || shaped.fingerprint() != paragraph.fingerprint()
+                || shaped.constraint() != expected_constraint
+                || final_paragraphs.insert(source, shaped).is_some()
+            {
+                return Err(LayoutError::InvalidFinalParagraph(source));
+            }
+        }
+        Ok(final_paragraphs)
     }
 
     fn measure_paragraph(
@@ -552,5 +603,139 @@ impl<M: TextMeasurer> LayoutGridContainer for DerivedLayoutTree<'_, M> {
 
     fn get_grid_child_style(&self, child_node_id: taffy::NodeId) -> Self::GridItemStyle<'_> {
         &self.node(child_node_id).style
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use taffy::{
+        geometry::{Line, Size},
+        AvailableSpace, LayoutInput, RequestedAxis, SizingMode,
+    };
+
+    use crate::ui::{
+        elements::{Dom, DomPublisher, Element, ElementTag},
+        text::TextEngine,
+    };
+
+    use super::*;
+    use crate::ui::layout::{reconcile::reconcile_full, LogicalViewport};
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        width: AvailableSpace,
+        final_paragraph_resolution: bool,
+    }
+
+    #[derive(Debug)]
+    struct RecordingMeasurer {
+        inner: TextEngine,
+        calls: Vec<RecordedRequest>,
+    }
+
+    impl RecordingMeasurer {
+        fn new() -> Self {
+            Self {
+                inner: TextEngine::without_system_fonts(),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl TextMeasurer for RecordingMeasurer {
+        fn measure(&mut self, request: TextMeasureRequest<'_>) -> Result<TextMeasurement, String> {
+            self.calls.push(RecordedRequest {
+                width: request.available_space().width,
+                final_paragraph_resolution: request.is_final_paragraph_resolution(),
+            });
+            <TextEngine as TextMeasurer>::measure(&mut self.inner, request)
+        }
+    }
+
+    fn probe_input(width: f32) -> LayoutInput {
+        LayoutInput {
+            run_mode: RunMode::ComputeSize,
+            sizing_mode: SizingMode::InherentSize,
+            axis: RequestedAxis::Both,
+            known_dimensions: Size {
+                width: Some(width),
+                height: None,
+            },
+            parent_size: Size {
+                width: Some(300.0),
+                height: None,
+            },
+            available_space: Size {
+                width: AvailableSpace::Definite(300.0),
+                height: AvailableSpace::MaxContent,
+            },
+            vertical_margins_are_collapsible: Line::FALSE,
+        }
+    }
+
+    #[test]
+    fn post_layout_resolution_ignores_repeated_probe_cache_order() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        let paragraph = dom.create_element(Element::from_tag(ElementTag::Text));
+        let text = dom.create_text("cached paragraph probe");
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let (_publisher, reader) = DomPublisher::new(&dom, |_| {});
+        let publication = reader.load();
+        let mut scratch = reconcile_full(
+            publication.as_ref(),
+            LogicalViewport::new(300.0, 200.0).unwrap(),
+        )
+        .unwrap();
+        let paragraph_id = scratch.topology.layout_id(paragraph).unwrap();
+        let narrow_input = probe_input(80.0);
+        let wide_input = probe_input(160.0);
+        let mut measurer = RecordingMeasurer::new();
+
+        let final_paragraphs = {
+            let mut tree = DerivedLayoutTree {
+                topology: &scratch.topology,
+                nodes: &mut scratch.nodes,
+                measurer: &mut measurer,
+                first_error: None,
+            };
+            let narrow_output =
+                tree.compute_node_layout(paragraph_id.into_taffy(), narrow_input, None);
+            tree.compute_node_layout(paragraph_id.into_taffy(), wide_input, None);
+            let calls_after_distinct_probes = tree.measurer.calls.len();
+
+            let cached_narrow_output =
+                tree.compute_node_layout(paragraph_id.into_taffy(), narrow_input, None);
+            assert_eq!(cached_narrow_output, narrow_output);
+            assert_eq!(tree.measurer.calls.len(), calls_after_distinct_probes);
+            assert!(tree
+                .measurer
+                .calls
+                .iter()
+                .all(|call| !call.final_paragraph_resolution));
+
+            let mut completed_layout = Layout::new();
+            completed_layout.size = narrow_output.size;
+            tree.set_unrounded_layout(paragraph_id.into_taffy(), &completed_layout);
+            tree.resolve_final_paragraphs().unwrap()
+        };
+
+        let final_calls = measurer
+            .calls
+            .iter()
+            .filter(|call| call.final_paragraph_resolution)
+            .collect::<Vec<_>>();
+        assert_eq!(final_calls.len(), 1);
+        assert_eq!(final_calls[0].width, AvailableSpace::Definite(80.0));
+        assert_eq!(
+            final_paragraphs
+                .get(&paragraph)
+                .unwrap()
+                .constraint()
+                .definite_value(),
+            Some(80.0)
+        );
     }
 }
