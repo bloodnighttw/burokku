@@ -314,12 +314,6 @@ impl TextEngine {
     }
 
     fn build_unbroken(&mut self, input: &ParagraphInput) -> Result<Layout<TextBrush>, TextError> {
-        assert!(
-            input.runs().len() < usize::from(u16::MAX),
-            "paragraph {:?} has {} styled runs, exceeding the supported limit",
-            input.source(),
-            input.runs().len()
-        );
 
         let layout = self.build_layout(input, false);
         if input
