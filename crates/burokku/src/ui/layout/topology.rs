@@ -150,11 +150,7 @@ impl LayoutTopology {
         self.children.is_empty()
     }
 
-    pub(super) fn validate(
-        &self,
-        sidecar_ids: &HashSet<LayoutId>,
-        max_depth: usize,
-    ) -> Result<(), LayoutError> {
+    pub(super) fn validate(&self, sidecar_ids: &HashSet<LayoutId>) -> Result<(), LayoutError> {
         let Some(root) = self.root else {
             if let Some(id) = self.children.keys().next().copied() {
                 return Err(LayoutError::UnreachableLayoutNode(id));
@@ -201,20 +197,15 @@ impl LayoutTopology {
         }
 
         let mut visited = HashSet::with_capacity(self.len());
-        let mut pending = vec![(root, 0usize)];
-        while let Some((id, depth)) = pending.pop() {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
             if !visited.insert(id) {
                 return Err(LayoutError::LayoutCycle(id));
             }
-            let dom_id = self.dom_id(id).ok_or(LayoutError::MissingLayoutNode(id))?;
-            assert!(
-                depth <= max_depth,
-                "layout tree exceeds the supported depth of {max_depth} at node {dom_id:?}"
-            );
             let children = self
                 .children(id)
                 .ok_or(LayoutError::MissingLayoutNode(id))?;
-            pending.extend(children.iter().rev().map(|child| (*child, depth + 1)));
+            pending.extend(children.iter().rev());
         }
 
         if let Some(id) = self
@@ -263,7 +254,7 @@ mod tests {
         let second_id = topology.insert_child(second, window, root, 1).unwrap();
         let sidecars = HashSet::from([root, first_id, second_id]);
 
-        topology.validate(&sidecars, 8).unwrap();
+        topology.validate(&sidecars).unwrap();
 
         assert_eq!(topology.layout_id(first), Some(first_id));
         assert_eq!(topology.dom_id(second_id), Some(second));

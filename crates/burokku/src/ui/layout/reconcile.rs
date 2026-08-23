@@ -20,8 +20,6 @@ use super::{
     LogicalViewport,
 };
 
-pub(super) const MAX_LAYOUT_DEPTH: usize = 512;
-
 #[derive(Clone, Debug)]
 pub(super) enum LayoutRole {
     Container,
@@ -94,7 +92,6 @@ struct PendingNode {
     dom_parent: DomNodeId,
     layout_parent: LayoutId,
     source_order: usize,
-    depth: usize,
 }
 
 pub(super) fn reconcile_full(
@@ -127,7 +124,7 @@ pub(super) fn reconcile_full(
     let Some(&window) = app_children.first() else {
         scratch
             .topology
-            .validate(&HashSet::new(), MAX_LAYOUT_DEPTH)?;
+            .validate(&HashSet::new())?;
         return Ok(scratch);
     };
     if snapshot.parent(window) != Some(app) {
@@ -158,14 +155,9 @@ pub(super) fn reconcile_full(
     scratch.window = Some(window);
 
     let mut pending = Vec::new();
-    schedule_children(snapshot, window, window_layout, 1, &mut pending)?;
+    schedule_children(snapshot, window, window_layout, &mut pending)?;
 
     while let Some(next) = pending.pop() {
-        assert!(
-            next.depth <= MAX_LAYOUT_DEPTH,
-            "layout tree exceeds the supported depth of {MAX_LAYOUT_DEPTH} at node {:?}",
-            next.dom_id
-        );
         if !seen_dom.insert(next.dom_id) {
             return Err(LayoutError::DuplicateDomNode(next.dom_id));
         }
@@ -187,7 +179,7 @@ pub(super) fn reconcile_full(
                     next.source_order,
                 )?;
                 let collected =
-                    collect_paragraph(snapshot, next.dom_id, next.depth, MAX_LAYOUT_DEPTH)?;
+                    collect_paragraph(snapshot, next.dom_id)?;
                 let (input, descendants) = collected.into_parts();
                 scratch.text_owner.insert(next.dom_id, next.dom_id);
                 for descendant in descendants {
@@ -224,19 +216,13 @@ pub(super) fn reconcile_full(
                     style_for(snapshot, next.dom_id, viewport)?,
                     node.revisions(),
                 );
-                schedule_children(
-                    snapshot,
-                    next.dom_id,
-                    layout_id,
-                    next.depth + 1,
-                    &mut pending,
-                )?;
+                schedule_children(snapshot, next.dom_id, layout_id, &mut pending)?;
             }
         }
     }
 
     let sidecar_ids = scratch.nodes.keys().copied().collect::<HashSet<_>>();
-    scratch.topology.validate(&sidecar_ids, MAX_LAYOUT_DEPTH)?;
+    scratch.topology.validate(&sidecar_ids)?;
     for (&id, state) in &scratch.nodes {
         if matches!(state.role, LayoutRole::Paragraph { .. })
             && !scratch
@@ -273,7 +259,6 @@ fn schedule_children(
     snapshot: &DomSnapshot,
     dom_parent: DomNodeId,
     layout_parent: LayoutId,
-    depth: usize,
     pending: &mut Vec<PendingNode>,
 ) -> Result<(), LayoutError> {
     let children = snapshot
@@ -291,7 +276,6 @@ fn schedule_children(
             dom_parent,
             layout_parent,
             source_order,
-            depth,
         });
     }
     Ok(())

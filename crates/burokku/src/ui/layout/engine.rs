@@ -737,23 +737,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "layout tree exceeds the supported depth")]
-    fn excessive_layout_depth_panics_before_taffy_recursion() {
-        let mut dom = Dom::new();
-        let window = element(&mut dom, ElementTag::Window);
-        dom.append_child(dom.root(), window).unwrap();
-        let mut parent = window;
-        for _ in 0..=crate::ui::layout::reconcile::MAX_LAYOUT_DEPTH {
-            let child = element(&mut dom, ElementTag::Div);
-            dom.append_child(parent, child).unwrap();
-            parent = child;
-        }
-        let mut engine = LayoutEngine::new(TestMeasurer::default());
-
-        let _ = engine.compute(publication(&dom), viewport(300.0, 200.0));
-    }
-
-    #[test]
     fn invalid_viewports_are_rejected_before_layout() {
         assert!(matches!(
             LogicalViewport::new(f32::NAN, 10.0),

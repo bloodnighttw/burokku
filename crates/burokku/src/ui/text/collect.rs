@@ -25,7 +25,6 @@ impl CollectedParagraph {
 struct PendingNode {
     id: NodeId,
     parent: NodeId,
-    depth: usize,
     inherited_style: ComputedTextStyle,
 }
 
@@ -37,8 +36,6 @@ struct PendingNode {
 pub(crate) fn collect_paragraph(
     snapshot: &DomSnapshot,
     source: NodeId,
-    source_depth: usize,
-    max_depth: usize,
 ) -> Result<CollectedParagraph, TextError> {
     let source_style = match snapshot.element(source) {
         Some(Element::Text { style }) => &style.text,
@@ -63,7 +60,6 @@ pub(crate) fn collect_paragraph(
         .map(|&id| PendingNode {
             id,
             parent: source,
-            depth: source_depth + 1,
             inherited_style: base_style.clone(),
         })
         .collect::<Vec<_>>();
@@ -73,11 +69,6 @@ pub(crate) fn collect_paragraph(
     let mut runs: Vec<StyledTextRun> = Vec::new();
 
     while let Some(next) = pending.pop() {
-        assert!(
-            next.depth <= max_depth,
-            "paragraph tree exceeds the supported depth of {max_depth} at node {:?}",
-            next.id
-        );
         if snapshot.parent(next.id) != Some(next.parent) {
             return Err(TextError::InvalidRelationship {
                 parent: next.parent,
@@ -102,7 +93,6 @@ pub(crate) fn collect_paragraph(
                 pending.extend(node.children().iter().rev().map(|&child| PendingNode {
                     id: child,
                     parent: next.id,
-                    depth: next.depth + 1,
                     inherited_style: computed.clone(),
                 }));
             }
@@ -213,7 +203,7 @@ mod tests {
 
     fn collect(dom: &Dom, source: NodeId) -> CollectedParagraph {
         let publication = publication(dom);
-        collect_paragraph(publication.snapshot(), source, 1, 512).unwrap()
+        collect_paragraph(publication.snapshot(), source).unwrap()
     }
 
     #[test]
@@ -357,6 +347,6 @@ mod tests {
         }
         let publication = publication(&dom);
 
-        let _ = collect_paragraph(publication.snapshot(), paragraph, 1, 4);
+        let _ = collect_paragraph(publication.snapshot(), paragraph);
     }
 }
