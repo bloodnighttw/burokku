@@ -23,6 +23,7 @@ pub(crate) type TextBrush = [u8; 4];
 
 const SHAPING_CONFIGURATION_VERSION: u64 = 1;
 const MAX_WIDTH_VARIANTS: usize = 4;
+const MAX_STYLED_RUNS: usize = u16::MAX as usize - 1;
 
 /// Width semantics requested by Taffy for an intrinsic text measurement.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -314,6 +315,14 @@ impl TextEngine {
     }
 
     fn build_unbroken(&mut self, input: &ParagraphInput) -> Result<Layout<TextBrush>, TextError> {
+        let count = input.runs().len();
+        if count > MAX_STYLED_RUNS {
+            return Err(TextError::TooManyStyledRuns {
+                paragraph: input.source(),
+                count,
+                limit: MAX_STYLED_RUNS,
+            });
+        }
 
         let layout = self.build_layout(input, false);
         if input
@@ -712,18 +721,29 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "styled runs, exceeding the supported limit")]
-    fn excessive_styled_runs_panic() {
+    fn excessive_styled_runs_return_a_typed_error() {
         let count = usize::from(u16::MAX);
         let text = "a".repeat(count);
         let style = test_style();
         let runs = (0..count)
             .map(|index| StyledTextRun::new(index..index + 1, style.clone()))
             .collect();
-        let input = ParagraphInput::new(source(), style, text, runs);
+        let source = source();
+        let input = ParagraphInput::new(source, style, text, runs);
         let mut engine = engine();
 
-        let _ = engine.shape(&input, TextConstraint::MaxContent);
+        let error = engine
+            .shape(&input, TextConstraint::MaxContent)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            TextError::TooManyStyledRuns {
+                paragraph: source,
+                count,
+                limit: MAX_STYLED_RUNS,
+            }
+        );
     }
 
     #[test]

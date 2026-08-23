@@ -122,9 +122,7 @@ pub(super) fn reconcile_full(
     };
 
     let Some(&window) = app_children.first() else {
-        scratch
-            .topology
-            .validate(&HashSet::new())?;
+        scratch.topology.validate(&HashSet::new())?;
         return Ok(scratch);
     };
     if snapshot.parent(window) != Some(app) {
@@ -178,8 +176,7 @@ pub(super) fn reconcile_full(
                     next.layout_parent,
                     next.source_order,
                 )?;
-                let collected =
-                    collect_paragraph(snapshot, next.dom_id)?;
+                let collected = collect_paragraph(snapshot, next.dom_id)?;
                 let (input, descendants) = collected.into_parts();
                 scratch.text_owner.insert(next.dom_id, next.dom_id);
                 for descendant in descendants {

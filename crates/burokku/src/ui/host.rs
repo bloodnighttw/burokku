@@ -16,20 +16,87 @@ use super::{
     window_host::{WindowChange, WindowHostError, WindowManager},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameStage {
+    WindowSync,
+    Resize,
+    Layout,
+    Scene,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrameFailure {
+    revision: u64,
+    stage: FrameStage,
+    message: String,
+}
+
+impl FrameFailure {
+    fn new(revision: u64, stage: FrameStage, error: &HostError) -> Self {
+        Self {
+            revision,
+            stage,
+            message: error.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureKind {
+    WindowSync,
+    TargetTooLarge,
+    Layout,
+    Scene,
+    ActivePresentation,
+    Invariant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailurePolicy {
+    Recoverable,
+    Fatal,
+}
+
+fn failure_policy(has_presented_frame: bool, kind: FailureKind) -> FailurePolicy {
+    match kind {
+        FailureKind::WindowSync
+        | FailureKind::TargetTooLarge
+        | FailureKind::Layout
+        | FailureKind::Scene
+            if has_presented_frame =>
+        {
+            FailurePolicy::Recoverable
+        }
+        FailureKind::WindowSync
+        | FailureKind::TargetTooLarge
+        | FailureKind::Layout
+        | FailureKind::Scene
+        | FailureKind::ActivePresentation
+        | FailureKind::Invariant => FailurePolicy::Fatal,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PresentedFrame {
     plan: ScenePlan,
 }
 
+impl PresentedFrame {
+    pub(crate) fn revision(&self) -> u64 {
+        self.plan.revision()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ApplicationHost {
     publications: PublishedDomReader,
-    publication: Option<Arc<PublishedDom>>,
+    latest_publication: Option<Arc<PublishedDom>>,
     graphics: GraphicsContext,
     windows: WindowManager,
     renderer: Option<WindowRenderer>,
     layout: LayoutEngine<TextEngine>,
     presented: Option<PresentedFrame>,
+    last_frame_failure: Option<FrameFailure>,
     cursor_target: Option<NodeId>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
@@ -46,12 +113,13 @@ impl ApplicationHost {
     ) -> Self {
         Self {
             publications,
-            publication: Some(publication),
+            latest_publication: Some(publication),
             graphics,
             windows,
             renderer: Some(renderer),
             layout: LayoutEngine::new(text),
             presented: None,
+            last_frame_failure: None,
             cursor_target: None,
             ever_had_window: true,
             fatal_error: None,
@@ -62,13 +130,48 @@ impl ApplicationHost {
         self.fatal_error.as_ref()
     }
 
-    fn warn_frame_failure(&self, error: &HostError) {
-        debug_assert!(error.is_recoverable_frame_error());
-        let revision = self
-            .publication
-            .as_ref()
-            .map_or(0, |publication| publication.revision());
-        eprintln!("Burokku warning: frame for DOM revision {revision} failed; continuing: {error}");
+    fn record_frame_failure(&mut self, failure: FrameFailure) {
+        eprintln!(
+            "Burokku warning: {:?} for DOM revision {} failed; continuing: {}",
+            failure.stage, failure.revision, failure.message
+        );
+        self.last_frame_failure = Some(failure);
+    }
+
+    fn has_usable_presented_frame(&self) -> bool {
+        if self.presented.is_none() {
+            return false;
+        }
+        match (self.windows.current(), self.renderer.as_ref()) {
+            (Some(native), Some(renderer)) => native.id() == renderer.window_id(),
+            (None, _) | (_, None) => false,
+        }
+    }
+
+    fn handle_window_sync_failure(
+        &mut self,
+        revision: u64,
+        error: HostError,
+    ) -> Result<(), HostError> {
+        let has_presented_frame = self.has_usable_presented_frame();
+        if failure_policy(has_presented_frame, FailureKind::WindowSync)
+            == FailurePolicy::Recoverable
+        {
+            self.record_frame_failure(FrameFailure::new(revision, FrameStage::WindowSync, &error));
+            if let Some(native) = self.windows.current() {
+                native.window().request_redraw();
+            }
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn handle_redraw_failure(&mut self, event_loop: &ActiveEventLoop, failure: RedrawFailure) {
+        match failure {
+            RedrawFailure::Recoverable(failure) => self.record_frame_failure(failure),
+            RedrawFailure::Fatal(error) => self.fail(event_loop, error),
+        }
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: HostError) {
@@ -83,54 +186,59 @@ impl ApplicationHost {
     fn sync_publication(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
         let publication = self.publications.load();
         if self
-            .publication
+            .latest_publication
             .as_ref()
             .is_some_and(|current| current.revision() == publication.revision())
         {
             return Ok(());
         }
 
-        let change = self.windows.reconcile(event_loop, &publication)?;
+        // Observation and native-window application are separate. Recording
+        // the publication first prevents a failed WindowSpec from being
+        // retried on every event-loop turn and keeps the latest DOM as the
+        // content target for the existing native viewport.
+        let revision = publication.revision();
+        self.latest_publication = Some(Arc::clone(&publication));
+        let change = match self.windows.reconcile(event_loop, &publication) {
+            Ok(change) => change,
+            Err(error) => {
+                return self.handle_window_sync_failure(revision, error.into());
+            }
+        };
+
         match change {
             WindowChange::Created => {
                 let native = self
                     .windows
                     .current()
                     .expect("a created window is installed before renderer creation");
-                self.renderer = Some(WindowRenderer::new(
-                    &self.graphics,
-                    Arc::clone(native.window()),
-                )?);
+                let renderer =
+                    match WindowRenderer::new(&self.graphics, Arc::clone(native.window())) {
+                        Ok(renderer) => renderer,
+                        Err(error) => {
+                            return self.handle_window_sync_failure(revision, error.into());
+                        }
+                    };
+                self.renderer = Some(renderer);
                 self.ever_had_window = true;
             }
             WindowChange::PreparedReplacement(prepared) => {
-                let candidate_renderer = match WindowRenderer::new(
-                    &self.graphics,
-                    Arc::clone(prepared.window()),
-                ) {
-                    Ok(renderer) => renderer,
-                    Err(error) => {
-                        // `prepared` closes only the candidate on return. Keep
-                        // using the working native Window and renderer, accept
-                        // the latest DOM for subsequent content frames, and do
-                        // not retry this replacement on every event-loop turn.
-                        eprintln!(
-                            "Burokku warning: renderer setup for replacement Window at DOM revision {} failed; keeping the current Window: {error}",
-                            publication.revision()
-                        );
-                        self.publication = Some(publication);
-                        if let Some(native) = self.windows.current() {
-                            native.window().request_redraw();
+                let candidate_renderer =
+                    match WindowRenderer::new(&self.graphics, Arc::clone(prepared.window())) {
+                        Ok(renderer) => renderer,
+                        Err(error) => {
+                            // `prepared` closes only the candidate on return. The
+                            // active Window, renderer, and presented plan remain
+                            // installed when this is recoverable.
+                            return self.handle_window_sync_failure(revision, error.into());
                         }
-                        return Ok(());
-                    }
-                };
+                    };
 
-                // No fallible work remains: replace the native Window and its
-                // renderer as one host transaction, then release the previous
-                // surface before closing its Window.
-                let previous_renderer = self.renderer.replace(candidate_renderer);
-                let previous_window = prepared.commit(&mut self.windows);
+                // No fallible work remains: install the already-created
+                // renderer with its candidate Window before releasing the old
+                // surface and closing the previous Window.
+                let (previous_window, previous_renderer) =
+                    prepared.commit_with(&mut self.windows, &mut self.renderer, candidate_renderer);
                 drop(previous_renderer);
                 if let Some(previous_window) = previous_window {
                     previous_window.close();
@@ -147,49 +255,96 @@ impl ApplicationHost {
             WindowChange::Updated | WindowChange::Unchanged => {}
         }
 
-        self.publication = Some(publication);
         if let Some(native) = self.windows.current() {
             native.window().request_redraw();
         }
         Ok(())
     }
 
-    fn redraw(&mut self) -> Result<PresentationOutcome, HostError> {
+    fn redraw(&mut self) -> Result<PresentationOutcome, RedrawFailure> {
         let publication = self
-            .publication
+            .latest_publication
             .as_ref()
-            .ok_or(HostError::MissingPublication)?;
+            .ok_or(RedrawFailure::Fatal(HostError::MissingPublication))?;
+        let revision = publication.revision();
+        let has_presented_frame = self.presented.is_some();
         let native = self
             .windows
             .current()
-            .ok_or(HostError::MissingNativeWindow)?;
-        let renderer = self.renderer.as_mut().ok_or(HostError::MissingRenderer)?;
+            .ok_or(RedrawFailure::Fatal(HostError::MissingNativeWindow))?;
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or(RedrawFailure::Fatal(HostError::MissingRenderer))?;
         if native.id() != renderer.window_id() {
-            return Err(HostError::WindowRendererMismatch);
+            return Err(classify_fatal_failure(
+                has_presented_frame,
+                FailureKind::Invariant,
+                HostError::WindowRendererMismatch,
+            ));
         }
 
         let physical_size = native.window().inner_size();
-        renderer.resize(&self.graphics, physical_size)?;
+        if let Err(error) = renderer.resize(&self.graphics, physical_size) {
+            return Err(classify_resize_failure(
+                revision,
+                has_presented_frame,
+                error,
+            ));
+        }
         if physical_size.width == 0 || physical_size.height == 0 {
             return Ok(PresentationOutcome::Occluded);
         }
         let scale_factor = native.window().scale_factor();
-        let viewport = logical_viewport(physical_size, scale_factor)?;
-        let computed = self.layout.compute(Arc::clone(publication), viewport)?;
+        let viewport = logical_viewport(physical_size, scale_factor).map_err(|error| {
+            classify_fatal_failure(has_presented_frame, FailureKind::Invariant, error)
+        })?;
+        let computed = self
+            .layout
+            .compute(Arc::clone(publication), viewport)
+            .map_err(|error| {
+                classify_candidate_failure(
+                    revision,
+                    has_presented_frame,
+                    FailureKind::Layout,
+                    FrameStage::Layout,
+                    error.into(),
+                )
+            })?;
         let frame = BuiltScene::build(
             computed,
             physical_size,
             scale_factor,
             renderer.resources_mut(),
-        )?;
+        )
+        .map_err(|error| {
+            classify_candidate_failure(
+                revision,
+                has_presented_frame,
+                FailureKind::Scene,
+                FrameStage::Scene,
+                error.into(),
+            )
+        })?;
         debug_assert!(frame.glyph_runs() <= frame.glyphs());
-        let outcome = renderer.present(&self.graphics, &frame)?;
-        if let PresentationOutcome::Presented { revision } = outcome {
-            debug_assert_eq!(revision, publication.revision());
-            debug_assert_eq!(renderer.last_presented_revision(), Some(revision));
-            self.presented = Some(PresentedFrame {
-                plan: frame.plan().clone(),
-            });
+        let outcome = renderer.present(&self.graphics, &frame).map_err(|error| {
+            classify_fatal_failure(
+                has_presented_frame,
+                FailureKind::ActivePresentation,
+                error.into(),
+            )
+        })?;
+        if let PresentationOutcome::Presented {
+            revision: presented_revision,
+        } = outcome
+        {
+            debug_assert_eq!(presented_revision, revision);
+            debug_assert_eq!(renderer.last_presented_revision(), Some(presented_revision));
+            finish_successful_presentation(
+                &mut self.presented,
+                &mut self.last_frame_failure,
+                frame.plan().clone(),
+            );
         }
         Ok(outcome)
     }
@@ -237,12 +392,19 @@ impl ApplicationHandler for ApplicationHost {
                 new_inner_size: size,
                 ..
             } => {
-                let resize = self
-                    .renderer
-                    .as_mut()
-                    .map(|renderer| renderer.resize(&self.graphics, size));
-                if let Some(Err(error)) = resize {
-                    self.fail(event_loop, error.into());
+                let Some(publication) = self.latest_publication.as_ref() else {
+                    self.fail(event_loop, HostError::MissingPublication);
+                    return;
+                };
+                let revision = publication.revision();
+                let has_presented_frame = self.presented.is_some();
+                let Some(renderer) = self.renderer.as_mut() else {
+                    self.fail(event_loop, HostError::MissingRenderer);
+                    return;
+                };
+                if let Err(error) = renderer.resize(&self.graphics, size) {
+                    let failure = classify_resize_failure(revision, has_presented_frame, error);
+                    self.handle_redraw_failure(event_loop, failure);
                     return;
                 }
                 if size.width > 0 && size.height > 0 {
@@ -258,13 +420,12 @@ impl ApplicationHandler for ApplicationHost {
                     }
                 }
                 Ok(PresentationOutcome::Presented { .. } | PresentationOutcome::Occluded) => {}
-                Err(error) if error.is_recoverable_frame_error() => {
-                    // Keep the current Window, renderer, and last presented
-                    // frame. A later publication or native redraw may produce
-                    // a valid frame; retrying immediately could busy-loop.
-                    self.warn_frame_failure(&error);
+                Err(failure) => {
+                    // Recoverable candidate failures retain the Window,
+                    // renderer, and presented hit-test plan. Do not request an
+                    // immediate retry for the unchanged revision/viewport.
+                    self.handle_redraw_failure(event_loop, failure);
                 }
-                Err(error) => self.fail(event_loop, error),
             },
             WindowEvent::CursorMoved { position } => {
                 self.cursor_target = self
@@ -312,6 +473,64 @@ impl ApplicationHandler for ApplicationHost {
     }
 }
 
+fn classify_candidate_failure(
+    revision: u64,
+    has_presented_frame: bool,
+    kind: FailureKind,
+    stage: FrameStage,
+    error: HostError,
+) -> RedrawFailure {
+    if failure_policy(has_presented_frame, kind) == FailurePolicy::Recoverable {
+        RedrawFailure::Recoverable(FrameFailure::new(revision, stage, &error))
+    } else {
+        RedrawFailure::Fatal(error)
+    }
+}
+
+fn classify_fatal_failure(
+    has_presented_frame: bool,
+    kind: FailureKind,
+    error: HostError,
+) -> RedrawFailure {
+    debug_assert_eq!(
+        failure_policy(has_presented_frame, kind),
+        FailurePolicy::Fatal
+    );
+    RedrawFailure::Fatal(error)
+}
+
+fn classify_resize_failure(
+    revision: u64,
+    has_presented_frame: bool,
+    error: GraphicsError,
+) -> RedrawFailure {
+    if matches!(&error, GraphicsError::TargetTooLarge { .. }) {
+        classify_candidate_failure(
+            revision,
+            has_presented_frame,
+            FailureKind::TargetTooLarge,
+            FrameStage::Resize,
+            error.into(),
+        )
+    } else {
+        RedrawFailure::Fatal(error.into())
+    }
+}
+
+fn finish_successful_presentation(
+    presented: &mut Option<PresentedFrame>,
+    last_frame_failure: &mut Option<FrameFailure>,
+    plan: ScenePlan,
+) {
+    let revision = plan.revision();
+    *presented = Some(PresentedFrame { plan });
+    *last_frame_failure = None;
+    debug_assert_eq!(
+        presented.as_ref().map(PresentedFrame::revision),
+        Some(revision)
+    );
+}
+
 fn logical_viewport(
     physical_size: PhysicalSize<u32>,
     scale_factor: f64,
@@ -325,6 +544,12 @@ fn logical_viewport(
         return Err(HostError::ViewportTooLarge { width, height });
     }
     Ok(LogicalViewport::new(width as f32, height as f32)?)
+}
+
+#[derive(Debug)]
+enum RedrawFailure {
+    Recoverable(FrameFailure),
+    Fatal(HostError),
 }
 
 #[derive(Debug, Error)]
@@ -360,15 +585,28 @@ pub(crate) enum HostError {
     Scene(#[from] SceneError),
 }
 
-impl HostError {
-    fn is_recoverable_frame_error(&self) -> bool {
-        matches!(self, Self::Layout(_) | Self::Scene(_))
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::ui::elements::{Dom, DomPublisher, Element, ElementTag};
+
     use super::*;
+
+    fn scene_plan(dom: &Dom) -> ScenePlan {
+        let (_publisher, reader) = DomPublisher::new(dom, |_| {});
+        let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
+        let computed = layout
+            .compute(reader.load(), LogicalViewport::new(320.0, 240.0).unwrap())
+            .unwrap();
+        ScenePlan::from_layout(computed, PhysicalSize::new(320, 240), 1.0).unwrap()
+    }
+
+    fn oversized_target() -> GraphicsError {
+        GraphicsError::TargetTooLarge {
+            size: PhysicalSize::new(70_000, 10),
+            max_texture_dimension_2d: 16_384,
+            max_vello_dimension: 65_535,
+        }
+    }
 
     #[test]
     fn physical_pixels_convert_to_logical_viewport_once() {
@@ -388,23 +626,82 @@ mod tests {
     }
 
     #[test]
-    fn layout_and_scene_failures_are_recoverable_frame_errors() {
-        let layout = HostError::Layout(LayoutError::InvalidViewport {
-            width: f32::NAN,
-            height: 10.0,
-        });
-        let scene = HostError::Scene(SceneError::EmptyTarget);
-
-        assert!(layout.is_recoverable_frame_error());
-        assert!(scene.is_recoverable_frame_error());
+    fn candidate_failures_recover_only_after_a_frame_was_presented() {
+        for kind in [
+            FailureKind::WindowSync,
+            FailureKind::TargetTooLarge,
+            FailureKind::Layout,
+            FailureKind::Scene,
+        ] {
+            assert_eq!(failure_policy(false, kind), FailurePolicy::Fatal);
+            assert_eq!(failure_policy(true, kind), FailurePolicy::Recoverable);
+        }
     }
 
     #[test]
-    fn host_and_graphics_failures_remain_fatal() {
-        let missing_renderer = HostError::MissingRenderer;
-        let surface_validation = HostError::Graphics(GraphicsError::SurfaceValidation);
+    fn active_presentation_and_invariant_failures_remain_fatal() {
+        for kind in [FailureKind::ActivePresentation, FailureKind::Invariant] {
+            assert_eq!(failure_policy(false, kind), FailurePolicy::Fatal);
+            assert_eq!(failure_policy(true, kind), FailurePolicy::Fatal);
+        }
 
-        assert!(!missing_renderer.is_recoverable_frame_error());
-        assert!(!surface_validation.is_recoverable_frame_error());
+        assert!(matches!(
+            classify_fatal_failure(
+                true,
+                FailureKind::ActivePresentation,
+                HostError::Graphics(GraphicsError::SurfaceValidation),
+            ),
+            RedrawFailure::Fatal(HostError::Graphics(GraphicsError::SurfaceValidation))
+        ));
+    }
+
+    #[test]
+    fn oversized_resize_is_recoverable_only_with_a_presented_frame() {
+        assert!(matches!(
+            classify_resize_failure(42, false, oversized_target()),
+            RedrawFailure::Fatal(HostError::Graphics(GraphicsError::TargetTooLarge { .. }))
+        ));
+
+        let failure = classify_resize_failure(42, true, oversized_target());
+        assert!(matches!(
+            failure,
+            RedrawFailure::Recoverable(FrameFailure {
+                revision: 42,
+                stage: FrameStage::Resize,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn successful_presentation_advances_the_plan_and_clears_failure() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let first_plan = scene_plan(&dom);
+        let first_revision = first_plan.revision();
+
+        dom.set_attribute(window, "title".into(), "updated".into())
+            .unwrap();
+        let second_plan = scene_plan(&dom);
+        let second_revision = second_plan.revision();
+        assert!(second_revision > first_revision);
+
+        let mut presented = None;
+        let mut last_failure = None;
+        finish_successful_presentation(&mut presented, &mut last_failure, first_plan);
+        last_failure = Some(FrameFailure {
+            revision: second_revision,
+            stage: FrameStage::Scene,
+            message: "injected scene failure".into(),
+        });
+
+        finish_successful_presentation(&mut presented, &mut last_failure, second_plan);
+
+        assert_eq!(
+            presented.as_ref().map(PresentedFrame::revision),
+            Some(second_revision)
+        );
+        assert!(last_failure.is_none());
     }
 }
