@@ -21,12 +21,6 @@ pub(crate) struct PresentedFrame {
     plan: ScenePlan,
 }
 
-impl PresentedFrame {
-    pub(crate) fn revision(&self) -> u64 {
-        self.plan.revision()
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct ApplicationHost {
     publications: PublishedDomReader,
@@ -68,8 +62,13 @@ impl ApplicationHost {
         self.fatal_error.as_ref()
     }
 
-    pub(crate) fn presented(&self) -> Option<&PresentedFrame> {
-        self.presented.as_ref()
+    fn warn_frame_failure(&self, error: &HostError) {
+        debug_assert!(error.is_recoverable_frame_error());
+        let revision = self
+            .publication
+            .as_ref()
+            .map_or(0, |publication| publication.revision());
+        eprintln!("Burokku warning: frame for DOM revision {revision} failed; continuing: {error}");
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: HostError) {
@@ -93,7 +92,7 @@ impl ApplicationHost {
 
         let change = self.windows.reconcile(event_loop, &publication)?;
         match change {
-            WindowChange::Created | WindowChange::Replaced => {
+            WindowChange::Created => {
                 let native = self
                     .windows
                     .current()
@@ -102,6 +101,40 @@ impl ApplicationHost {
                     &self.graphics,
                     Arc::clone(native.window()),
                 )?);
+                self.ever_had_window = true;
+            }
+            WindowChange::PreparedReplacement(prepared) => {
+                let candidate_renderer = match WindowRenderer::new(
+                    &self.graphics,
+                    Arc::clone(prepared.window()),
+                ) {
+                    Ok(renderer) => renderer,
+                    Err(error) => {
+                        // `prepared` closes only the candidate on return. Keep
+                        // using the working native Window and renderer, accept
+                        // the latest DOM for subsequent content frames, and do
+                        // not retry this replacement on every event-loop turn.
+                        eprintln!(
+                            "Burokku warning: renderer setup for replacement Window at DOM revision {} failed; keeping the current Window: {error}",
+                            publication.revision()
+                        );
+                        self.publication = Some(publication);
+                        if let Some(native) = self.windows.current() {
+                            native.window().request_redraw();
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // No fallible work remains: replace the native Window and its
+                // renderer as one host transaction, then release the previous
+                // surface before closing its Window.
+                let previous_renderer = self.renderer.replace(candidate_renderer);
+                let previous_window = prepared.commit(&mut self.windows);
+                drop(previous_renderer);
+                if let Some(previous_window) = previous_window {
+                    previous_window.close();
+                }
                 self.ever_had_window = true;
             }
             WindowChange::Removed => {
@@ -225,6 +258,12 @@ impl ApplicationHandler for ApplicationHost {
                     }
                 }
                 Ok(PresentationOutcome::Presented { .. } | PresentationOutcome::Occluded) => {}
+                Err(error) if error.is_recoverable_frame_error() => {
+                    // Keep the current Window, renderer, and last presented
+                    // frame. A later publication or native redraw may produce
+                    // a valid frame; retrying immediately could busy-loop.
+                    self.warn_frame_failure(&error);
+                }
                 Err(error) => self.fail(event_loop, error),
             },
             WindowEvent::CursorMoved { position } => {
@@ -321,6 +360,12 @@ pub(crate) enum HostError {
     Scene(#[from] SceneError),
 }
 
+impl HostError {
+    fn is_recoverable_frame_error(&self) -> bool {
+        matches!(self, Self::Layout(_) | Self::Scene(_))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +385,26 @@ mod tests {
                 Err(HostError::InvalidScaleFactor(_))
             ));
         }
+    }
+
+    #[test]
+    fn layout_and_scene_failures_are_recoverable_frame_errors() {
+        let layout = HostError::Layout(LayoutError::InvalidViewport {
+            width: f32::NAN,
+            height: 10.0,
+        });
+        let scene = HostError::Scene(SceneError::EmptyTarget);
+
+        assert!(layout.is_recoverable_frame_error());
+        assert!(scene.is_recoverable_frame_error());
+    }
+
+    #[test]
+    fn host_and_graphics_failures_remain_fatal() {
+        let missing_renderer = HostError::MissingRenderer;
+        let surface_validation = HostError::Graphics(GraphicsError::SurfaceValidation);
+
+        assert!(!missing_renderer.is_recoverable_frame_error());
+        assert!(!surface_validation.is_recoverable_frame_error());
     }
 }

@@ -133,7 +133,6 @@ impl Burokku {
             let _ = shutdown_result;
             return Err(BurokkuError::Host(message));
         }
-        let _last_presented_revision = host.presented().map(|frame| frame.revision());
         shutdown_result?;
         Ok(())
     }
