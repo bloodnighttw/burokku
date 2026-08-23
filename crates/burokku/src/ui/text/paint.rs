@@ -1,5 +1,6 @@
 use glifo::{FontEmbolden, Glyph};
 use parley::{fontique::Synthesis, FontData, PositionedLayoutItem};
+use skrifa::{raw::TableProvider as _, FontRef};
 use taffy::geometry::Point;
 use vello_common::{
     kurbo::{Affine, Diagonal2, Rect, Stroke},
@@ -207,11 +208,7 @@ pub(crate) fn paint_paragraph(
             .hint(false);
 
         if batch.synthesis.embolden() {
-            // Fontique reports only whether faux bold is needed. A small
-            // em-relative expansion matches the selected logical font size and
-            // remains independent of display scale.
-            let amount = f64::from(batch.font_size) / 32.0;
-            builder = builder.font_embolden(FontEmbolden::new(Diagonal2::new(amount, amount)));
+            builder = builder.font_embolden(faux_bold_embolden(&batch.font)?);
         }
         if let Some(degrees) = batch.synthesis.skew() {
             let skew = f64::from(degrees).to_radians().tan();
@@ -235,6 +232,20 @@ pub(crate) fn paint_paragraph(
         ));
     }
     Ok(stats)
+}
+
+/// Glifo caches unhinted outlines at the font's UPEM size and scales them to
+/// the requested pixel size while drawing. Expressing the expansion in font
+/// units therefore produces a `font_size / 32` expansion in logical pixels.
+fn faux_bold_embolden(font: &FontData) -> Result<FontEmbolden, TextError> {
+    let font_ref = FontRef::from_index(font.data.data(), font.index)
+        .map_err(|_| TextError::InvalidFontData)?;
+    let units_per_em = font_ref
+        .head()
+        .map_err(|_| TextError::InvalidFontData)?
+        .units_per_em();
+    let amount = f64::from(units_per_em) / 32.0;
+    Ok(FontEmbolden::new(Diagonal2::new(amount, amount)))
 }
 
 fn validate_coordinate(
@@ -274,7 +285,10 @@ mod tests {
 
     use crate::ui::{
         elements::{
-            styles::{color::RgbaColor, text::ComputedTextStyle},
+            styles::{
+                color::RgbaColor,
+                text::{ComputedTextStyle, FontWeight},
+            },
             Dom, Element, ElementTag,
         },
         text::{ParagraphInput, StyledTextRun, TextConstraint, TextEngine},
@@ -307,11 +321,31 @@ mod tests {
     }
 
     fn shaped() -> Rc<ShapedParagraph> {
+        shape(paragraph_input())
+    }
+
+    fn shape(input: ParagraphInput) -> Rc<ShapedParagraph> {
         let mut engine = TextEngine::without_system_fonts();
         engine.register_font_data(TEST_FONT.to_vec()).unwrap();
         engine
-            .shape(&paragraph_input(), TextConstraint::definite(200.0).unwrap())
+            .shape(&input, TextConstraint::definite(200.0).unwrap())
             .unwrap()
+    }
+
+    fn bold_paragraph_input() -> ParagraphInput {
+        let mut dom = Dom::new();
+        let source = dom.create_element(Element::from_tag(ElementTag::Text));
+        let style = ComputedTextStyle {
+            font_family: "Noto Sans".into(),
+            font_weight: FontWeight::BOLD,
+            ..ComputedTextStyle::default()
+        };
+        ParagraphInput::new(
+            source,
+            style.clone(),
+            "Bold".into(),
+            vec![StyledTextRun::new(0..4, style)],
+        )
     }
 
     #[test]
@@ -365,6 +399,47 @@ mod tests {
             assert!(batch.normalized_coords().len() < 64);
             let _synthesis = batch.synthesis();
         }
+    }
+
+    #[test]
+    fn regular_font_synthesizes_requested_bold_weight() {
+        let shaped = shape(bold_paragraph_input());
+        let batches = prepare_glyph_batches(Point::ZERO, &shaped).unwrap();
+
+        assert!(!batches.is_empty());
+        assert!(batches.iter().all(|batch| batch.synthesis().embolden()));
+    }
+
+    #[test]
+    fn faux_bold_expands_16px_ink_bounds_by_one_pixel() {
+        use vello_common::kurbo::{expand_path, Join, Shape};
+
+        let shaped = shape(bold_paragraph_input());
+        let batch = prepare_glyph_batches(Point::ZERO, &shaped)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(batch.synthesis().embolden());
+
+        let embolden = faux_bold_embolden(batch.font()).unwrap();
+        let regular = Rect::new(0.0, 0.0, 500.0, 700.0).to_path(0.1);
+        let regular_bounds = regular.bounding_box();
+        let bold_bounds = expand_path(
+            regular,
+            embolden.amount,
+            Join::Miter,
+            embolden.miter_limit,
+            embolden.tolerance,
+        )
+        .bounding_box();
+        let font_ref = FontRef::from_index(batch.font().data.data(), batch.font().index).unwrap();
+        let units_per_em = f64::from(font_ref.head().unwrap().units_per_em());
+        let pixels_per_font_unit = f64::from(batch.font_size()) / units_per_em;
+        let pixel_width_increase =
+            (bold_bounds.width() - regular_bounds.width()) * pixels_per_font_unit;
+
+        assert!((pixel_width_increase - 1.0).abs() < 0.01);
     }
 
     #[test]
