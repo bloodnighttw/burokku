@@ -207,12 +207,10 @@ impl LayoutTopology {
                 return Err(LayoutError::LayoutCycle(id));
             }
             let dom_id = self.dom_id(id).ok_or(LayoutError::MissingLayoutNode(id))?;
-            if depth > max_depth {
-                return Err(LayoutError::TreeTooDeep {
-                    node: dom_id,
-                    limit: max_depth,
-                });
-            }
+            assert!(
+                depth <= max_depth,
+                "layout tree exceeds the supported depth of {max_depth} at node {dom_id:?}"
+            );
             let children = self
                 .children(id)
                 .ok_or(LayoutError::MissingLayoutNode(id))?;

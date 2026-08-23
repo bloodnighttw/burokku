@@ -41,9 +41,6 @@ pub(crate) enum LayoutError {
     #[error("reachable DOM node {0:?} occurs more than once")]
     DuplicateDomNode(NodeId),
 
-    #[error("layout tree exceeds the supported depth of {limit} at node {node:?}")]
-    TreeTooDeep { node: NodeId, limit: usize },
-
     #[error("raw text node {0:?} is attached outside an outer text paragraph")]
     RawTextOutsideParagraph(NodeId),
 

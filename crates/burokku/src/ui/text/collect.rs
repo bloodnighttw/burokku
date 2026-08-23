@@ -73,12 +73,11 @@ pub(crate) fn collect_paragraph(
     let mut runs: Vec<StyledTextRun> = Vec::new();
 
     while let Some(next) = pending.pop() {
-        if next.depth > max_depth {
-            return Err(TextError::TreeTooDeep {
-                node: next.id,
-                limit: max_depth,
-            });
-        }
+        assert!(
+            next.depth <= max_depth,
+            "paragraph tree exceeds the supported depth of {max_depth} at node {:?}",
+            next.id
+        );
         if snapshot.parent(next.id) != Some(next.parent) {
             return Err(TextError::InvalidRelationship {
                 parent: next.parent,
@@ -346,7 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nesting_beyond_the_layout_depth_limit_without_recursing() {
+    #[should_panic(expected = "paragraph tree exceeds the supported depth")]
+    fn nesting_beyond_the_layout_depth_limit_panics_without_recursing() {
         let mut dom = Dom::new();
         let paragraph = element(&mut dom, ElementTag::Text);
         let mut parent = paragraph;
@@ -357,8 +357,6 @@ mod tests {
         }
         let publication = publication(&dom);
 
-        let error = collect_paragraph(publication.snapshot(), paragraph, 1, 4).unwrap_err();
-
-        assert!(matches!(error, TextError::TreeTooDeep { limit: 4, .. }));
+        let _ = collect_paragraph(publication.snapshot(), paragraph, 1, 4);
     }
 }

@@ -17,9 +17,6 @@ pub(crate) enum TextError {
     #[error("paragraph {paragraph:?} contains duplicate descendant {node:?}")]
     DuplicateNode { paragraph: NodeId, node: NodeId },
 
-    #[error("paragraph tree exceeds the supported depth of {limit} at node {node:?}")]
-    TreeTooDeep { node: NodeId, limit: usize },
-
     #[error("paragraph {paragraph:?} contains invalid descendant {child:?}")]
     InvalidParagraphChild { paragraph: NodeId, child: NodeId },
 
@@ -34,9 +31,6 @@ pub(crate) enum TextError {
 
     #[error("font data does not contain a usable OpenType font")]
     InvalidFontData,
-
-    #[error("paragraph {paragraph:?} has {count} styled runs, exceeding the supported limit")]
-    TooManyStyledRuns { paragraph: NodeId, count: usize },
 
     #[error("paragraph {paragraph:?} produced invalid {field} metric {value}")]
     InvalidMetric {

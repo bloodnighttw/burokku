@@ -443,11 +443,12 @@ Preserve Parley's native empty-text result and lock it down with a
 characterization test; do not give measurement and painting separate empty-text
 special cases.
 
-Return typed errors for non-finite dimensions, malformed range coverage,
-unsupported style-table size, and invalid metrics. When font resolution
-produces no glyphs for a non-whitespace paragraph, measure and paint explicit
-replacement boxes instead of failing the frame. Do not insert failed results
-into the cache.
+Return typed errors for non-finite dimensions, malformed range coverage, and
+invalid metrics. Exceeding the internal layout-depth or styled-run limits is an
+unsupported programming condition and panics. When font resolution produces no
+glyphs for a non-whitespace paragraph, measure and paint explicit replacement
+boxes instead of failing the frame. Do not insert failed results into the
+cache.
 
 **Tests**
 
