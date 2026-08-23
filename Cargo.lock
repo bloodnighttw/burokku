@@ -162,6 +162,7 @@ dependencies = [
  "glifo",
  "parley",
  "runtime",
+ "skrifa",
  "slotmap",
  "taffy",
  "thiserror",
