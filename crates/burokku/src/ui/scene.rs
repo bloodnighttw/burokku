@@ -14,6 +14,8 @@ use super::{
     text::{paint::paint_paragraph, TextError},
 };
 
+pub(crate) const MAX_VELLO_SCENE_DIMENSION: u32 = u16::MAX as u32;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LogicalRect {
     pub(crate) x: f32,
@@ -250,10 +252,12 @@ fn validate_target(size: PhysicalSize<u32>, scale_factor: f64) -> Result<(), Sce
     if size.width == 0 || size.height == 0 {
         return Err(SceneError::EmptyTarget);
     }
-    assert!(
-        size.width <= u32::from(u16::MAX) && size.height <= u32::from(u16::MAX),
-        "physical target {size:?} exceeds Vello Hybrid's u16 scene dimensions"
-    );
+    if size.width > MAX_VELLO_SCENE_DIMENSION || size.height > MAX_VELLO_SCENE_DIMENSION {
+        return Err(SceneError::TargetTooLarge {
+            size,
+            max_dimension: MAX_VELLO_SCENE_DIMENSION,
+        });
+    }
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return Err(SceneError::InvalidScaleFactor(scale_factor));
     }
@@ -281,6 +285,12 @@ pub(crate) enum SceneError {
 
     #[error("display scale factor must be positive and finite, got {0}")]
     InvalidScaleFactor(f64),
+
+    #[error("physical target {size:?} exceeds Vello's {max_dimension}-pixel dimension limit")]
+    TargetTooLarge {
+        size: PhysicalSize<u32>,
+        max_dimension: u32,
+    },
 
     #[error("node {node:?} has invalid scene {field} value {value}")]
     InvalidGeometry {
@@ -388,14 +398,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "exceeds Vello Hybrid's u16 scene dimensions")]
-    fn oversized_physical_targets_panic() {
+    fn oversized_physical_targets_return_an_error() {
         let (layout, ..) = computed_fixture();
+        let size = PhysicalSize::new(70_000, 10);
 
-        let _ = ScenePlan::from_layout(
-            layout.current().unwrap(),
-            PhysicalSize::new(70_000, 10),
-            1.0,
-        );
+        assert!(matches!(
+            ScenePlan::from_layout(layout.current().unwrap(), size, 1.0),
+            Err(SceneError::TargetTooLarge {
+                size: rejected,
+                max_dimension: MAX_VELLO_SCENE_DIMENSION,
+            }) if rejected == size
+        ));
     }
 }
