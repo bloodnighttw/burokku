@@ -101,32 +101,11 @@ export type BurokkuLength = `${number}px` | `${number}%`;
 /** A CSS hexadecimal color: #rgb, #rgba, #rrggbb, or #rrggbbaa. */
 export type BurokkuColor = `#${string}`;
 
-/** Styles currently understood by Burokku's native layout bridge. */
-export type BurokkuStyle = Partial<{
-  width: BurokkuDimension;
-  height: BurokkuDimension;
-  padding: BurokkuLength;
-  margin: BurokkuLength;
-  backgroundColor: BurokkuColor;
-  fontFamily: string;
-  fontSize: `${number}px`;
-  fontWeight: number | "normal" | "bold";
-  color: BurokkuColor;
-  lineHeight: "normal" | number | `${number}px`;
-  textWrap: "wrap" | "nowrap";
+export type BurokkuItemStyle = Partial<{
   flexBasis: BurokkuDimension;
   flexGrow: number;
   flexShrink: number;
-  flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
-  flexWrap: "nowrap" | "wrap" | "wrap-reverse";
-  gap: BurokkuLength;
-  columnGap: BurokkuLength;
-  rowGap: BurokkuLength;
-  alignContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
-  alignItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
   alignSelf: "auto" | "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
-  justifyContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
-  justifyItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
   justifySelf: "auto" | "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
   gridRow: string;
   gridRowStart: string;
@@ -134,11 +113,93 @@ export type BurokkuStyle = Partial<{
   gridColumn: string;
   gridColumnStart: string;
   gridColumnEnd: string;
+}>;
+
+/** Box and item styles shared by div, flex, grid, and text elements. */
+export type BurokkuCommonStyle = BurokkuItemStyle & Partial<{
+  width: BurokkuDimension;
+  height: BurokkuDimension;
+  padding: BurokkuLength;
+  margin: BurokkuLength;
+  backgroundColor: BurokkuColor;
+}>;
+
+type BurokkuFlexContainerStyle = Partial<{
+  flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
+  flexWrap: "nowrap" | "wrap" | "wrap-reverse";
+  gap: BurokkuLength;
+  columnGap: BurokkuLength;
+  rowGap: BurokkuLength;
+  alignContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  alignItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  justifyContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+}>;
+
+type BurokkuGridContainerStyle = Partial<{
+  gap: BurokkuLength;
+  columnGap: BurokkuLength;
+  rowGap: BurokkuLength;
+  alignContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  alignItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  justifyContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  justifyItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
   gridAutoFlow: "row" | "column" | "row dense" | "column dense" | "dense";
 }>;
 
-/** Apply a checked set of native styles to a Burokku element. */
-export function setStyles(element: Element, styles: Readonly<BurokkuStyle>): void {
+type BurokkuTypographyStyle = Partial<{
+  fontFamily: string;
+  fontSize: `${number}px`;
+  fontWeight: number | "normal" | "bold";
+  color: BurokkuColor;
+  lineHeight: "normal" | number | `${number}px`;
+  textWrap: "wrap" | "nowrap";
+}>;
+
+type BurokkuWindowStyleProperties = Partial<{
+  width: BurokkuDimension;
+  height: BurokkuDimension;
+  backgroundColor: BurokkuColor;
+}>;
+
+type BurokkuAllStyle = BurokkuCommonStyle &
+  BurokkuFlexContainerStyle &
+  BurokkuGridContainerStyle &
+  BurokkuTypographyStyle;
+
+type BurokkuStyleFor<Style> = Style & Partial<
+  Record<Exclude<keyof BurokkuAllStyle, keyof Style>, never>
+>;
+
+export type BurokkuDivStyle = BurokkuStyleFor<BurokkuCommonStyle>;
+export type BurokkuFlexStyle = BurokkuStyleFor<
+  BurokkuCommonStyle & BurokkuFlexContainerStyle
+>;
+export type BurokkuGridStyle = BurokkuStyleFor<
+  BurokkuCommonStyle & BurokkuGridContainerStyle
+>;
+export type BurokkuTextStyle = BurokkuStyleFor<
+  BurokkuCommonStyle & BurokkuTypographyStyle
+>;
+export type BurokkuWindowStyle = BurokkuStyleFor<BurokkuWindowStyleProperties>;
+
+/** Native styles supported by each Burokku element tag. */
+export interface BurokkuElementStyleMap {
+  div: BurokkuDivStyle;
+  flex: BurokkuFlexStyle;
+  grid: BurokkuGridStyle;
+  text: BurokkuTextStyle;
+  window: BurokkuWindowStyle;
+}
+
+/** Native styles supported by a Burokku element tag. */
+export type BurokkuStyle<Tag extends BurokkuTagName = BurokkuTagName> =
+  BurokkuElementStyleMap[Tag];
+
+/** Apply native styles supported by the element's tag. */
+export function setStyles<ElementType extends BurokkuElement>(
+  element: ElementType,
+  styles: Readonly<BurokkuStyle<NoInfer<ElementType["localName"]>>>,
+): void {
   for (const [name, value] of Object.entries(styles)) {
     if (value === undefined) continue;
     const nativeName = name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
