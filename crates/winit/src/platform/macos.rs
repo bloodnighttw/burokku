@@ -356,32 +356,26 @@ impl PlatformWindow {
     }
 
     pub(crate) fn set_title(&self, title: &str) {
-        let mtm =
-            MainThreadMarker::new().expect("Window::set_title must be called on the main thread");
-        self.inner
-            .get(mtm)
-            .window
-            .setTitle(&NSString::from_str(title));
+        self.inner.get_on_main(|inner| {
+            inner.window.setTitle(&NSString::from_str(title));
+        });
     }
 
     pub(crate) fn request_redraw(&self) {
-        let mtm = MainThreadMarker::new()
-            .expect("Window::request_redraw must be called on the main thread");
-        self.inner.get(mtm).view.setNeedsDisplay(true);
+        self.inner
+            .get_on_main(|inner| inner.view.setNeedsDisplay(true));
     }
 
     pub(crate) fn set_inner_size(&self, size: LogicalSize<f64>) {
-        let mtm = MainThreadMarker::new()
-            .expect("Window::set_inner_size must be called on the main thread");
-        self.inner
-            .get(mtm)
-            .window
-            .setContentSize(NSSize::new(size.width, size.height));
+        self.inner.get_on_main(|inner| {
+            inner
+                .window
+                .setContentSize(NSSize::new(size.width, size.height));
+        });
     }
 
     pub(crate) fn close(&self) {
-        let mtm = MainThreadMarker::new().expect("Window::close must be called on the main thread");
-        self.inner.get(mtm).window.close();
+        self.inner.get_on_main(|inner| inner.window.close());
     }
 }
 
