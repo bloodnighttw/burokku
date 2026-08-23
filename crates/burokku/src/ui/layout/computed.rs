@@ -1,10 +1,14 @@
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+};
 
 use taffy::{geometry::Point, Layout};
 
 use crate::ui::{
     elements::{NodeId as DomNodeId, PublishedDom},
-    text::ShapedParagraph,
+    text::{ShapedParagraph, TextConstraint},
 };
 
 use super::{
@@ -133,19 +137,37 @@ fn validate_final_paragraphs(
     scratch: &ScratchLayout,
     final_paragraphs: &HashMap<DomNodeId, Rc<ShapedParagraph>>,
 ) -> Result<(), LayoutError> {
-    for (&source, paragraph) in final_paragraphs {
-        let Some(layout_id) = scratch.topology.layout_id(source) else {
-            return Err(LayoutError::InvalidFinalParagraph(source));
-        };
-        let Some(state) = scratch.nodes.get(&layout_id) else {
-            return Err(LayoutError::InvalidFinalParagraph(source));
-        };
+    let paragraph_ids = scratch.visible_paragraph_ids()?;
+    let mut expected_sources = HashSet::with_capacity(paragraph_ids.len());
+    for layout_id in paragraph_ids {
+        let state = scratch
+            .nodes
+            .get(&layout_id)
+            .ok_or(LayoutError::MissingLayoutSidecar(layout_id))?;
         let LayoutRole::Paragraph { input } = &state.role else {
-            return Err(LayoutError::InvalidFinalParagraph(source));
+            return Err(LayoutError::InvalidFinalParagraph(state.dom_id));
         };
-        if paragraph.source() != source || paragraph.fingerprint() != input.fingerprint() {
+        let source = state.dom_id;
+        expected_sources.insert(source);
+        let paragraph = final_paragraphs
+            .get(&source)
+            .ok_or(LayoutError::InvalidFinalParagraph(source))?;
+        let expected_constraint = TextConstraint::definite(state.final_content_width())
+            .map_err(|_| LayoutError::InvalidFinalParagraph(source))?;
+        if paragraph.source() != source
+            || paragraph.fingerprint() != input.fingerprint()
+            || paragraph.constraint() != expected_constraint
+        {
             return Err(LayoutError::InvalidFinalParagraph(source));
         }
+    }
+
+    if let Some(source) = final_paragraphs
+        .keys()
+        .find(|source| !expected_sources.contains(source))
+        .copied()
+    {
+        return Err(LayoutError::InvalidFinalParagraph(source));
     }
     Ok(())
 }

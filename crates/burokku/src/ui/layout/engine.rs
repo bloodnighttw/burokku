@@ -140,11 +140,27 @@ mod tests {
         final_paragraph_resolution: bool,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct TestMeasurer {
         calls: Vec<RecordedMeasure>,
         fail: bool,
         generation: u64,
+        omit_final_paragraph: bool,
+        final_width_delta: f32,
+        text: TextEngine,
+    }
+
+    impl Default for TestMeasurer {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                fail: false,
+                generation: 0,
+                omit_final_paragraph: false,
+                final_width_delta: 0.0,
+                text: TextEngine::without_system_fonts(),
+            }
+        }
     }
 
     impl TextMeasurer for TestMeasurer {
@@ -185,13 +201,30 @@ mod tests {
             } else {
                 14.0
             };
-            Ok(TextMeasurement::new(
-                Size {
-                    width: measured_width,
-                    height: measured_height,
-                },
-                Some(baseline),
-            ))
+            let size = Size {
+                width: measured_width,
+                height: measured_height,
+            };
+            if request.is_final_paragraph_resolution() {
+                if self.omit_final_paragraph {
+                    return Ok(TextMeasurement::new(size, Some(baseline)));
+                }
+                let constraint = match request.available_space().width {
+                    AvailableSpace::MinContent => TextConstraint::MinContent,
+                    AvailableSpace::MaxContent => TextConstraint::MaxContent,
+                    AvailableSpace::Definite(width) => {
+                        TextConstraint::definite(width + self.final_width_delta)
+                            .map_err(|error| error.to_string())?
+                    }
+                };
+                let shaped = self
+                    .text
+                    .shape(request.paragraph(), constraint)
+                    .map_err(|error| error.to_string())?;
+                Ok(TextMeasurement::with_shaped(size, Some(baseline), shaped))
+            } else {
+                Ok(TextMeasurement::new(size, Some(baseline)))
+            }
         }
     }
 
@@ -316,6 +349,144 @@ mod tests {
     }
 
     #[test]
+    fn flex_stretch_resolves_the_completed_paragraph_width() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let flex = element(&mut dom, ElementTag::Flex);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("stretch this paragraph across the flex container");
+        dom.set_style_property(flex, "width", "180px").unwrap();
+        dom.set_style_property(flex, "flex-direction", "column")
+            .unwrap();
+        dom.set_style_property(flex, "align-items", "stretch")
+            .unwrap();
+        dom.set_style_property(paragraph, "padding", "5px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, flex).unwrap();
+        dom.append_child(flex, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(400.0, 300.0))
+            .unwrap();
+        let layout = computed.box_for(paragraph).unwrap().layout();
+        let final_constraint = computed.final_paragraph(paragraph).unwrap().constraint();
+
+        assert_close(layout.size.width, 180.0);
+        assert_eq!(
+            final_constraint,
+            TextConstraint::definite(layout.content_box_width()).unwrap()
+        );
+        assert_eq!(
+            engine
+                .measurer
+                .calls
+                .iter()
+                .filter(|call| call.source == paragraph && call.final_paragraph_resolution)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn grid_stretch_resolves_the_completed_paragraph_width() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let grid = dom.create_element(Element::Grid {
+            style: Box::new(GridStyle {
+                template_columns: vec![GridTemplateComponent::Single(
+                    TrackSizingFunction::fraction(1.0),
+                )],
+                ..GridStyle::default()
+            }),
+        });
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("stretch this paragraph across the grid track");
+        dom.set_style_property(grid, "width", "210px").unwrap();
+        dom.set_style_property(grid, "justify-items", "stretch")
+            .unwrap();
+        dom.set_style_property(paragraph, "padding", "7px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, grid).unwrap();
+        dom.append_child(grid, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(400.0, 300.0))
+            .unwrap();
+        let layout = computed.box_for(paragraph).unwrap().layout();
+        let final_constraint = computed.final_paragraph(paragraph).unwrap().constraint();
+
+        assert_close(layout.size.width, 210.0);
+        assert_eq!(
+            final_constraint,
+            TextConstraint::definite(layout.content_box_width()).unwrap()
+        );
+        assert_eq!(
+            engine
+                .measurer
+                .calls
+                .iter()
+                .filter(|call| call.source == paragraph && call.final_paragraph_resolution)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn visible_paragraph_requires_a_final_shaped_result() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("required final paragraph");
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let measurer = TestMeasurer {
+            omit_final_paragraph: true,
+            ..TestMeasurer::default()
+        };
+        let mut engine = LayoutEngine::new(measurer);
+
+        let error = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LayoutError::InvalidFinalParagraph(source) if source == paragraph
+        ));
+    }
+
+    #[test]
+    fn final_paragraph_must_match_the_completed_content_width() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("wrong width must fail");
+        dom.set_style_property(paragraph, "width", "100px").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let measurer = TestMeasurer {
+            final_width_delta: 1.0,
+            ..TestMeasurer::default()
+        };
+        let mut engine = LayoutEngine::new(measurer);
+
+        let error = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LayoutError::InvalidFinalParagraph(source) if source == paragraph
+        ));
+    }
+
+    #[test]
     fn paragraph_descendants_flatten_into_one_measured_leaf() {
         let mut dom = Dom::new();
         let window = element(&mut dom, ElementTag::Window);
@@ -350,14 +521,19 @@ mod tests {
             .calls
             .iter()
             .all(|call| call.source == paragraph && call.text == "hello world"));
-        let final_call = engine
+        let final_calls = engine
             .measurer
             .calls
             .iter()
-            .find(|call| call.final_paragraph_resolution)
-            .expect("paragraph resolution performs a final-width measurement");
+            .filter(|call| call.final_paragraph_resolution)
+            .collect::<Vec<_>>();
         assert_eq!(
-            final_call.available_space.width,
+            final_calls.len(),
+            1,
+            "paragraph resolution runs once after Taffy finishes"
+        );
+        assert_eq!(
+            final_calls[0].available_space.width,
             AvailableSpace::Definite(90.0)
         );
     }

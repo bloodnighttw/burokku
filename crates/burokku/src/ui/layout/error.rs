@@ -68,7 +68,7 @@ pub(crate) enum LayoutError {
     #[error("text measurement generation changed during layout from {before} to {after}")]
     TextGenerationChanged { before: u64, after: u64 },
 
-    #[error("paragraph {0:?} has a stale or mismatched final shaped paragraph")]
+    #[error("paragraph {0:?} has a missing, stale, or mismatched final shaped paragraph")]
     InvalidFinalParagraph(NodeId),
 
     #[error("paragraph {paragraph:?} returned invalid {field} value {value}")]
