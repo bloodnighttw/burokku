@@ -10,7 +10,7 @@ use wgpu::{
 };
 use winit::{PhysicalSize, Window, WindowId};
 
-use super::scene::BuiltScene;
+use super::scene::{BuiltScene, MAX_VELLO_SCENE_DIMENSION};
 
 #[derive(Debug)]
 pub(crate) struct GraphicsContext {
@@ -72,6 +72,10 @@ impl GraphicsContext {
             queue,
         })
     }
+
+    fn validate_target(&self, size: PhysicalSize<u32>) -> Result<(), GraphicsError> {
+        validate_target_dimensions(size, self.device.limits().max_texture_dimension_2d)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,14 +102,15 @@ impl WindowRenderer {
         graphics: &GraphicsContext,
         window: Arc<Window>,
     ) -> Result<Self, GraphicsError> {
-        let surface = graphics
-            .instance
-            .create_surface(window.clone())
-            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Err(GraphicsError::EmptySurface);
         }
+        graphics.validate_target(size)?;
+        let surface = graphics
+            .instance
+            .create_surface(window.clone())
+            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
         let capabilities = surface.get_capabilities(&graphics.adapter);
         let format = choose_surface_format(&capabilities.formats)
             .ok_or(GraphicsError::UnsupportedSurface)?;
@@ -150,13 +155,18 @@ impl WindowRenderer {
         self.last_presented_revision
     }
 
-    pub(crate) fn resize(&mut self, graphics: &GraphicsContext, size: PhysicalSize<u32>) {
+    pub(crate) fn resize(
+        &mut self,
+        graphics: &GraphicsContext,
+        size: PhysicalSize<u32>,
+    ) -> Result<(), GraphicsError> {
         if size.width == 0 || size.height == 0 {
             self.suspended = true;
-            return;
+            return Ok(());
         }
+        graphics.validate_target(size)?;
         if !self.suspended && self.config.width == size.width && self.config.height == size.height {
-            return;
+            return Ok(());
         }
 
         self.suspended = false;
@@ -174,6 +184,7 @@ impl WindowRenderer {
         self.renderer = renderer;
         self.resources = resources;
         self.last_presented_revision = None;
+        Ok(())
     }
 
     pub(crate) fn present(
@@ -197,6 +208,7 @@ impl WindowRenderer {
             CurrentSurfaceTexture::Timeout => return Ok(PresentationOutcome::Timeout),
             CurrentSurfaceTexture::Occluded => return Ok(PresentationOutcome::Occluded),
             CurrentSurfaceTexture::Outdated => {
+                graphics.validate_target(self.physical_size())?;
                 self.surface.configure(&graphics.device, &self.config);
                 return Ok(PresentationOutcome::Reconfigure);
             }
@@ -235,6 +247,7 @@ impl WindowRenderer {
         self.last_presented_revision = Some(frame.plan().revision());
 
         if suboptimal {
+            graphics.validate_target(self.physical_size())?;
             self.surface.configure(&graphics.device, &self.config);
         }
         Ok(PresentationOutcome::Presented {
@@ -243,6 +256,7 @@ impl WindowRenderer {
     }
 
     fn recreate_surface(&mut self, graphics: &GraphicsContext) -> Result<(), GraphicsError> {
+        graphics.validate_target(self.physical_size())?;
         let surface = graphics
             .instance
             .create_surface(Arc::clone(&self.window))
@@ -266,6 +280,24 @@ impl WindowRenderer {
         self.last_presented_revision = None;
         Ok(())
     }
+}
+
+fn validate_target_dimensions(
+    size: PhysicalSize<u32>,
+    max_texture_dimension_2d: u32,
+) -> Result<(), GraphicsError> {
+    if size.width > max_texture_dimension_2d
+        || size.height > max_texture_dimension_2d
+        || size.width > MAX_VELLO_SCENE_DIMENSION
+        || size.height > MAX_VELLO_SCENE_DIMENSION
+    {
+        return Err(GraphicsError::TargetTooLarge {
+            size,
+            max_texture_dimension_2d,
+            max_vello_dimension: MAX_VELLO_SCENE_DIMENSION,
+        });
+    }
+    Ok(())
 }
 
 fn choose_surface_format(formats: &[TextureFormat]) -> Option<TextureFormat> {
@@ -293,6 +325,15 @@ pub(crate) enum GraphicsError {
     #[error("cannot create a renderer for a zero-sized surface")]
     EmptySurface,
 
+    #[error(
+        "render target {size:?} exceeds WGPU's {max_texture_dimension_2d}-pixel or Vello's {max_vello_dimension}-pixel dimension limit"
+    )]
+    TargetTooLarge {
+        size: PhysicalSize<u32>,
+        max_texture_dimension_2d: u32,
+        max_vello_dimension: u32,
+    },
+
     #[error("WGPU reported a surface validation failure")]
     SurfaceValidation,
 
@@ -309,6 +350,48 @@ pub(crate) enum GraphicsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_dimensions_respect_wgpu_and_vello_limits() {
+        let wgpu_limit = 8_192;
+        assert!(
+            validate_target_dimensions(PhysicalSize::new(wgpu_limit, wgpu_limit), wgpu_limit,)
+                .is_ok()
+        );
+
+        for size in [
+            PhysicalSize::new(wgpu_limit + 1, 1),
+            PhysicalSize::new(1, wgpu_limit + 1),
+        ] {
+            assert!(matches!(
+                validate_target_dimensions(size, wgpu_limit),
+                Err(GraphicsError::TargetTooLarge {
+                    size: rejected,
+                    max_texture_dimension_2d: 8_192,
+                    max_vello_dimension: MAX_VELLO_SCENE_DIMENSION,
+                }) if rejected == size
+            ));
+        }
+
+        assert!(validate_target_dimensions(
+            PhysicalSize::new(MAX_VELLO_SCENE_DIMENSION, MAX_VELLO_SCENE_DIMENSION,),
+            u32::MAX,
+        )
+        .is_ok());
+        for size in [
+            PhysicalSize::new(MAX_VELLO_SCENE_DIMENSION + 1, 1),
+            PhysicalSize::new(1, MAX_VELLO_SCENE_DIMENSION + 1),
+        ] {
+            assert!(matches!(
+                validate_target_dimensions(size, u32::MAX),
+                Err(GraphicsError::TargetTooLarge {
+                    size: rejected,
+                    max_texture_dimension_2d: u32::MAX,
+                    max_vello_dimension: MAX_VELLO_SCENE_DIMENSION,
+                }) if rejected == size
+            ));
+        }
+    }
 
     #[test]
     fn surface_format_prefers_srgb_and_falls_back_to_the_first_format() {

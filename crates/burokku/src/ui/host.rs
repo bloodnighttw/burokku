@@ -136,11 +136,10 @@ impl ApplicationHost {
         }
 
         let physical_size = native.window().inner_size();
+        renderer.resize(&self.graphics, physical_size)?;
         if physical_size.width == 0 || physical_size.height == 0 {
-            renderer.resize(&self.graphics, physical_size);
             return Ok(PresentationOutcome::Occluded);
         }
-        renderer.resize(&self.graphics, physical_size);
         let scale_factor = native.window().scale_factor();
         let viewport = logical_viewport(physical_size, scale_factor)?;
         let computed = self.layout.compute(Arc::clone(publication), viewport)?;
@@ -205,8 +204,13 @@ impl ApplicationHandler for ApplicationHost {
                 new_inner_size: size,
                 ..
             } => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(&self.graphics, size);
+                let resize = self
+                    .renderer
+                    .as_mut()
+                    .map(|renderer| renderer.resize(&self.graphics, size));
+                if let Some(Err(error)) = resize {
+                    self.fail(event_loop, error.into());
+                    return;
                 }
                 if size.width > 0 && size.height > 0 {
                     if let Some(window) = self.windows.current() {
