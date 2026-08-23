@@ -26,7 +26,7 @@ pub(crate) struct TextMeasureRequest<'a> {
     paragraph: &'a ParagraphInput,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
-    final_width_selection: bool,
+    final_paragraph_resolution: bool,
 }
 
 impl<'a> TextMeasureRequest<'a> {
@@ -50,8 +50,8 @@ impl<'a> TextMeasureRequest<'a> {
         self.available_space
     }
 
-    pub(crate) fn is_final_width_selection(self) -> bool {
-        self.final_width_selection
+    pub(crate) fn is_final_paragraph_resolution(self) -> bool {
+        self.final_paragraph_resolution
     }
 }
 
@@ -126,12 +126,12 @@ pub(super) fn compute_layout<M: TextMeasurer>(
         nodes: &mut scratch.nodes,
         measurer,
         first_error: None,
-        selected_text: HashMap::new(),
+        final_paragraphs: HashMap::new(),
     };
     taffy::compute_root_layout(&mut tree, root.into_taffy(), available_space);
     match tree.first_error {
         Some(error) => Err(error),
-        None => Ok(tree.selected_text),
+        None => Ok(tree.final_paragraphs),
     }
 }
 
@@ -150,7 +150,7 @@ struct DerivedLayoutTree<'a, M> {
     nodes: &'a mut std::collections::HashMap<LayoutId, LayoutNodeState>,
     measurer: &'a mut M,
     first_error: Option<LayoutError>,
-    selected_text: HashMap<DomNodeId, Rc<ShapedParagraph>>,
+    final_paragraphs: HashMap<DomNodeId, Rc<ShapedParagraph>>,
 }
 
 impl<M> DerivedLayoutTree<'_, M> {
@@ -273,7 +273,7 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
                     .map(|baseline| border.top + padding.top + baseline),
             };
             if let Some(shaped) = measurement.shaped() {
-                self.selected_text
+                self.final_paragraphs
                     .insert(paragraph.source(), Rc::clone(shaped));
             }
         }
@@ -285,7 +285,7 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
         paragraph: &ParagraphInput,
         known_dimensions: Size<Option<f32>>,
         available_space: Size<AvailableSpace>,
-        final_width_selection: bool,
+        final_paragraph_resolution: bool,
     ) -> Option<TextMeasurement> {
         if self.first_error.is_some() {
             return None;
@@ -317,7 +317,7 @@ impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
             paragraph,
             known_dimensions,
             available_space,
-            final_width_selection,
+            final_paragraph_resolution,
         };
         let measurement = match self.measurer.measure(request) {
             Ok(measurement) => measurement,

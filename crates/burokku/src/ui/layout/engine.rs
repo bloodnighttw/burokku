@@ -61,7 +61,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         }
 
         let mut scratch = reconcile_full(&publication, viewport)?;
-        let selected_text = compute_layout(&mut scratch, &mut self.measurer)?;
+        let final_paragraphs = compute_layout(&mut scratch, &mut self.measurer)?;
         let after_generation = self.measurer.generation();
         if after_generation != text_generation {
             return Err(LayoutError::TextGenerationChanged {
@@ -69,9 +69,9 @@ impl<M: TextMeasurer> LayoutEngine<M> {
                 after: after_generation,
             });
         }
-        let active_text_sources = selected_text.keys().copied().collect::<HashSet<_>>();
+        let active_text_sources = final_paragraphs.keys().copied().collect::<HashSet<_>>();
         let next =
-            ComputedLayout::from_scratch(publication, scratch, text_generation, selected_text)?;
+            ComputedLayout::from_scratch(publication, scratch, text_generation, final_paragraphs)?;
         self.measurer.retain_sources(&active_text_sources);
         self.current = Some(next);
         Ok(self
@@ -102,7 +102,7 @@ impl TextMeasurer for TextEngine {
             width: known.width.unwrap_or(metrics.width()),
             height: known.height.unwrap_or(metrics.height()),
         };
-        if request.is_final_width_selection() {
+        if request.is_final_paragraph_resolution() {
             Ok(TextMeasurement::with_shaped(
                 size,
                 metrics.first_baseline(),
@@ -137,7 +137,7 @@ mod tests {
         source: crate::ui::elements::NodeId,
         text: String,
         available_space: Size<AvailableSpace>,
-        final_width_selection: bool,
+        final_paragraph_resolution: bool,
     }
 
     #[derive(Debug, Default)]
@@ -161,7 +161,7 @@ mod tests {
                 source: request.source(),
                 text: request.text().to_owned(),
                 available_space: request.available_space(),
-                final_width_selection: request.is_final_width_selection(),
+                final_paragraph_resolution: request.is_final_paragraph_resolution(),
             });
 
             let intrinsic_width = request.text().chars().count() as f32 * 10.0;
@@ -354,8 +354,8 @@ mod tests {
             .measurer
             .calls
             .iter()
-            .find(|call| call.final_width_selection)
-            .expect("paragraph selection performs a final-width measurement");
+            .find(|call| call.final_paragraph_resolution)
+            .expect("paragraph resolution performs a final-width measurement");
         assert_eq!(
             final_call.available_space.width,
             AvailableSpace::Definite(90.0)
@@ -614,17 +614,17 @@ mod tests {
             .compute(publication(&dom), viewport(300.0, 300.0))
             .unwrap();
         let paragraph_box = computed.box_for(paragraph).unwrap();
-        let selected = computed.selected_text(paragraph).unwrap();
+        let final_paragraph = computed.final_paragraph(paragraph).unwrap();
 
-        assert_eq!(selected.constraint().definite_value(), Some(50.0));
+        assert_eq!(final_paragraph.constraint().definite_value(), Some(50.0));
         assert_close(
             paragraph_box.layout().size.height,
-            selected.metrics().height() + 10.0,
+            final_paragraph.metrics().height() + 10.0,
         );
     }
 
     #[test]
-    fn parley_engine_retains_the_exact_final_width_selection() {
+    fn parley_engine_retains_the_exact_final_width_paragraph() {
         const TEST_FONT: &[u8] = include_bytes!("../../../testdata/fonts/NotoSans-Regular.ttf");
 
         let mut staging = Dom::new();
@@ -658,17 +658,17 @@ mod tests {
         let computed = engine
             .compute(reader.load(), viewport(300.0, 200.0))
             .unwrap();
-        let first_selection = Rc::clone(computed.selected_text(paragraph).unwrap());
+        let first_paragraph = Rc::clone(computed.final_paragraph(paragraph).unwrap());
 
-        assert_eq!(first_selection.constraint().definite_value(), Some(90.0));
-        assert_eq!(first_selection.source(), paragraph);
-        assert_eq!(first_selection.layout().scale(), 1.0);
-        assert!(first_selection.layout().lines().any(|line| line
+        assert_eq!(first_paragraph.constraint().definite_value(), Some(90.0));
+        assert_eq!(first_paragraph.source(), paragraph);
+        assert_eq!(first_paragraph.layout().scale(), 1.0);
+        assert!(first_paragraph.layout().lines().any(|line| line
             .items()
             .any(|item| matches!(item, parley::PositionedLayoutItem::GlyphRun(run) if run.style().brush == [255, 0, 0, 255]))));
         let glyph_batches = crate::ui::text::paint::prepare_glyph_batches(
             computed.box_for(paragraph).unwrap().content_origin(),
-            &first_selection,
+            &first_paragraph,
         )
         .unwrap();
         assert!(
@@ -686,13 +686,13 @@ mod tests {
         let computed = engine
             .compute(reader.load(), viewport(300.0, 200.0))
             .unwrap();
-        let second_selection = computed.selected_text(paragraph).unwrap();
+        let second_paragraph = computed.final_paragraph(paragraph).unwrap();
 
         assert_ne!(
-            first_selection.fingerprint(),
-            second_selection.fingerprint()
+            first_paragraph.fingerprint(),
+            second_paragraph.fingerprint()
         );
-        assert!(!Rc::ptr_eq(&first_selection, second_selection));
+        assert!(!Rc::ptr_eq(&first_paragraph, second_paragraph));
         assert_eq!(computed.revision(), staging.revision());
     }
 }

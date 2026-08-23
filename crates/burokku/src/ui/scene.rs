@@ -93,7 +93,7 @@ impl ScenePlan {
             {
                 items.push(PaintItem::Background { node, rect, color });
             }
-            if computed.selected_text(node).is_some() {
+            if computed.final_paragraph(node).is_some() {
                 items.push(PaintItem::Text { source: node });
             }
         }
@@ -208,8 +208,8 @@ impl BuiltScene {
                 }
                 PaintItem::Text { source } => {
                     let paragraph = computed
-                        .selected_text(source)
-                        .ok_or(SceneError::MissingSelectedText(source))?;
+                        .final_paragraph(source)
+                        .ok_or(SceneError::MissingFinalParagraph(source))?;
                     let origin = computed
                         .box_for(source)
                         .ok_or(SceneError::MissingComputedBox(source))?
@@ -289,8 +289,8 @@ pub(crate) enum SceneError {
         value: f32,
     },
 
-    #[error("paragraph {0:?} has no final shaped-text selection")]
-    MissingSelectedText(NodeId),
+    #[error("paragraph {0:?} has no final shaped paragraph")]
+    MissingFinalParagraph(NodeId),
 
     #[error("node {0:?} has no computed layout box")]
     MissingComputedBox(NodeId),

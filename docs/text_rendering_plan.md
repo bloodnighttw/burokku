@@ -4,12 +4,12 @@
 
 The initial MTS text pipeline is implemented. It includes inherited run
 collection, deterministic fingerprints, Parley shaping and bounded width
-caching, Taffy measured leaves and baselines, exact final-width selection, and
-a Vello Hybrid glyph adapter using the selected layout. The current-tree
+caching, Taffy measured leaves and baselines, exact final-width resolution, and
+a Vello Hybrid glyph adapter using the final layout. The current-tree
 execution details are in
 [`dom_problem_6_implementation_plan.md`](dom_problem_6_implementation_plan.md).
 
-The native host now builds and presents Vello scenes from the exact selected
+The native host now builds and presents Vello scenes from the exact final
 layouts under live Window viewports. The current full-rebuild path remains the
 correctness fallback until Problem 3 adds bounded incremental text-dirty
 batches.
@@ -324,8 +324,8 @@ is the correctness fallback.
 Enable Vello Hybrid's `text` feature when this phase starts; the current
 `default-features = false` configuration does not enable glyph rendering.
 
-Scene construction uses the same cached Parley layout selected by Taffy. It
-must not reshape text independently.
+Scene construction uses the same cached Parley layout resolved from Taffy's
+final width. It must not reshape text independently.
 
 For each Parley line and positioned glyph run:
 

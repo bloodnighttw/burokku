@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_font_replacement_boxes_wrap_to_the_selected_width() {
+    fn missing_font_replacement_boxes_wrap_to_the_final_width() {
         let input = input_with_style(source(), "a b c d", test_style(), Vec::new());
         let mut engine = TextEngine::without_system_fonts();
 
