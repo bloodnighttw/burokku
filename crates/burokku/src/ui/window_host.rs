@@ -92,12 +92,12 @@ fn requested_dimension(value: WindowSize, default: f64) -> f64 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) enum WindowChange {
     Unchanged,
     Created,
     Updated,
-    Replaced,
+    PreparedReplacement(PreparedWindow),
     Removed,
 }
 
@@ -114,6 +114,70 @@ impl NativeWindow {
 
     pub(crate) fn window(&self) -> &Arc<Window> {
         &self.window
+    }
+
+    pub(crate) fn close(self) {
+        self.window.close();
+    }
+}
+
+#[derive(Debug)]
+struct PreparedReplacement<T> {
+    candidate: Option<T>,
+    abort: fn(&T),
+}
+
+impl<T> PreparedReplacement<T> {
+    fn new(candidate: T, abort: fn(&T)) -> Self {
+        Self {
+            candidate: Some(candidate),
+            abort,
+        }
+    }
+
+    fn candidate(&self) -> &T {
+        self.candidate
+            .as_ref()
+            .expect("an uncommitted replacement retains its candidate")
+    }
+
+    fn commit(mut self, current: &mut Option<T>) -> Option<T> {
+        let candidate = self
+            .candidate
+            .take()
+            .expect("an uncommitted replacement retains its candidate");
+        current.replace(candidate)
+    }
+}
+
+impl<T> Drop for PreparedReplacement<T> {
+    fn drop(&mut self) {
+        if let Some(candidate) = self.candidate.as_ref() {
+            (self.abort)(candidate);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedWindow {
+    replacement: PreparedReplacement<NativeWindow>,
+}
+
+impl PreparedWindow {
+    fn new(candidate: NativeWindow) -> Self {
+        Self {
+            replacement: PreparedReplacement::new(candidate, |candidate| {
+                candidate.window.close();
+            }),
+        }
+    }
+
+    pub(crate) fn window(&self) -> &Arc<Window> {
+        self.replacement.candidate().window()
+    }
+
+    pub(crate) fn commit(self, manager: &mut WindowManager) -> Option<NativeWindow> {
+        self.replacement.commit(&mut manager.current)
     }
 }
 
@@ -172,17 +236,13 @@ impl WindowManager {
                 Ok(WindowChange::Updated)
             }
             (Some(_), Some(spec)) => {
-                // Create first so a platform failure leaves the previous native
-                // window and its renderer intact.
-                let replacement = Arc::new(event_loop.create_window(spec.attributes())?);
-                let previous = self.current.replace(NativeWindow {
-                    spec,
-                    window: replacement,
-                });
-                if let Some(previous) = previous {
-                    previous.window.close();
-                }
-                Ok(WindowChange::Replaced)
+                // Keep the active native Window untouched until the host also
+                // creates a renderer for this candidate. Dropping an
+                // uncommitted candidate closes only that candidate.
+                let window = Arc::new(event_loop.create_window(spec.attributes())?);
+                Ok(WindowChange::PreparedReplacement(PreparedWindow::new(
+                    NativeWindow { spec, window },
+                )))
             }
         }
     }
@@ -227,7 +287,7 @@ pub(crate) enum WindowHostError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{cell::Cell, rc::Rc, sync::Arc};
 
     use crate::ui::elements::{Dom, DomPublisher, ElementTag};
 
@@ -236,6 +296,66 @@ mod tests {
     fn publication(dom: &Dom) -> Arc<PublishedDom> {
         let (_publisher, reader) = DomPublisher::new(dom, |_| {});
         reader.load()
+    }
+
+    #[derive(Debug)]
+    struct ReplacementProbe {
+        id: u8,
+        closed: Rc<Cell<bool>>,
+    }
+
+    fn close_probe(probe: &ReplacementProbe) {
+        probe.closed.set(true);
+    }
+
+    #[test]
+    fn failed_candidate_setup_aborts_only_the_candidate() {
+        let active_closed = Rc::new(Cell::new(false));
+        let candidate_closed = Rc::new(Cell::new(false));
+        let current = Some(ReplacementProbe {
+            id: 1,
+            closed: Rc::clone(&active_closed),
+        });
+
+        let setup = {
+            let _prepared = PreparedReplacement::new(
+                ReplacementProbe {
+                    id: 2,
+                    closed: Rc::clone(&candidate_closed),
+                },
+                close_probe,
+            );
+            Err::<(), _>("injected renderer creation failure")
+        };
+
+        assert_eq!(setup, Err("injected renderer creation failure"));
+        assert_eq!(current.as_ref().map(|probe| probe.id), Some(1));
+        assert!(!active_closed.get());
+        assert!(candidate_closed.get());
+    }
+
+    #[test]
+    fn committing_candidate_returns_the_previous_active_value() {
+        let active_closed = Rc::new(Cell::new(false));
+        let candidate_closed = Rc::new(Cell::new(false));
+        let mut current = Some(ReplacementProbe {
+            id: 1,
+            closed: Rc::clone(&active_closed),
+        });
+        let prepared = PreparedReplacement::new(
+            ReplacementProbe {
+                id: 2,
+                closed: Rc::clone(&candidate_closed),
+            },
+            close_probe,
+        );
+
+        let previous = prepared.commit(&mut current).unwrap();
+
+        assert_eq!(previous.id, 1);
+        assert_eq!(current.as_ref().map(|probe| probe.id), Some(2));
+        assert!(!active_closed.get());
+        assert!(!candidate_closed.get());
     }
 
     #[test]
