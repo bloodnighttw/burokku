@@ -1,22 +1,15 @@
 //! Public application builder and end-to-end host assembly.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin};
 
 use thiserror::Error;
-use tokio::sync::Notify;
 
 use crate::{
     runtime::{
         plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
         DualRuntime, DualRuntimeBuilder, Plugin,
     },
-    ui::{
-        dom_plugin::DomPlugin,
-        gpu::{GraphicsContext, WindowRenderer},
-        host::ApplicationHost,
-        text::TextEngine,
-        window_host::{WindowManager, WindowSpec},
-    },
+    ui::{dom_plugin::DomPlugin, gpu::GraphicsContext, host::ApplicationHost, text::TextEngine},
 };
 
 /// A configured Burokku application.
@@ -31,7 +24,11 @@ impl Burokku {
         BurokkuBuilder::new()
     }
 
-    /// Run JavaScript on BTS and drive the native window until it closes.
+    /// Run JavaScript on BTS and drive the native application lifecycle.
+    ///
+    /// A Window does not need to be mounted at startup. The application stays
+    /// active in a windowless state and reconciles a native window if a later
+    /// DOM publication mounts one.
     ///
     /// This future must be polled on the process main thread. On macOS, use a
     /// current-thread Tokio runtime so AppKit, the main QuickJS isolate, layout,
@@ -39,13 +36,7 @@ impl Burokku {
     pub async fn run(self) -> Result<(), BurokkuError> {
         let mut event_loop = winit::EventLoop::new()?;
         let proxy = event_loop.create_proxy();
-        let committed = Arc::new(Notify::new());
-        let notifier = Arc::clone(&committed);
-        let (dom_plugin, publications) = DomPlugin::new(move |_| {
-            notifier.notify_one();
-            proxy.wake_up();
-        });
-        let initial_revision = publications.load().revision();
+        let (dom_plugin, publications) = DomPlugin::new(move |_| proxy.wake_up());
         let (runtime, driver) = self.runtime.background_plugin(dom_plugin).build().await?;
         let driver_future = driver.run();
         tokio::pin!(driver_future);
@@ -55,42 +46,6 @@ impl Burokku {
             return Err(BurokkuError::JavaScript(error));
         }
 
-        let initial =
-            match wait_for_initial_window(&publications, initial_revision, &committed).await {
-                Ok(initial) => initial,
-                Err(error) => {
-                    let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
-                    return Err(error);
-                }
-            };
-        let windows = match WindowManager::create_initial(&mut event_loop, &initial) {
-            Ok(windows) => windows,
-            Err(error) => {
-                let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
-                return Err(BurokkuError::Host(error.to_string()));
-            }
-        };
-        let native_window = Arc::clone(
-            windows
-                .current()
-                .expect("initial WindowManager contains a native window")
-                .window(),
-        );
-        event_loop.flush_windows();
-        let graphics = match GraphicsContext::for_window(Arc::clone(&native_window)).await {
-            Ok(graphics) => graphics,
-            Err(error) => {
-                let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
-                return Err(BurokkuError::Host(error.to_string()));
-            }
-        };
-        let renderer = match WindowRenderer::new(&graphics, native_window) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
-                return Err(BurokkuError::Host(error.to_string()));
-            }
-        };
         let mut text = TextEngine::new();
         for font in self.fonts {
             if let Err(error) = text.register_font_data(font) {
@@ -99,7 +54,15 @@ impl Burokku {
             }
         }
 
-        let host = ApplicationHost::new(publications, initial, graphics, windows, renderer, text);
+        let graphics = match GraphicsContext::new().await {
+            Ok(graphics) => graphics,
+            Err(error) => {
+                let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
+                return Err(BurokkuError::Host(error.to_string()));
+            }
+        };
+
+        let host = ApplicationHost::new(publications, graphics, text);
         let event_future = event_loop.run_app(host);
         tokio::pin!(event_future);
         let mut driver_finished = false;
@@ -215,29 +178,6 @@ impl std::fmt::Debug for BurokkuBuilder {
     }
 }
 
-async fn wait_for_initial_window(
-    publications: &crate::ui::elements::PublishedDomReader,
-    initial_revision: u64,
-    committed: &Notify,
-) -> Result<Arc<crate::ui::elements::PublishedDom>, BurokkuError> {
-    let wait = async {
-        loop {
-            let publication = publications.load();
-            if publication.revision() > initial_revision {
-                return match WindowSpec::from_publication(&publication) {
-                    Ok(Some(_)) => Ok(publication),
-                    Ok(None) => Err(BurokkuError::MissingWindow),
-                    Err(error) => Err(BurokkuError::Host(error.to_string())),
-                };
-            }
-            committed.notified().await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), wait)
-        .await
-        .unwrap_or(Err(BurokkuError::MissingWindow))
-}
-
 async fn shutdown_with_driver<F>(
     runtime: DualRuntime,
     mut driver: Pin<&mut F>,
@@ -257,9 +197,6 @@ pub enum BurokkuError {
     #[error(transparent)]
     JavaScript(#[from] runtime::Error),
 
-    #[error("the application script did not commit a Window under app")]
-    MissingWindow,
-
     #[error("the main JavaScript runtime stopped before the native event loop")]
     MainRuntimeStopped,
 
@@ -269,14 +206,38 @@ pub enum BurokkuError {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use tokio::sync::Notify;
+
     use super::*;
     use crate::{
-        runtime::{Runtime, RuntimeRole},
+        runtime::{plugins::TimersPlugin, Runtime, RuntimeRole},
         ui::{
+            elements::{PublishedDom, PublishedDomReader},
             layout::{LayoutEngine, LogicalViewport},
             scene::{PaintItem, ScenePlan},
+            window_host::WindowSpec,
         },
     };
+
+    async fn next_publication(
+        publications: &PublishedDomReader,
+        after_revision: u64,
+        committed: &Notify,
+    ) -> Arc<PublishedDom> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let publication = publications.load();
+                if publication.revision() > after_revision {
+                    return publication;
+                }
+                committed.notified().await;
+            }
+        })
+        .await
+        .expect("DOM publication did not arrive")
+    }
 
     #[test]
     fn builder_collects_script_fonts_and_runtime_configuration() {
@@ -315,9 +276,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let publication = wait_for_initial_window(&publications, initial_revision, &committed)
-            .await
-            .unwrap();
+        let publication = next_publication(&publications, initial_revision, &committed).await;
         let spec = WindowSpec::from_publication(&publication).unwrap().unwrap();
 
         assert_eq!(spec.title(), "Script host");
@@ -347,6 +306,37 @@ mod tests {
             .items()
             .iter()
             .any(|item| matches!(item, PaintItem::Text { .. })));
+
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn detached_window_may_be_mounted_by_a_later_timer_publication() {
+        let committed = Arc::new(Notify::new());
+        let notifier = Arc::clone(&committed);
+        let (dom, publications) = DomPlugin::new(move |_| notifier.notify_one());
+        let initial_revision = publications.load().revision();
+        let runtime = Runtime::builder()
+            .role(RuntimeRole::Background)
+            .plugin(TimersPlugin)
+            .plugin(dom)
+            .build()
+            .await
+            .unwrap();
+
+        runtime
+            .eval::<()>(
+                "globalThis.pendingWindow = app.createElement('window');\n\
+                 setTimeout(() => app.appendChild(pendingWindow), 100);",
+            )
+            .await
+            .unwrap();
+
+        let windowless = next_publication(&publications, initial_revision, &committed).await;
+        assert_eq!(WindowSpec::from_publication(&windowless).unwrap(), None);
+
+        let mounted = next_publication(&publications, windowless.revision(), &committed).await;
+        assert!(WindowSpec::from_publication(&mounted).unwrap().is_some());
 
         runtime.shutdown().await.unwrap();
     }

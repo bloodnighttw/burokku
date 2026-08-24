@@ -105,23 +105,22 @@ pub(crate) struct ApplicationHost {
 impl ApplicationHost {
     pub(crate) fn new(
         publications: PublishedDomReader,
-        publication: Arc<PublishedDom>,
         graphics: GraphicsContext,
-        windows: WindowManager,
-        renderer: WindowRenderer,
         text: TextEngine,
     ) -> Self {
         Self {
             publications,
-            latest_publication: Some(publication),
+            // Force `resumed` to reconcile the newest publication, whether it
+            // contains a Window already or represents a valid windowless app.
+            latest_publication: None,
             graphics,
-            windows,
-            renderer: Some(renderer),
+            windows: WindowManager::default(),
+            renderer: None,
             layout: LayoutEngine::new(text),
             presented: None,
             last_frame_failure: None,
             cursor_target: None,
-            ever_had_window: true,
+            ever_had_window: false,
             fatal_error: None,
         }
     }
@@ -208,6 +207,9 @@ impl ApplicationHost {
 
         match change {
             WindowChange::Created => {
+                // Ensure AppKit has applied the newly created native Window
+                // before WGPU derives a presentation surface from it.
+                event_loop.flush_windows();
                 let native = self
                     .windows
                     .current()
@@ -223,6 +225,7 @@ impl ApplicationHost {
                 self.ever_had_window = true;
             }
             WindowChange::PreparedReplacement(prepared) => {
+                event_loop.flush_windows();
                 let candidate_renderer =
                     match WindowRenderer::new(&self.graphics, Arc::clone(prepared.window())) {
                         Ok(renderer) => renderer,
@@ -357,11 +360,9 @@ impl ApplicationHandler for ApplicationHost {
             return;
         }
 
-        // AppKit can perform the Window's first draw while GPU resources are
-        // still being initialized, before run_app installs this handler. That
-        // early RedrawRequested event is intentionally not retained by the
-        // platform dispatcher, so always schedule the first host-owned frame
-        // after the handler becomes active.
+        // Native creation and surface setup can produce redraw demand before
+        // reconciliation has installed every renderer resource. Always
+        // schedule one host-owned frame after the handler becomes active.
         if let Some(window) = self.windows.current() {
             window.window().request_redraw();
         }

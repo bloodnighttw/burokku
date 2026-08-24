@@ -144,6 +144,13 @@ impl ActiveEventLoop {
             .create_window(attributes, self.waker.clone())
     }
 
+    /// Flush pending native window ordering before renderer initialization.
+    pub fn flush_windows(&self) {
+        if let Some(platform) = self.platform.upgrade() {
+            platform.borrow().flush_windows();
+        }
+    }
+
     pub fn set_control_flow(&self, control_flow: ControlFlow) {
         self.state.control_flow.set(control_flow);
     }

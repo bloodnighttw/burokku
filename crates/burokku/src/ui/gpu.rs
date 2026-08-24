@@ -21,14 +21,13 @@ pub(crate) struct GraphicsContext {
 }
 
 impl GraphicsContext {
-    pub(crate) async fn for_window(window: Arc<Window>) -> Result<Self, GraphicsError> {
+    /// Initialize reusable GPU state without requiring a mounted native window.
+    ///
+    /// Surface compatibility is checked when a DOM Window is eventually
+    /// reconciled into a [`WindowRenderer`].
+    pub(crate) async fn new() -> Result<Self, GraphicsError> {
         let instance = Instance::default();
-        let surface = instance
-            .create_surface(window)
-            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
-        let graphics = Self::request(instance.clone(), Some(&surface)).await?;
-        drop(surface);
-        Ok(graphics)
+        Self::request(instance, None).await
     }
 
     async fn request(
@@ -111,6 +110,9 @@ impl WindowRenderer {
             .instance
             .create_surface(window.clone())
             .map_err(|error| GraphicsError::Surface(error.to_string()))?;
+        if !graphics.adapter.is_surface_supported(&surface) {
+            return Err(GraphicsError::UnsupportedSurface);
+        }
         let capabilities = surface.get_capabilities(&graphics.adapter);
         let format = choose_surface_format(&capabilities.formats)
             .ok_or(GraphicsError::UnsupportedSurface)?;
@@ -261,6 +263,9 @@ impl WindowRenderer {
             .instance
             .create_surface(Arc::clone(&self.window))
             .map_err(|error| GraphicsError::Surface(error.to_string()))?;
+        if !graphics.adapter.is_surface_supported(&surface) {
+            return Err(GraphicsError::UnsupportedSurface);
+        }
         let capabilities = surface.get_capabilities(&graphics.adapter);
         let format = choose_surface_format(&capabilities.formats)
             .ok_or(GraphicsError::UnsupportedSurface)?;
