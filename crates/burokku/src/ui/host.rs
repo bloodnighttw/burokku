@@ -76,15 +76,33 @@ fn failure_policy(has_presented_frame: bool, kind: FailureKind) -> FailurePolicy
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct PresentedFrame {
-    plan: ScenePlan,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentedSurface<W = WindowId> {
+    window_id: W,
+    physical_size: PhysicalSize<u32>,
+    generation: u64,
 }
 
-impl PresentedFrame {
+#[derive(Debug)]
+pub(crate) struct PresentedFrame<W = WindowId> {
+    plan: ScenePlan,
+    surface: PresentedSurface<W>,
+}
+
+impl<W> PresentedFrame<W> {
     pub(crate) fn revision(&self) -> u64 {
         self.plan.revision()
     }
+}
+
+fn presented_frame_is_usable<W: Eq>(
+    frame: Option<&PresentedFrame<W>>,
+    active_surface: Option<&PresentedSurface<W>>,
+    last_presented_revision: Option<u64>,
+) -> bool {
+    frame.is_some_and(|frame| {
+        active_surface == Some(&frame.surface) && last_presented_revision == Some(frame.revision())
+    })
 }
 
 #[derive(Debug)]
@@ -138,12 +156,29 @@ impl ApplicationHost {
     }
 
     fn has_usable_presented_frame(&self) -> bool {
-        if self.presented.is_none() {
+        let (Some(native), Some(renderer)) = (self.windows.current(), self.renderer.as_ref())
+        else {
             return false;
-        }
-        match (self.windows.current(), self.renderer.as_ref()) {
-            (Some(native), Some(renderer)) => native.id() == renderer.window_id(),
-            (None, _) | (_, None) => false,
+        };
+        let native_size = native.window().inner_size();
+        let active_surface = (native.id() == renderer.window_id()
+            && native_size == renderer.physical_size())
+        .then_some(PresentedSurface {
+            window_id: renderer.window_id(),
+            physical_size: renderer.physical_size(),
+            generation: renderer.surface_generation(),
+        });
+        presented_frame_is_usable(
+            self.presented.as_ref(),
+            active_surface.as_ref(),
+            renderer.last_presented_revision(),
+        )
+    }
+
+    fn discard_stale_presented_frame(&mut self) {
+        if !self.has_usable_presented_frame() {
+            self.presented = None;
+            self.cursor_target = None;
         }
     }
 
@@ -242,6 +277,10 @@ impl ApplicationHost {
                 // surface and closing the previous Window.
                 let (previous_window, previous_renderer) =
                     prepared.commit_with(&mut self.windows, &mut self.renderer, candidate_renderer);
+                // The retained plan belongs to the old Window and renderer.
+                // Never use it to classify the candidate's first-frame failure
+                // as recoverable or to hit-test the unpainted replacement.
+                self.discard_stale_presented_frame();
                 drop(previous_renderer);
                 if let Some(previous_window) = previous_window {
                     previous_window.close();
@@ -251,6 +290,7 @@ impl ApplicationHost {
             WindowChange::Removed => {
                 self.renderer = None;
                 self.presented = None;
+                self.cursor_target = None;
                 if self.ever_had_window {
                     event_loop.exit();
                 }
@@ -258,6 +298,10 @@ impl ApplicationHost {
             WindowChange::Updated | WindowChange::Unchanged => {}
         }
 
+        // A same-window size update can reconfigure the surface on the next
+        // redraw. Stop exposing an old-size plan as soon as the native size no
+        // longer matches the renderer's configured target.
+        self.discard_stale_presented_frame();
         if let Some(native) = self.windows.current() {
             native.window().request_redraw();
         }
@@ -265,30 +309,48 @@ impl ApplicationHost {
     }
 
     fn redraw(&mut self) -> Result<PresentationOutcome, RedrawFailure> {
-        let publication = self
-            .latest_publication
-            .as_ref()
-            .ok_or(RedrawFailure::Fatal(HostError::MissingPublication))?;
+        let publication = Arc::clone(
+            self.latest_publication
+                .as_ref()
+                .ok_or(RedrawFailure::Fatal(HostError::MissingPublication))?,
+        );
         let revision = publication.revision();
-        let has_presented_frame = self.presented.is_some();
         let native = self
             .windows
             .current()
             .ok_or(RedrawFailure::Fatal(HostError::MissingNativeWindow))?;
+        let window_id = native.id();
+        let physical_size = native.window().inner_size();
+        let scale_factor = native.window().scale_factor();
         let renderer = self
             .renderer
             .as_mut()
             .ok_or(RedrawFailure::Fatal(HostError::MissingRenderer))?;
-        if native.id() != renderer.window_id() {
+        if window_id != renderer.window_id() {
             return Err(classify_fatal_failure(
-                has_presented_frame,
+                false,
                 FailureKind::Invariant,
                 HostError::WindowRendererMismatch,
             ));
         }
 
-        let physical_size = native.window().inner_size();
-        if let Err(error) = renderer.resize(&self.graphics, physical_size) {
+        let resize_result = renderer.resize(&self.graphics, physical_size);
+        let active_surface =
+            (physical_size == renderer.physical_size()).then_some(PresentedSurface {
+                window_id,
+                physical_size: renderer.physical_size(),
+                generation: renderer.surface_generation(),
+            });
+        let has_presented_frame = presented_frame_is_usable(
+            self.presented.as_ref(),
+            active_surface.as_ref(),
+            renderer.last_presented_revision(),
+        );
+        if !has_presented_frame {
+            self.presented = None;
+            self.cursor_target = None;
+        }
+        if let Err(error) = resize_result {
             return Err(classify_resize_failure(
                 revision,
                 has_presented_frame,
@@ -298,13 +360,12 @@ impl ApplicationHost {
         if physical_size.width == 0 || physical_size.height == 0 {
             return Ok(PresentationOutcome::Occluded);
         }
-        let scale_factor = native.window().scale_factor();
         let viewport = logical_viewport(physical_size, scale_factor).map_err(|error| {
             classify_fatal_failure(has_presented_frame, FailureKind::Invariant, error)
         })?;
         let computed = self
             .layout
-            .compute(Arc::clone(publication), viewport)
+            .compute(publication, viewport)
             .map_err(|error| {
                 classify_candidate_failure(
                     revision,
@@ -343,11 +404,18 @@ impl ApplicationHost {
         {
             debug_assert_eq!(presented_revision, revision);
             debug_assert_eq!(renderer.last_presented_revision(), Some(presented_revision));
+            let surface = PresentedSurface {
+                window_id,
+                physical_size: renderer.physical_size(),
+                generation: renderer.surface_generation(),
+            };
             finish_successful_presentation(
                 &mut self.presented,
                 &mut self.last_frame_failure,
                 frame.plan().clone(),
+                surface,
             );
+            self.cursor_target = None;
         }
         Ok(outcome)
     }
@@ -385,6 +453,8 @@ impl ApplicationHandler for ApplicationHost {
         match event {
             WindowEvent::CloseRequested => {
                 self.renderer = None;
+                self.presented = None;
+                self.cursor_target = None;
                 self.windows.close();
                 event_loop.exit();
             }
@@ -398,12 +468,28 @@ impl ApplicationHandler for ApplicationHost {
                     return;
                 };
                 let revision = publication.revision();
-                let has_presented_frame = self.presented.is_some();
                 let Some(renderer) = self.renderer.as_mut() else {
                     self.fail(event_loop, HostError::MissingRenderer);
                     return;
                 };
-                if let Err(error) = renderer.resize(&self.graphics, size) {
+                let resize_result = renderer.resize(&self.graphics, size);
+                let active_surface = (window_id == renderer.window_id()
+                    && size == renderer.physical_size())
+                .then_some(PresentedSurface {
+                    window_id,
+                    physical_size: renderer.physical_size(),
+                    generation: renderer.surface_generation(),
+                });
+                let has_presented_frame = presented_frame_is_usable(
+                    self.presented.as_ref(),
+                    active_surface.as_ref(),
+                    renderer.last_presented_revision(),
+                );
+                if !has_presented_frame {
+                    self.presented = None;
+                    self.cursor_target = None;
+                }
+                if let Err(error) = resize_result {
                     let failure = classify_resize_failure(revision, has_presented_frame, error);
                     self.handle_redraw_failure(event_loop, failure);
                     return;
@@ -415,7 +501,13 @@ impl ApplicationHandler for ApplicationHost {
                 }
             }
             WindowEvent::RedrawRequested => match self.redraw() {
-                Ok(PresentationOutcome::Timeout | PresentationOutcome::Reconfigure) => {
+                Ok(PresentationOutcome::Reconfigure) => {
+                    self.discard_stale_presented_frame();
+                    if let Some(window) = self.windows.current() {
+                        window.window().request_redraw();
+                    }
+                }
+                Ok(PresentationOutcome::Timeout) => {
                     if let Some(window) = self.windows.current() {
                         window.window().request_redraw();
                     }
@@ -429,12 +521,14 @@ impl ApplicationHandler for ApplicationHost {
                 }
             },
             WindowEvent::CursorMoved { position } => {
+                self.discard_stale_presented_frame();
                 self.cursor_target = self
                     .presented
                     .as_ref()
                     .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
             }
             WindowEvent::MouseInput { position, .. } => {
+                self.discard_stale_presented_frame();
                 self.cursor_target = self
                     .presented
                     .as_ref()
@@ -518,13 +612,15 @@ fn classify_resize_failure(
     }
 }
 
-fn finish_successful_presentation(
-    presented: &mut Option<PresentedFrame>,
+fn finish_successful_presentation<W>(
+    presented: &mut Option<PresentedFrame<W>>,
     last_frame_failure: &mut Option<FrameFailure>,
     plan: ScenePlan,
+    surface: PresentedSurface<W>,
 ) {
     let revision = plan.revision();
-    *presented = Some(PresentedFrame { plan });
+    debug_assert_eq!(plan.physical_size(), surface.physical_size);
+    *presented = Some(PresentedFrame { plan, surface });
     *last_frame_failure = None;
     debug_assert_eq!(
         presented.as_ref().map(PresentedFrame::revision),
@@ -609,6 +705,18 @@ mod tests {
         }
     }
 
+    fn test_surface(
+        window_id: u8,
+        physical_size: PhysicalSize<u32>,
+        generation: u64,
+    ) -> PresentedSurface<u8> {
+        PresentedSurface {
+            window_id,
+            physical_size,
+            generation,
+        }
+    }
+
     #[test]
     fn physical_pixels_convert_to_logical_viewport_once() {
         let viewport = logical_viewport(PhysicalSize::new(1600, 1200), 2.0).unwrap();
@@ -690,19 +798,107 @@ mod tests {
 
         let mut presented = None;
         let mut last_failure = None;
-        finish_successful_presentation(&mut presented, &mut last_failure, first_plan);
+        finish_successful_presentation(
+            &mut presented,
+            &mut last_failure,
+            first_plan,
+            test_surface(1, PhysicalSize::new(320, 240), 1),
+        );
         last_failure = Some(FrameFailure {
             revision: second_revision,
             stage: FrameStage::Scene,
             message: "injected scene failure".into(),
         });
 
-        finish_successful_presentation(&mut presented, &mut last_failure, second_plan);
+        finish_successful_presentation(
+            &mut presented,
+            &mut last_failure,
+            second_plan,
+            test_surface(1, PhysicalSize::new(320, 240), 1),
+        );
 
         assert_eq!(
             presented.as_ref().map(PresentedFrame::revision),
             Some(second_revision)
         );
         assert!(last_failure.is_none());
+    }
+
+    #[test]
+    fn replacement_first_frame_failure_cannot_recover_from_the_old_window() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let plan = scene_plan(&dom);
+        let revision = plan.revision();
+        let old_surface = test_surface(1, PhysicalSize::new(320, 240), 7);
+        let replacement_surface = test_surface(2, PhysicalSize::new(320, 240), 8);
+        let presented = PresentedFrame {
+            plan,
+            surface: old_surface,
+        };
+
+        assert!(presented_frame_is_usable(
+            Some(&presented),
+            Some(&old_surface),
+            Some(revision),
+        ));
+        assert!(!presented_frame_is_usable(
+            Some(&presented),
+            Some(&replacement_surface),
+            Some(revision),
+        ));
+        let has_presented_frame =
+            presented_frame_is_usable(Some(&presented), Some(&replacement_surface), None);
+        assert!(!has_presented_frame);
+        assert!(matches!(
+            classify_candidate_failure(
+                revision + 1,
+                has_presented_frame,
+                FailureKind::Layout,
+                FrameStage::Layout,
+                HostError::MissingRenderer,
+            ),
+            RedrawFailure::Fatal(HostError::MissingRenderer)
+        ));
+    }
+
+    #[test]
+    fn resize_then_failure_cannot_recover_from_the_old_surface() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let plan = scene_plan(&dom);
+        let revision = plan.revision();
+        let old_surface = test_surface(1, PhysicalSize::new(320, 240), 11);
+        let resized_surface = test_surface(1, PhysicalSize::new(640, 480), 12);
+        let presented = PresentedFrame {
+            plan,
+            surface: old_surface,
+        };
+
+        assert!(presented_frame_is_usable(
+            Some(&presented),
+            Some(&old_surface),
+            Some(revision),
+        ));
+        assert!(!presented_frame_is_usable(
+            Some(&presented),
+            Some(&resized_surface),
+            Some(revision),
+        ));
+        let has_presented_frame =
+            presented_frame_is_usable(Some(&presented), Some(&resized_surface), None);
+        assert!(!has_presented_frame);
+        assert!(matches!(
+            classify_candidate_failure(
+                revision + 1,
+                has_presented_frame,
+                FailureKind::Scene,
+                FrameStage::Scene,
+                HostError::MissingRenderer,
+            ),
+            RedrawFailure::Fatal(HostError::MissingRenderer)
+        ));
     }
 }

@@ -48,21 +48,24 @@ impl EventLoopWaker {
     }
 }
 
-/// Buffers native events until the event loop is outside both the platform
-/// pump and the current application callback.
-///
-/// AppKit may synchronously emit events while an application callback creates
-/// or resizes a window. The platform handler must therefore only enqueue: if it
-/// called the application directly, it would reentrantly borrow the handler.
+/// Buffers native events emitted while an application callback is already
+/// active. Events emitted by the native platform pump are otherwise delivered
+/// immediately so nested platform loops, including macOS live resize, can keep
+/// the application surface and layout synchronized.
 #[derive(Clone, Default)]
 struct WindowEventQueue {
     pending: Rc<RefCell<VecDeque<(WindowId, WindowEvent)>>>,
 }
 
 impl WindowEventQueue {
+    fn push(&self, window_id: WindowId, event: WindowEvent) {
+        self.pending.borrow_mut().push_back((window_id, event));
+    }
+
+    #[cfg(test)]
     fn handler(&self) -> impl FnMut(WindowId, WindowEvent) + 'static {
         let queue = self.clone();
-        move |window_id, event| queue.pending.borrow_mut().push_back((window_id, event))
+        move |window_id, event| queue.push(window_id, event)
     }
 
     fn drain(&self, mut dispatch: impl FnMut(WindowId, WindowEvent)) {
@@ -76,6 +79,20 @@ impl WindowEventQueue {
             dispatch(window_id, event);
         }
     }
+}
+
+fn dispatch_or_defer<A>(
+    application: &RefCell<A>,
+    deferred: &WindowEventQueue,
+    window_id: WindowId,
+    event: WindowEvent,
+    dispatch: impl FnOnce(&mut A, WindowId, WindowEvent),
+) {
+    let Ok(mut application) = application.try_borrow_mut() else {
+        deferred.push(window_id, event);
+        return;
+    };
+    dispatch(&mut application, window_id, event);
 }
 
 /// Clears an installed native event handler on every exit path, including
@@ -140,7 +157,7 @@ impl ActiveEventLoop {
         self.platform
             .upgrade()
             .ok_or(crate::Error::EventLoopUnavailable)?
-            .borrow_mut()
+            .borrow()
             .create_window(attributes, self.waker.clone())
     }
 
@@ -234,30 +251,52 @@ impl EventLoop {
         }
         self.has_run = true;
 
-        let mut application = application;
+        let application = Rc::new(RefCell::new(application));
         let events = WindowEventQueue::default();
-        self.platform.borrow().set_handler(events.handler());
+        self.platform.borrow().set_handler({
+            let active = self.active.clone();
+            let application = Rc::clone(&application);
+            let deferred = events.clone();
+            move |window_id, event| {
+                dispatch_or_defer(
+                    &application,
+                    &deferred,
+                    window_id,
+                    event,
+                    |application, window_id, event| {
+                        application.window_event(&active, window_id, event);
+                    },
+                );
+            }
+        });
         let mut handler_guard = EventHandlerGuard::new({
             let platform = Rc::clone(&self.platform);
             move || platform.borrow().clear_handler()
         });
 
-        application.resumed(&self.active);
+        application.borrow_mut().resumed(&self.active);
         events.drain(|window_id, event| {
-            application.window_event(&self.active, window_id, event);
+            application
+                .borrow_mut()
+                .window_event(&self.active, window_id, event);
         });
 
         while !self.active.exiting() {
-            // Native callbacks only fill `events`, so application code runs
-            // after the mutable platform borrow from `pump` has been released.
-            self.platform.borrow_mut().pump();
+            // Platform callbacks dispatch immediately while the pump holds only
+            // a shared platform borrow. This remains responsive inside nested
+            // native loops such as macOS live resize.
+            self.platform.borrow().pump();
             events.drain(|window_id, event| {
-                application.window_event(&self.active, window_id, event);
+                application
+                    .borrow_mut()
+                    .window_event(&self.active, window_id, event);
             });
 
-            application.about_to_wait(&self.active);
+            application.borrow_mut().about_to_wait(&self.active);
             events.drain(|window_id, event| {
-                application.window_event(&self.active, window_id, event);
+                application
+                    .borrow_mut()
+                    .window_event(&self.active, window_id, event);
             });
             if self.active.exiting() {
                 break;
@@ -287,11 +326,14 @@ impl EventLoop {
             }
         }
 
-        application.exiting(&self.active);
+        application.borrow_mut().exiting(&self.active);
 
         handler_guard.clear();
 
-        Ok(application)
+        match Rc::try_unwrap(application) {
+            Ok(application) => Ok(application.into_inner()),
+            Err(_) => unreachable!("the platform event handler retains the application"),
+        }
     }
 }
 
@@ -324,13 +366,41 @@ mod tests {
     }
 
     #[test]
+    fn native_events_dispatch_immediately_when_the_application_is_idle() {
+        let events = WindowEventQueue::default();
+        let application = RefCell::new(Vec::new());
+
+        dispatch_or_defer(
+            &application,
+            &events,
+            WindowId(7),
+            WindowEvent::Resized(crate::PhysicalSize::new(1024, 768)),
+            |application, window_id, event| application.push((window_id, event)),
+        );
+
+        assert_eq!(
+            *application.borrow(),
+            [(
+                WindowId(7),
+                WindowEvent::Resized(crate::PhysicalSize::new(1024, 768))
+            )]
+        );
+        assert!(events.pending.borrow().is_empty());
+    }
+
+    #[test]
     fn native_events_wait_until_the_application_callback_releases_its_borrow() {
         let events = WindowEventQueue::default();
-        let mut native_handler = events.handler();
-        let application = Rc::new(RefCell::new(Vec::new()));
+        let application = RefCell::new(Vec::new());
 
         let active_callback = application.borrow_mut();
-        native_handler(WindowId(7), WindowEvent::Focused(true));
+        dispatch_or_defer(
+            &application,
+            &events,
+            WindowId(7),
+            WindowEvent::Focused(true),
+            |application, window_id, event| application.push((window_id, event)),
+        );
         drop(active_callback);
 
         events.drain(|window_id, event| {
