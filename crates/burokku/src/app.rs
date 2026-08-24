@@ -9,7 +9,7 @@ use crate::{
         plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
         DualRuntime, DualRuntimeBuilder, Plugin,
     },
-    ui::{dom_plugin::DomPlugin, gpu::GraphicsContext, host::ApplicationHost, text::TextEngine},
+    ui::{dom_plugin::DomPlugin, host::ApplicationHost, text::TextEngine},
 };
 
 /// A configured Burokku application.
@@ -54,15 +54,7 @@ impl Burokku {
             }
         }
 
-        let graphics = match GraphicsContext::new().await {
-            Ok(graphics) => graphics,
-            Err(error) => {
-                let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
-                return Err(BurokkuError::Host(error.to_string()));
-            }
-        };
-
-        let host = ApplicationHost::new(publications, graphics, text);
+        let host = ApplicationHost::new(publications, text);
         let event_future = event_loop.run_app(host);
         tokio::pin!(event_future);
         let mut driver_finished = false;
