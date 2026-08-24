@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use winit::{ActiveEventLoop, EventLoop, LogicalSize, Window, WindowAttributes, WindowId};
+use winit::{ActiveEventLoop, LogicalSize, Window, WindowAttributes, WindowId};
 
 use super::elements::{styles::window::WindowSize, Element, NodeId, NodeKind, PublishedDom};
 
@@ -210,18 +210,6 @@ pub(crate) struct WindowManager {
 }
 
 impl WindowManager {
-    pub(crate) fn create_initial(
-        event_loop: &mut EventLoop,
-        publication: &PublishedDom,
-    ) -> Result<Self, WindowHostError> {
-        let spec =
-            WindowSpec::from_publication(publication)?.ok_or(WindowHostError::MissingWindow)?;
-        let window = Arc::new(event_loop.create_window(spec.attributes())?);
-        Ok(Self {
-            current: Some(NativeWindow { spec, window }),
-        })
-    }
-
     pub(crate) fn current(&self) -> Option<&NativeWindow> {
         self.current.as_ref()
     }
@@ -316,9 +304,6 @@ pub(crate) enum WindowHostError {
 
     #[error("App child {0:?} is not a Window element")]
     ExpectedWindow(NodeId),
-
-    #[error("the committed app has no Window child")]
-    MissingWindow,
 
     #[error("Window {node:?} requested invalid initial size {width}x{height}")]
     InvalidInitialSize {
@@ -533,7 +518,10 @@ mod tests {
     }
 
     #[test]
-    fn absent_window_has_no_native_spec() {
+    fn window_manager_and_spec_allow_an_initial_windowless_state() {
+        let manager = WindowManager::default();
+        assert!(manager.current().is_none());
+
         let dom = Dom::new();
         assert_eq!(
             WindowSpec::from_publication(&publication(&dom)).unwrap(),
