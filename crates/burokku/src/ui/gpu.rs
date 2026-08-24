@@ -1,6 +1,9 @@
 //! WGPU surface and Vello Hybrid presentation ownership.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use thiserror::Error;
 use vello_hybrid::{RenderSize, RenderTargetConfig, Renderer, Resources, TextureBindings};
@@ -11,6 +14,12 @@ use wgpu::{
 use winit::{PhysicalSize, Window, WindowId};
 
 use super::scene::{BuiltScene, MAX_VELLO_SCENE_DIMENSION};
+
+static NEXT_SURFACE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_surface_generation() -> u64 {
+    NEXT_SURFACE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug)]
 pub(crate) struct GraphicsContext {
@@ -93,6 +102,7 @@ pub(crate) struct WindowRenderer {
     renderer: Renderer,
     resources: Resources,
     suspended: bool,
+    surface_generation: u64,
     last_presented_revision: Option<u64>,
 }
 
@@ -137,6 +147,7 @@ impl WindowRenderer {
             renderer,
             resources,
             suspended: false,
+            surface_generation: next_surface_generation(),
             last_presented_revision: None,
         })
     }
@@ -151,6 +162,10 @@ impl WindowRenderer {
 
     pub(crate) fn resources_mut(&mut self) -> &mut Resources {
         &mut self.resources
+    }
+
+    pub(crate) fn surface_generation(&self) -> u64 {
+        self.surface_generation
     }
 
     pub(crate) fn last_presented_revision(&self) -> Option<u64> {
@@ -185,6 +200,7 @@ impl WindowRenderer {
         );
         self.renderer = renderer;
         self.resources = resources;
+        self.surface_generation = next_surface_generation();
         self.last_presented_revision = None;
         Ok(())
     }
@@ -282,6 +298,7 @@ impl WindowRenderer {
         self.surface = surface;
         self.renderer = renderer;
         self.resources = resources;
+        self.surface_generation = next_surface_generation();
         self.last_presented_revision = None;
         Ok(())
     }

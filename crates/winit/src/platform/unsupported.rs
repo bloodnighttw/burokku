@@ -16,7 +16,7 @@ impl PlatformEventLoop {
     }
 
     pub(crate) fn create_window(
-        &mut self,
+        &self,
         _attributes: WindowAttributes,
         _event_loop_waker: EventLoopWaker,
     ) -> crate::Result<Window> {
@@ -29,7 +29,7 @@ impl PlatformEventLoop {
 
     pub(crate) fn flush_windows(&self) {}
 
-    pub(crate) fn pump(&mut self) {}
+    pub(crate) fn pump(&self) {}
 }
 
 pub(crate) struct PlatformWindow;

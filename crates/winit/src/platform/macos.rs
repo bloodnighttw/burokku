@@ -1,7 +1,7 @@
 //! macOS implementation backed by AppKit.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     ptr::NonNull,
     rc::Rc,
@@ -294,7 +294,13 @@ impl EventDispatcher {
         };
 
         handler(event.window_id, event.event);
-        while let Some(event) = self.pending.borrow_mut().pop_front() {
+        loop {
+            // Release the pending queue borrow before application code runs;
+            // the handler can synchronously trigger another AppKit callback.
+            let event = self.pending.borrow_mut().pop_front();
+            let Some(event) = event else {
+                break;
+            };
             handler(event.window_id, event.event);
         }
 
@@ -402,8 +408,8 @@ pub(crate) struct PlatformEventLoop {
     app: Retained<NSApplication>,
     mtm: MainThreadMarker,
     dispatcher: Rc<EventDispatcher>,
-    windows: HashMap<isize, Weak<WindowState>>,
-    next_window_id: u64,
+    windows: RefCell<HashMap<isize, Weak<WindowState>>>,
+    next_window_id: Cell<u64>,
 }
 
 impl PlatformEventLoop {
@@ -422,13 +428,13 @@ impl PlatformEventLoop {
             app,
             mtm,
             dispatcher: Rc::new(EventDispatcher::default()),
-            windows: HashMap::new(),
-            next_window_id: 1,
+            windows: RefCell::new(HashMap::new()),
+            next_window_id: Cell::new(1),
         })
     }
 
     pub(crate) fn create_window(
-        &mut self,
+        &self,
         attributes: WindowAttributes,
         event_loop_waker: EventLoopWaker,
     ) -> crate::Result<Window> {
@@ -467,8 +473,9 @@ impl PlatformEventLoop {
         // release-on-close while Rust retains the object.
         unsafe { native_window.setReleasedWhenClosed(false) };
 
-        let id = WindowId(self.next_window_id);
-        self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
+        let id = WindowId(self.next_window_id.get());
+        self.next_window_id
+            .set(self.next_window_id.get().wrapping_add(1).max(1));
         let scale_factor = native_window.backingScaleFactor();
         let state = Arc::new(WindowState::new(
             id,
@@ -505,6 +512,7 @@ impl PlatformEventLoop {
         native_window.makeKeyAndOrderFront(None);
 
         self.windows
+            .borrow_mut()
             .insert(native_window.windowNumber(), Arc::downgrade(&state));
 
         Ok(Window {
@@ -525,7 +533,7 @@ impl PlatformEventLoop {
         autoreleasepool(|_| self.app.updateWindows());
     }
 
-    pub(crate) fn pump(&mut self) {
+    pub(crate) fn pump(&self) {
         for _ in 0..MAX_NATIVE_EVENTS_PER_TICK {
             let Some(mapped) = autoreleasepool(|_| {
                 let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
@@ -551,23 +559,33 @@ impl PlatformEventLoop {
 
         autoreleasepool(|_| self.app.updateWindows());
 
-        let dispatcher = self.dispatcher.clone();
-        self.windows.retain(|_, state| {
-            let Some(state) = state.upgrade() else {
-                return false;
-            };
-            if state.redraw_requested.swap(false, Ordering::AcqRel) {
-                dispatcher.dispatch(NativeEvent {
-                    window_id: state.id,
-                    event: WindowEvent::RedrawRequested,
-                });
-            }
-            true
-        });
+        let redraws = {
+            let mut redraws = Vec::new();
+            self.windows.borrow_mut().retain(|_, state| {
+                let Some(state) = state.upgrade() else {
+                    return false;
+                };
+                if state.redraw_requested.swap(false, Ordering::AcqRel) {
+                    redraws.push(NativeEvent {
+                        window_id: state.id,
+                        event: WindowEvent::RedrawRequested,
+                    });
+                }
+                true
+            });
+            redraws
+        };
+        for event in redraws {
+            self.dispatcher.dispatch(event);
+        }
     }
 
     fn map_event(&self, event: &NSEvent) -> Option<(WindowId, WindowEvent)> {
-        let state = self.windows.get(&event.windowNumber())?.upgrade()?;
+        let state = self
+            .windows
+            .borrow()
+            .get(&event.windowNumber())?
+            .upgrade()?;
         let event_type = event.r#type();
         let modifiers = modifiers(event.modifierFlags());
 
@@ -683,6 +701,42 @@ mod tests {
                 WindowId(7),
                 WindowEvent::Resized(PhysicalSize::new(1024, 768))
             )]
+        );
+    }
+
+    #[test]
+    fn nested_native_events_dispatch_after_the_active_handler_returns() {
+        let dispatcher = Rc::new(EventDispatcher::default());
+        let received = Rc::new(RefCell::new(Vec::new()));
+        dispatcher.set_handler(Box::new({
+            let dispatcher = Rc::clone(&dispatcher);
+            let received = Rc::clone(&received);
+            move |window_id, event| {
+                let emit_nested = matches!(event, WindowEvent::Focused(true));
+                received.borrow_mut().push((window_id, event));
+                if emit_nested {
+                    dispatcher.dispatch(NativeEvent {
+                        window_id,
+                        event: WindowEvent::Resized(PhysicalSize::new(1024, 768)),
+                    });
+                }
+            }
+        }));
+
+        dispatcher.dispatch(NativeEvent {
+            window_id: WindowId(7),
+            event: WindowEvent::Focused(true),
+        });
+
+        assert_eq!(
+            *received.borrow(),
+            [
+                (WindowId(7), WindowEvent::Focused(true)),
+                (
+                    WindowId(7),
+                    WindowEvent::Resized(PhysicalSize::new(1024, 768))
+                )
+            ]
         );
     }
 }
