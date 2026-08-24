@@ -168,6 +168,13 @@ impl ActiveEventLoop {
         }
     }
 
+    /// Return a thread-safe handle that wakes this event loop from `Wait`.
+    pub fn create_proxy(&self) -> EventLoopProxy {
+        EventLoopProxy {
+            waker: self.waker.clone(),
+        }
+    }
+
     pub fn set_control_flow(&self, control_flow: ControlFlow) {
         self.state.control_flow.set(control_flow);
     }
@@ -229,9 +236,7 @@ impl EventLoop {
 
     /// Return a thread-safe handle that wakes this event loop from `Wait`.
     pub fn create_proxy(&self) -> EventLoopProxy {
-        EventLoopProxy {
-            waker: self.waker.clone(),
-        }
+        self.active.create_proxy()
     }
 
     /// Drive the native event queue as part of the current Tokio runtime.

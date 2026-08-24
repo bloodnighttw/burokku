@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use thiserror::Error;
+use tokio::sync::oneshot;
 use winit::{
     application::ApplicationHandler, ActiveEventLoop, PhysicalSize, WindowEvent, WindowId,
 };
@@ -105,11 +106,28 @@ fn presented_frame_is_usable<W: Eq>(
     })
 }
 
+type GraphicsInitialization = Result<(GraphicsContext, WindowRenderer), GraphicsError>;
+
+#[derive(Debug)]
+struct PendingGraphicsInitialization {
+    revision: u64,
+    window_id: WindowId,
+    result: oneshot::Receiver<GraphicsInitialization>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for PendingGraphicsInitialization {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ApplicationHost {
     publications: PublishedDomReader,
     latest_publication: Option<Arc<PublishedDom>>,
-    graphics: GraphicsContext,
+    graphics: Option<GraphicsContext>,
+    pending_graphics: Option<PendingGraphicsInitialization>,
     windows: WindowManager,
     renderer: Option<WindowRenderer>,
     layout: LayoutEngine<TextEngine>,
@@ -121,17 +139,16 @@ pub(crate) struct ApplicationHost {
 }
 
 impl ApplicationHost {
-    pub(crate) fn new(
-        publications: PublishedDomReader,
-        graphics: GraphicsContext,
-        text: TextEngine,
-    ) -> Self {
+    pub(crate) fn new(publications: PublishedDomReader, text: TextEngine) -> Self {
         Self {
             publications,
             // Force `resumed` to reconcile the newest publication, whether it
             // contains a Window already or represents a valid windowless app.
             latest_publication: None,
-            graphics,
+            // GPU allocation is delayed until a native Window exists, so its
+            // surface can constrain adapter selection.
+            graphics: None,
+            pending_graphics: None,
             windows: WindowManager::default(),
             renderer: None,
             layout: LayoutEngine::new(text),
@@ -182,6 +199,74 @@ impl ApplicationHost {
         }
     }
 
+    fn begin_graphics_initialization(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        revision: u64,
+        window: Arc<winit::Window>,
+    ) {
+        debug_assert!(self.graphics.is_none());
+        debug_assert!(self.renderer.is_none());
+        debug_assert!(self.pending_graphics.is_none());
+
+        let window_id = window.id();
+        let proxy = event_loop.create_proxy();
+        let (sender, result) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let initialized = GraphicsContext::for_window(window).await;
+            let _ = sender.send(initialized);
+            proxy.wake_up();
+        });
+        self.pending_graphics = Some(PendingGraphicsInitialization {
+            revision,
+            window_id,
+            result,
+            task,
+        });
+    }
+
+    fn complete_graphics_initialization(&mut self) -> Result<(), HostError> {
+        let Some(pending) = self.pending_graphics.as_mut() else {
+            return Ok(());
+        };
+        let initialized = match pending.result.try_recv() {
+            Ok(initialized) => initialized,
+            Err(oneshot::error::TryRecvError::Empty) => return Ok(()),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(HostError::GraphicsInitializationStopped);
+            }
+        };
+        let pending = self
+            .pending_graphics
+            .take()
+            .expect("completed graphics initialization remains installed");
+
+        if self
+            .windows
+            .current()
+            .is_none_or(|window| window.id() != pending.window_id)
+        {
+            return Ok(());
+        }
+
+        match initialized {
+            Ok((graphics, renderer)) => {
+                self.graphics = Some(graphics);
+                self.renderer = Some(renderer);
+                self.ever_had_window = true;
+                if let Some(window) = self.windows.current() {
+                    window.window().request_redraw();
+                }
+                Ok(())
+            }
+            Err(error) => self.handle_window_sync_failure(pending.revision, error.into()),
+        }
+    }
+
+    fn cancel_graphics_initialization(&mut self) {
+        drop(self.pending_graphics.take());
+    }
+
     fn handle_window_sync_failure(
         &mut self,
         revision: u64,
@@ -212,12 +297,20 @@ impl ApplicationHost {
         if self.fatal_error.is_none() {
             self.fatal_error = Some(error);
         }
+        self.cancel_graphics_initialization();
         self.renderer = None;
         self.windows.close();
         event_loop.exit();
     }
 
     fn sync_publication(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
+        // Keep the first native Window stable until the surface-aware adapter
+        // and device request finishes. The newest publication is reconciled
+        // immediately after initialization completes.
+        if self.pending_graphics.is_some() {
+            return Ok(());
+        }
+
         let publication = self.publications.load();
         if self
             .latest_publication
@@ -249,20 +342,20 @@ impl ApplicationHost {
                     .windows
                     .current()
                     .expect("a created window is installed before renderer creation");
-                let renderer =
-                    match WindowRenderer::new(&self.graphics, Arc::clone(native.window())) {
-                        Ok(renderer) => renderer,
-                        Err(error) => {
-                            return self.handle_window_sync_failure(revision, error.into());
-                        }
-                    };
-                self.renderer = Some(renderer);
-                self.ever_had_window = true;
+                self.begin_graphics_initialization(
+                    event_loop,
+                    revision,
+                    Arc::clone(native.window()),
+                );
             }
             WindowChange::PreparedReplacement(prepared) => {
                 event_loop.flush_windows();
+                let graphics = self
+                    .graphics
+                    .as_ref()
+                    .ok_or(HostError::MissingGraphicsContext)?;
                 let candidate_renderer =
-                    match WindowRenderer::new(&self.graphics, Arc::clone(prepared.window())) {
+                    match WindowRenderer::new(graphics, Arc::clone(prepared.window())) {
                         Ok(renderer) => renderer,
                         Err(error) => {
                             // `prepared` closes only the candidate on return. The
@@ -302,8 +395,10 @@ impl ApplicationHost {
         // redraw. Stop exposing an old-size plan as soon as the native size no
         // longer matches the renderer's configured target.
         self.discard_stale_presented_frame();
-        if let Some(native) = self.windows.current() {
-            native.window().request_redraw();
+        if self.renderer.is_some() {
+            if let Some(native) = self.windows.current() {
+                native.window().request_redraw();
+            }
         }
         Ok(())
     }
@@ -322,6 +417,10 @@ impl ApplicationHost {
         let window_id = native.id();
         let physical_size = native.window().inner_size();
         let scale_factor = native.window().scale_factor();
+        let graphics = self
+            .graphics
+            .as_ref()
+            .ok_or(RedrawFailure::Fatal(HostError::MissingGraphicsContext))?;
         let renderer = self
             .renderer
             .as_mut()
@@ -334,7 +433,7 @@ impl ApplicationHost {
             ));
         }
 
-        let resize_result = renderer.resize(&self.graphics, physical_size);
+        let resize_result = renderer.resize(graphics, physical_size);
         let active_surface =
             (physical_size == renderer.physical_size()).then_some(PresentedSurface {
                 window_id,
@@ -391,7 +490,7 @@ impl ApplicationHost {
             )
         })?;
         debug_assert!(frame.glyph_runs() <= frame.glyphs());
-        let outcome = renderer.present(&self.graphics, &frame).map_err(|error| {
+        let outcome = renderer.present(graphics, &frame).map_err(|error| {
             classify_fatal_failure(
                 has_presented_frame,
                 FailureKind::ActivePresentation,
@@ -428,11 +527,12 @@ impl ApplicationHandler for ApplicationHost {
             return;
         }
 
-        // Native creation and surface setup can produce redraw demand before
-        // reconciliation has installed every renderer resource. Always
-        // schedule one host-owned frame after the handler becomes active.
-        if let Some(window) = self.windows.current() {
-            window.window().request_redraw();
+        // A ready renderer needs a host-owned frame after resume. First-window
+        // initialization requests its redraw asynchronously on completion.
+        if self.renderer.is_some() {
+            if let Some(window) = self.windows.current() {
+                window.window().request_redraw();
+            }
         }
     }
 
@@ -452,6 +552,7 @@ impl ApplicationHandler for ApplicationHost {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
                 self.cursor_target = None;
@@ -463,16 +564,23 @@ impl ApplicationHandler for ApplicationHost {
                 new_inner_size: size,
                 ..
             } => {
+                if self.pending_graphics.is_some() {
+                    return;
+                }
                 let Some(publication) = self.latest_publication.as_ref() else {
                     self.fail(event_loop, HostError::MissingPublication);
                     return;
                 };
                 let revision = publication.revision();
+                let Some(graphics) = self.graphics.as_ref() else {
+                    self.fail(event_loop, HostError::MissingGraphicsContext);
+                    return;
+                };
                 let Some(renderer) = self.renderer.as_mut() else {
                     self.fail(event_loop, HostError::MissingRenderer);
                     return;
                 };
-                let resize_result = renderer.resize(&self.graphics, size);
+                let resize_result = renderer.resize(graphics, size);
                 let active_surface = (window_id == renderer.window_id()
                     && size == renderer.physical_size())
                 .then_some(PresentedSurface {
@@ -500,6 +608,7 @@ impl ApplicationHandler for ApplicationHost {
                     }
                 }
             }
+            WindowEvent::RedrawRequested if self.pending_graphics.is_some() => {}
             WindowEvent::RedrawRequested => match self.redraw() {
                 Ok(PresentationOutcome::Reconfigure) => {
                     self.discard_stale_presented_frame();
@@ -557,12 +666,16 @@ impl ApplicationHandler for ApplicationHost {
             event_loop.exit();
             return;
         }
-        if let Err(error) = self.sync_publication(event_loop) {
+        if let Err(error) = self
+            .complete_graphics_initialization()
+            .and_then(|()| self.sync_publication(event_loop))
+        {
             self.fail(event_loop, error);
         }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.cancel_graphics_initialization();
         self.renderer = None;
         self.windows.close();
     }
@@ -657,6 +770,12 @@ pub(crate) enum HostError {
     #[error("the committed Window has no native window")]
     MissingNativeWindow,
 
+    #[error("GPU initialization stopped before producing a renderer")]
+    GraphicsInitializationStopped,
+
+    #[error("the native Window has no GPU context")]
+    MissingGraphicsContext,
+
     #[error("the native Window has no GPU renderer")]
     MissingRenderer,
 
@@ -715,6 +834,17 @@ mod tests {
             physical_size,
             generation,
         }
+    }
+
+    #[test]
+    fn windowless_host_does_not_initialize_graphics() {
+        let dom = Dom::new();
+        let (_publisher, publications) = DomPublisher::new(&dom, |_| {});
+        let host = ApplicationHost::new(publications, TextEngine::without_system_fonts());
+
+        assert!(host.graphics.is_none());
+        assert!(host.pending_graphics.is_none());
+        assert!(host.renderer.is_none());
     }
 
     #[test]

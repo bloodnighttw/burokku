@@ -1,8 +1,11 @@
 //! WGPU surface and Vello Hybrid presentation ownership.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use thiserror::Error;
@@ -30,41 +33,54 @@ pub(crate) struct GraphicsContext {
 }
 
 impl GraphicsContext {
-    /// Initialize reusable GPU state without requiring a mounted native window.
+    /// Select a GPU that can present to `window` and create its first renderer.
     ///
-    /// Surface compatibility is checked when a DOM Window is eventually
-    /// reconciled into a [`WindowRenderer`].
-    pub(crate) async fn new() -> Result<Self, GraphicsError> {
+    /// Adapter selection is deliberately delayed until the first native Window
+    /// exists. Passing its surface to WGPU prevents windowless startup from
+    /// locking the application to an adapter that cannot present later.
+    pub(crate) async fn for_window(
+        window: Arc<Window>,
+    ) -> Result<(Self, WindowRenderer), GraphicsError> {
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return Err(GraphicsError::EmptySurface);
+        }
+
         let instance = Instance::default();
-        Self::request(instance, None).await
+        let surface = instance
+            .create_surface(Arc::clone(&window))
+            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
+        let graphics = Self::request(instance, &surface).await?;
+        let renderer = WindowRenderer::from_surface(&graphics, window, surface)?;
+        Ok((graphics, renderer))
     }
 
     async fn request(
         instance: Instance,
-        compatible_surface: Option<&Surface<'_>>,
+        compatible_surface: &Surface<'_>,
     ) -> Result<Self, GraphicsError> {
-        let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                force_fallback_adapter: false,
-                compatible_surface,
+        let primary_options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            force_fallback_adapter: false,
+            compatible_surface: Some(compatible_surface),
+        };
+        let fallback_options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: true,
+            compatible_surface: Some(compatible_surface),
+        };
+        let adapter =
+            select_adapter_with_fallback(instance.request_adapter(&primary_options), || {
+                instance.request_adapter(&fallback_options)
             })
             .await
-        {
-            Ok(adapter) => adapter,
-            Err(primary) => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::LowPower,
-                    force_fallback_adapter: true,
-                    compatible_surface,
-                })
-                .await
-                .map_err(|fallback| {
-                    GraphicsError::Adapter(format!(
-                        "primary selection failed ({primary}); fallback selection failed ({fallback})"
-                    ))
-                })?,
-        };
+            .map_err(|(primary, fallback)| {
+                GraphicsError::Adapter(format!(
+                    "primary selection failed ({primary}); fallback selection failed ({fallback})"
+                ))
+            })?;
+        debug_assert!(adapter.is_surface_supported(compatible_surface));
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Burokku device"),
@@ -83,6 +99,20 @@ impl GraphicsContext {
 
     fn validate_target(&self, size: PhysicalSize<u32>) -> Result<(), GraphicsError> {
         validate_target_dimensions(size, self.device.limits().max_texture_dimension_2d)
+    }
+}
+
+async fn select_adapter_with_fallback<T, E, F, FF>(
+    primary: impl Future<Output = Result<T, E>>,
+    fallback: F,
+) -> Result<T, (E, E)>
+where
+    F: FnOnce() -> FF,
+    FF: Future<Output = Result<T, E>>,
+{
+    match primary.await {
+        Ok(adapter) => Ok(adapter),
+        Err(primary) => fallback().await.map_err(|fallback| (primary, fallback)),
     }
 }
 
@@ -111,15 +141,23 @@ impl WindowRenderer {
         graphics: &GraphicsContext,
         window: Arc<Window>,
     ) -> Result<Self, GraphicsError> {
+        let surface = graphics
+            .instance
+            .create_surface(Arc::clone(&window))
+            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
+        Self::from_surface(graphics, window, surface)
+    }
+
+    fn from_surface(
+        graphics: &GraphicsContext,
+        window: Arc<Window>,
+        surface: Surface<'static>,
+    ) -> Result<Self, GraphicsError> {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Err(GraphicsError::EmptySurface);
         }
         graphics.validate_target(size)?;
-        let surface = graphics
-            .instance
-            .create_surface(window.clone())
-            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
         if !graphics.adapter.is_surface_supported(&surface) {
             return Err(GraphicsError::UnsupportedSurface);
         }
@@ -372,6 +410,31 @@ pub(crate) enum GraphicsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn incompatible_preferred_adapter_uses_compatible_fallback() {
+        let selected = select_adapter_with_fallback(
+            std::future::ready(Err::<u8, _>("preferred adapter is surface-incompatible")),
+            || std::future::ready(Ok::<_, &str>(2)),
+        )
+        .await;
+
+        assert_eq!(selected, Ok(2));
+    }
+
+    #[tokio::test]
+    async fn adapter_selection_reports_both_failures() {
+        let selected = select_adapter_with_fallback(
+            std::future::ready(Err::<u8, _>("preferred incompatible")),
+            || std::future::ready(Err("fallback incompatible")),
+        )
+        .await;
+
+        assert_eq!(
+            selected,
+            Err(("preferred incompatible", "fallback incompatible"))
+        );
+    }
 
     #[test]
     fn target_dimensions_respect_wgpu_and_vello_limits() {
