@@ -1123,6 +1123,57 @@ mod tests {
     }
 
     #[test]
+    fn valid_presentation_recovers_after_oversized_then_supported_resize() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let initial_plan = scene_plan(&dom);
+        let revision = initial_plan.revision();
+        let retained_surface = test_surface(1, PhysicalSize::new(320, 240), 1);
+        let mut presented = None;
+        let mut last_failure = None;
+        finish_successful_presentation(
+            &mut presented,
+            &mut last_failure,
+            initial_plan,
+            retained_surface,
+        );
+
+        let oversized = presentation_state(presented.as_ref(), None, Some(revision));
+        assert!(oversized.active_renderer_has_presented);
+        assert!(!oversized.usable_frame);
+        let failure = classify_resize_failure(
+            revision,
+            oversized.active_renderer_has_presented,
+            oversized_target(),
+        );
+        let RedrawFailure::Recoverable(failure) = failure else {
+            panic!("an oversized resize after presentation must be recoverable");
+        };
+
+        // The host suppresses stale hit testing while the rejected resize
+        // leaves the renderer's last valid surface available for recovery.
+        presented = None;
+        last_failure = Some(failure);
+        let supported =
+            presentation_state(presented.as_ref(), Some(&retained_surface), Some(revision));
+        assert!(supported.active_renderer_has_presented);
+        assert!(!supported.usable_frame);
+
+        let recovered_plan = scene_plan(&dom);
+        finish_successful_presentation(
+            &mut presented,
+            &mut last_failure,
+            recovered_plan,
+            retained_surface,
+        );
+        let recovered =
+            presentation_state(presented.as_ref(), Some(&retained_surface), Some(revision));
+        assert!(recovered.usable_frame);
+        assert!(last_failure.is_none());
+    }
+
+    #[test]
     fn successful_presentation_advances_the_plan_and_clears_failure() {
         let mut dom = Dom::new();
         let window = dom.create_element(Element::from_tag(ElementTag::Window));
