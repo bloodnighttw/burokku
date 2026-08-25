@@ -59,7 +59,6 @@ impl WindowSpec {
         }))
     }
 
-    #[cfg(test)]
     pub(crate) fn dom_id(&self) -> NodeId {
         self.dom_id
     }
@@ -108,6 +107,10 @@ pub(crate) struct NativeWindow {
 }
 
 impl NativeWindow {
+    pub(crate) fn dom_id(&self) -> NodeId {
+        self.spec.dom_id()
+    }
+
     pub(crate) fn id(&self) -> WindowId {
         self.window.id()
     }
@@ -188,6 +191,10 @@ impl PreparedWindow {
 
     pub(crate) fn window(&self) -> &Arc<Window> {
         self.replacement.candidate().window()
+    }
+
+    pub(crate) fn commit(self, manager: &mut WindowManager) -> Option<NativeWindow> {
+        self.replacement.commit(&mut manager.current)
     }
 
     pub(crate) fn commit_with<R>(
@@ -404,6 +411,27 @@ mod tests {
         assert!(!active_closed.get());
         assert!(candidate_closed.get());
         assert_eq!(&*events.borrow(), &["window 2 closed"]);
+    }
+
+    #[test]
+    fn successful_window_only_handoff_installs_candidate_without_closing_it() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let active_closed = Rc::new(Cell::new(false));
+        let candidate_closed = Rc::new(Cell::new(false));
+        let mut current = Some(replacement_probe(1, &active_closed, &events));
+        let prepared = PreparedReplacement::new(
+            replacement_probe(2, &candidate_closed, &events),
+            close_probe,
+        );
+
+        let previous = prepared.commit(&mut current).unwrap();
+
+        assert_eq!(current.as_ref().map(|probe| probe.id), Some(2));
+        assert!(!active_closed.get());
+        assert!(!candidate_closed.get());
+        close_probe(&previous);
+        assert!(active_closed.get());
+        assert!(!candidate_closed.get());
     }
 
     #[test]

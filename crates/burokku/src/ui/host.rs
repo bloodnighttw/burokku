@@ -14,7 +14,7 @@ use super::{
     layout::{LayoutEngine, LayoutError, LogicalViewport},
     scene::{BuiltScene, SceneError, ScenePlan},
     text::TextEngine,
-    window_host::{WindowChange, WindowHostError, WindowManager},
+    window_host::{WindowChange, WindowHostError, WindowManager, WindowSpec},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +56,35 @@ enum FailureKind {
 enum FailurePolicy {
     Recoverable,
     Fatal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingWindowStatus {
+    Current,
+    Removed,
+    Replaced,
+}
+
+fn pending_window_status(
+    pending_dom_id: NodeId,
+    desired_dom_id: Option<NodeId>,
+) -> PendingWindowStatus {
+    match desired_dom_id {
+        Some(desired_dom_id) if desired_dom_id == pending_dom_id => PendingWindowStatus::Current,
+        Some(_) => PendingWindowStatus::Replaced,
+        None => PendingWindowStatus::Removed,
+    }
+}
+
+fn accept_current_graphics_result<T, E>(
+    status: PendingWindowStatus,
+    result: Result<T, E>,
+) -> Option<Result<T, E>> {
+    (status == PendingWindowStatus::Current).then_some(result)
+}
+
+fn graphics_initialization_stop_is_fatal(status: PendingWindowStatus) -> bool {
+    status == PendingWindowStatus::Current
 }
 
 fn failure_policy(has_presented_frame: bool, kind: FailureKind) -> FailurePolicy {
@@ -109,17 +138,21 @@ fn presented_frame_is_usable<W: Eq>(
 type GraphicsInitialization = Result<(GraphicsContext, WindowRenderer), GraphicsError>;
 
 #[derive(Debug)]
-struct PendingGraphicsInitialization {
-    revision: u64,
-    window_id: WindowId,
-    result: oneshot::Receiver<GraphicsInitialization>,
-    task: tokio::task::JoinHandle<()>,
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
-impl Drop for PendingGraphicsInitialization {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+#[derive(Debug)]
+struct PendingGraphicsInitialization {
+    revision: u64,
+    dom_id: NodeId,
+    window_id: WindowId,
+    result: oneshot::Receiver<GraphicsInitialization>,
+    _task: AbortOnDrop,
 }
 
 #[derive(Debug)]
@@ -203,6 +236,7 @@ impl ApplicationHost {
         &mut self,
         event_loop: &ActiveEventLoop,
         revision: u64,
+        dom_id: NodeId,
         window: Arc<winit::Window>,
     ) {
         debug_assert!(self.graphics.is_none());
@@ -219,9 +253,10 @@ impl ApplicationHost {
         });
         self.pending_graphics = Some(PendingGraphicsInitialization {
             revision,
+            dom_id,
             window_id,
             result,
-            task,
+            _task: AbortOnDrop(task),
         });
     }
 
@@ -229,23 +264,42 @@ impl ApplicationHost {
         let Some(pending) = self.pending_graphics.as_mut() else {
             return Ok(());
         };
-        let initialized = match pending.result.try_recv() {
+
+        let received = pending.result.try_recv();
+
+        // A publication can arrive after the event-loop turn began. Leave an
+        // obsolete request installed for `sync_publication` to cancel while it
+        // commits the corresponding native removal or replacement. Successes
+        // and failures use the same authority gate.
+        let authoritative = self.publications.load();
+        let desired_dom_id = WindowSpec::from_publication(&authoritative)?
+            .as_ref()
+            .map(WindowSpec::dom_id);
+        let status = pending_window_status(pending.dom_id, desired_dom_id);
+        let initialized = match received {
             Ok(initialized) => initialized,
             Err(oneshot::error::TryRecvError::Empty) => return Ok(()),
+            Err(oneshot::error::TryRecvError::Closed)
+                if !graphics_initialization_stop_is_fatal(status) =>
+            {
+                return Ok(());
+            }
             Err(oneshot::error::TryRecvError::Closed) => {
                 return Err(HostError::GraphicsInitializationStopped);
             }
         };
+        let Some(initialized) = accept_current_graphics_result(status, initialized) else {
+            return Ok(());
+        };
+
         let pending = self
             .pending_graphics
             .take()
             .expect("completed graphics initialization remains installed");
 
-        if self
-            .windows
-            .current()
-            .is_none_or(|window| window.id() != pending.window_id)
-        {
+        if self.windows.current().is_none_or(|window| {
+            window.dom_id() != pending.dom_id || window.id() != pending.window_id
+        }) {
             return Ok(());
         }
 
@@ -304,13 +358,6 @@ impl ApplicationHost {
     }
 
     fn sync_publication(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
-        // Keep the first native Window stable until the surface-aware adapter
-        // and device request finishes. The newest publication is reconciled
-        // immediately after initialization completes.
-        if self.pending_graphics.is_some() {
-            return Ok(());
-        }
-
         let publication = self.publications.load();
         if self
             .latest_publication
@@ -335,6 +382,10 @@ impl ApplicationHost {
 
         match change {
             WindowChange::Created => {
+                // Native creation ends the permitted initial windowless phase;
+                // removing this final Window must exit even if GPU setup is
+                // still pending.
+                self.ever_had_window = true;
                 // Ensure AppKit has applied the newly created native Window
                 // before WGPU derives a presentation surface from it.
                 event_loop.flush_windows();
@@ -345,42 +396,71 @@ impl ApplicationHost {
                 self.begin_graphics_initialization(
                     event_loop,
                     revision,
+                    native.dom_id(),
                     Arc::clone(native.window()),
                 );
             }
             WindowChange::PreparedReplacement(prepared) => {
                 event_loop.flush_windows();
-                let graphics = self
-                    .graphics
-                    .as_ref()
-                    .ok_or(HostError::MissingGraphicsContext)?;
-                let candidate_renderer =
-                    match WindowRenderer::new(graphics, Arc::clone(prepared.window())) {
-                        Ok(renderer) => renderer,
-                        Err(error) => {
-                            // `prepared` closes only the candidate on return. The
-                            // active Window, renderer, and presented plan remain
-                            // installed when this is recoverable.
-                            return self.handle_window_sync_failure(revision, error.into());
-                        }
-                    };
+                if self.pending_graphics.is_some() {
+                    debug_assert!(self.graphics.is_none());
+                    debug_assert!(self.renderer.is_none());
 
-                // No fallible work remains: install the already-created
-                // renderer with its candidate Window before releasing the old
-                // surface and closing the previous Window.
-                let (previous_window, previous_renderer) =
-                    prepared.commit_with(&mut self.windows, &mut self.renderer, candidate_renderer);
-                // The retained plan belongs to the old Window and renderer.
-                // Never use it to classify the candidate's first-frame failure
-                // as recoverable or to hit-test the unpainted replacement.
-                self.discard_stale_presented_frame();
-                drop(previous_renderer);
-                if let Some(previous_window) = previous_window {
-                    previous_window.close();
+                    // The candidate Window is ready, so the obsolete request can
+                    // now be cancelled without risking loss of the active Window
+                    // when native candidate creation fails.
+                    self.cancel_graphics_initialization();
+                    let previous_window = prepared.commit(&mut self.windows);
+                    if let Some(previous_window) = previous_window {
+                        previous_window.close();
+                    }
+                    let native = self
+                        .windows
+                        .current()
+                        .expect("a committed replacement is installed before initialization");
+                    self.begin_graphics_initialization(
+                        event_loop,
+                        revision,
+                        native.dom_id(),
+                        Arc::clone(native.window()),
+                    );
+                } else {
+                    let graphics = self
+                        .graphics
+                        .as_ref()
+                        .ok_or(HostError::MissingGraphicsContext)?;
+                    let candidate_renderer =
+                        match WindowRenderer::new(graphics, Arc::clone(prepared.window())) {
+                            Ok(renderer) => renderer,
+                            Err(error) => {
+                                // `prepared` closes only the candidate on return. The
+                                // active Window, renderer, and presented plan remain
+                                // installed when this is recoverable.
+                                return self.handle_window_sync_failure(revision, error.into());
+                            }
+                        };
+
+                    // No fallible work remains: install the already-created
+                    // renderer with its candidate Window before releasing the old
+                    // surface and closing the previous Window.
+                    let (previous_window, previous_renderer) = prepared.commit_with(
+                        &mut self.windows,
+                        &mut self.renderer,
+                        candidate_renderer,
+                    );
+                    // The retained plan belongs to the old Window and renderer.
+                    // Never use it to classify the candidate's first-frame failure
+                    // as recoverable or to hit-test the unpainted replacement.
+                    self.discard_stale_presented_frame();
+                    drop(previous_renderer);
+                    if let Some(previous_window) = previous_window {
+                        previous_window.close();
+                    }
+                    self.ever_had_window = true;
                 }
-                self.ever_had_window = true;
             }
             WindowChange::Removed => {
+                self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
                 self.cursor_target = None;
@@ -667,7 +747,8 @@ impl ApplicationHandler for ApplicationHost {
             return;
         }
         if let Err(error) = self
-            .complete_graphics_initialization()
+            .sync_publication(event_loop)
+            .and_then(|()| self.complete_graphics_initialization())
             .and_then(|()| self.sync_publication(event_loop))
         {
             self.fail(event_loop, error);
@@ -845,6 +926,70 @@ mod tests {
         assert!(host.graphics.is_none());
         assert!(host.pending_graphics.is_none());
         assert!(host.renderer.is_none());
+    }
+
+    #[test]
+    fn pending_window_status_detects_removal_replacement_and_same_window_updates() {
+        let mut dom = Dom::new();
+        let window_a = dom.create_element(Element::from_tag(ElementTag::Window));
+        let window_b = dom.create_element(Element::from_tag(ElementTag::Window));
+
+        assert_eq!(
+            pending_window_status(window_a, Some(window_a)),
+            PendingWindowStatus::Current
+        );
+        assert_eq!(
+            pending_window_status(window_a, None),
+            PendingWindowStatus::Removed
+        );
+        assert_eq!(
+            pending_window_status(window_a, Some(window_b)),
+            PendingWindowStatus::Replaced
+        );
+    }
+
+    #[test]
+    fn stale_success_and_error_are_discarded_before_installation() {
+        for status in [PendingWindowStatus::Removed, PendingWindowStatus::Replaced] {
+            assert_eq!(
+                accept_current_graphics_result(status, Ok::<_, &'static str>(7_u8)),
+                None
+            );
+            assert_eq!(
+                accept_current_graphics_result(status, Err::<u8, _>("stale error")),
+                None
+            );
+        }
+
+        assert_eq!(
+            accept_current_graphics_result(
+                PendingWindowStatus::Current,
+                Ok::<_, &'static str>(7_u8)
+            ),
+            Some(Ok(7))
+        );
+        assert!(!graphics_initialization_stop_is_fatal(
+            PendingWindowStatus::Removed
+        ));
+        assert!(!graphics_initialization_stop_is_fatal(
+            PendingWindowStatus::Replaced
+        ));
+        assert!(graphics_initialization_stop_is_fatal(
+            PendingWindowStatus::Current
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_stalled_graphics_initialization_aborts_its_task() {
+        let task = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        let task = AbortOnDrop(task);
+
+        tokio::task::yield_now().await;
+        drop(task);
+        tokio::task::yield_now().await;
+
+        assert!(abort.is_finished());
     }
 
     #[test]
