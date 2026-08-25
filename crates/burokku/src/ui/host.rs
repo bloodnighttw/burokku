@@ -14,7 +14,7 @@ use super::{
     layout::{LayoutEngine, LayoutError, LogicalViewport},
     scene::{BuiltScene, SceneError, ScenePlan},
     text::TextEngine,
-    window_host::{WindowChange, WindowHostError, WindowManager},
+    window_host::{WindowChange, WindowHostError, WindowManager, WindowSpec},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +232,18 @@ impl ApplicationHost {
         let Some(pending) = self.pending_graphics.as_mut() else {
             return Ok(());
         };
+
+        // A publication can arrive after the event-loop turn began. Leave an
+        // obsolete request installed for `sync_publication` to cancel while it
+        // commits the corresponding native removal or replacement.
+        let authoritative = self.publications.load();
+        let desired_dom_id = WindowSpec::from_publication(&authoritative)?
+            .as_ref()
+            .map(WindowSpec::dom_id);
+        if desired_dom_id != Some(pending.dom_id) {
+            return Ok(());
+        }
+
         let initialized = match pending.result.try_recv() {
             Ok(initialized) => initialized,
             Err(oneshot::error::TryRecvError::Empty) => return Ok(()),
@@ -690,7 +702,8 @@ impl ApplicationHandler for ApplicationHost {
             return;
         }
         if let Err(error) = self
-            .complete_graphics_initialization()
+            .sync_publication(event_loop)
+            .and_then(|()| self.complete_graphics_initialization())
             .and_then(|()| self.sync_publication(event_loop))
         {
             self.fail(event_loop, error);
