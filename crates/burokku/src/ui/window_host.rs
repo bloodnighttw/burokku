@@ -59,7 +59,6 @@ impl WindowSpec {
         }))
     }
 
-    #[cfg(test)]
     pub(crate) fn dom_id(&self) -> NodeId {
         self.dom_id
     }
@@ -108,6 +107,10 @@ pub(crate) struct NativeWindow {
 }
 
 impl NativeWindow {
+    pub(crate) fn dom_id(&self) -> NodeId {
+        self.spec.dom_id()
+    }
+
     pub(crate) fn id(&self) -> WindowId {
         self.window.id()
     }
