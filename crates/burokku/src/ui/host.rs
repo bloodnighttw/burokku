@@ -305,13 +305,6 @@ impl ApplicationHost {
     }
 
     fn sync_publication(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
-        // Keep the first native Window stable until the surface-aware adapter
-        // and device request finishes. The newest publication is reconciled
-        // immediately after initialization completes.
-        if self.pending_graphics.is_some() {
-            return Ok(());
-        }
-
         let publication = self.publications.load();
         if self
             .latest_publication
@@ -352,37 +345,65 @@ impl ApplicationHost {
             }
             WindowChange::PreparedReplacement(prepared) => {
                 event_loop.flush_windows();
-                let graphics = self
-                    .graphics
-                    .as_ref()
-                    .ok_or(HostError::MissingGraphicsContext)?;
-                let candidate_renderer =
-                    match WindowRenderer::new(graphics, Arc::clone(prepared.window())) {
-                        Ok(renderer) => renderer,
-                        Err(error) => {
-                            // `prepared` closes only the candidate on return. The
-                            // active Window, renderer, and presented plan remain
-                            // installed when this is recoverable.
-                            return self.handle_window_sync_failure(revision, error.into());
-                        }
-                    };
+                if self.pending_graphics.is_some() {
+                    debug_assert!(self.graphics.is_none());
+                    debug_assert!(self.renderer.is_none());
 
-                // No fallible work remains: install the already-created
-                // renderer with its candidate Window before releasing the old
-                // surface and closing the previous Window.
-                let (previous_window, previous_renderer) =
-                    prepared.commit_with(&mut self.windows, &mut self.renderer, candidate_renderer);
-                // The retained plan belongs to the old Window and renderer.
-                // Never use it to classify the candidate's first-frame failure
-                // as recoverable or to hit-test the unpainted replacement.
-                self.discard_stale_presented_frame();
-                drop(previous_renderer);
-                if let Some(previous_window) = previous_window {
-                    previous_window.close();
+                    // The candidate Window is ready, so the obsolete request can
+                    // now be cancelled without risking loss of the active Window
+                    // when native candidate creation fails.
+                    self.cancel_graphics_initialization();
+                    let previous_window = prepared.commit(&mut self.windows);
+                    if let Some(previous_window) = previous_window {
+                        previous_window.close();
+                    }
+                    let native = self
+                        .windows
+                        .current()
+                        .expect("a committed replacement is installed before initialization");
+                    self.begin_graphics_initialization(
+                        event_loop,
+                        revision,
+                        native.dom_id(),
+                        Arc::clone(native.window()),
+                    );
+                } else {
+                    let graphics = self
+                        .graphics
+                        .as_ref()
+                        .ok_or(HostError::MissingGraphicsContext)?;
+                    let candidate_renderer =
+                        match WindowRenderer::new(graphics, Arc::clone(prepared.window())) {
+                            Ok(renderer) => renderer,
+                            Err(error) => {
+                                // `prepared` closes only the candidate on return. The
+                                // active Window, renderer, and presented plan remain
+                                // installed when this is recoverable.
+                                return self.handle_window_sync_failure(revision, error.into());
+                            }
+                        };
+
+                    // No fallible work remains: install the already-created
+                    // renderer with its candidate Window before releasing the old
+                    // surface and closing the previous Window.
+                    let (previous_window, previous_renderer) = prepared.commit_with(
+                        &mut self.windows,
+                        &mut self.renderer,
+                        candidate_renderer,
+                    );
+                    // The retained plan belongs to the old Window and renderer.
+                    // Never use it to classify the candidate's first-frame failure
+                    // as recoverable or to hit-test the unpainted replacement.
+                    self.discard_stale_presented_frame();
+                    drop(previous_renderer);
+                    if let Some(previous_window) = previous_window {
+                        previous_window.close();
+                    }
+                    self.ever_had_window = true;
                 }
-                self.ever_had_window = true;
             }
             WindowChange::Removed => {
+                self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
                 self.cursor_target = None;
