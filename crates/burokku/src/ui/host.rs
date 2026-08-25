@@ -58,6 +58,35 @@ enum FailurePolicy {
     Fatal,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingWindowStatus {
+    Current,
+    Removed,
+    Replaced,
+}
+
+fn pending_window_status(
+    pending_dom_id: NodeId,
+    desired_dom_id: Option<NodeId>,
+) -> PendingWindowStatus {
+    match desired_dom_id {
+        Some(desired_dom_id) if desired_dom_id == pending_dom_id => PendingWindowStatus::Current,
+        Some(_) => PendingWindowStatus::Replaced,
+        None => PendingWindowStatus::Removed,
+    }
+}
+
+fn accept_current_graphics_result<T, E>(
+    status: PendingWindowStatus,
+    result: Result<T, E>,
+) -> Option<Result<T, E>> {
+    (status == PendingWindowStatus::Current).then_some(result)
+}
+
+fn graphics_initialization_stop_is_fatal(status: PendingWindowStatus) -> bool {
+    status == PendingWindowStatus::Current
+}
+
 fn failure_policy(has_presented_frame: bool, kind: FailureKind) -> FailurePolicy {
     match kind {
         FailureKind::WindowSync
@@ -109,18 +138,21 @@ fn presented_frame_is_usable<W: Eq>(
 type GraphicsInitialization = Result<(GraphicsContext, WindowRenderer), GraphicsError>;
 
 #[derive(Debug)]
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[derive(Debug)]
 struct PendingGraphicsInitialization {
     revision: u64,
     dom_id: NodeId,
     window_id: WindowId,
     result: oneshot::Receiver<GraphicsInitialization>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for PendingGraphicsInitialization {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    _task: AbortOnDrop,
 }
 
 #[derive(Debug)]
@@ -224,7 +256,7 @@ impl ApplicationHost {
             dom_id,
             window_id,
             result,
-            task,
+            _task: AbortOnDrop(task),
         });
     }
 
@@ -233,24 +265,33 @@ impl ApplicationHost {
             return Ok(());
         };
 
+        let received = pending.result.try_recv();
+
         // A publication can arrive after the event-loop turn began. Leave an
         // obsolete request installed for `sync_publication` to cancel while it
-        // commits the corresponding native removal or replacement.
+        // commits the corresponding native removal or replacement. Successes
+        // and failures use the same authority gate.
         let authoritative = self.publications.load();
         let desired_dom_id = WindowSpec::from_publication(&authoritative)?
             .as_ref()
             .map(WindowSpec::dom_id);
-        if desired_dom_id != Some(pending.dom_id) {
-            return Ok(());
-        }
-
-        let initialized = match pending.result.try_recv() {
+        let status = pending_window_status(pending.dom_id, desired_dom_id);
+        let initialized = match received {
             Ok(initialized) => initialized,
             Err(oneshot::error::TryRecvError::Empty) => return Ok(()),
+            Err(oneshot::error::TryRecvError::Closed)
+                if !graphics_initialization_stop_is_fatal(status) =>
+            {
+                return Ok(());
+            }
             Err(oneshot::error::TryRecvError::Closed) => {
                 return Err(HostError::GraphicsInitializationStopped);
             }
         };
+        let Some(initialized) = accept_current_graphics_result(status, initialized) else {
+            return Ok(());
+        };
+
         let pending = self
             .pending_graphics
             .take()
@@ -341,6 +382,10 @@ impl ApplicationHost {
 
         match change {
             WindowChange::Created => {
+                // Native creation ends the permitted initial windowless phase;
+                // removing this final Window must exit even if GPU setup is
+                // still pending.
+                self.ever_had_window = true;
                 // Ensure AppKit has applied the newly created native Window
                 // before WGPU derives a presentation surface from it.
                 event_loop.flush_windows();
@@ -881,6 +926,70 @@ mod tests {
         assert!(host.graphics.is_none());
         assert!(host.pending_graphics.is_none());
         assert!(host.renderer.is_none());
+    }
+
+    #[test]
+    fn pending_window_status_detects_removal_replacement_and_same_window_updates() {
+        let mut dom = Dom::new();
+        let window_a = dom.create_element(Element::from_tag(ElementTag::Window));
+        let window_b = dom.create_element(Element::from_tag(ElementTag::Window));
+
+        assert_eq!(
+            pending_window_status(window_a, Some(window_a)),
+            PendingWindowStatus::Current
+        );
+        assert_eq!(
+            pending_window_status(window_a, None),
+            PendingWindowStatus::Removed
+        );
+        assert_eq!(
+            pending_window_status(window_a, Some(window_b)),
+            PendingWindowStatus::Replaced
+        );
+    }
+
+    #[test]
+    fn stale_success_and_error_are_discarded_before_installation() {
+        for status in [PendingWindowStatus::Removed, PendingWindowStatus::Replaced] {
+            assert_eq!(
+                accept_current_graphics_result(status, Ok::<_, &'static str>(7_u8)),
+                None
+            );
+            assert_eq!(
+                accept_current_graphics_result(status, Err::<u8, _>("stale error")),
+                None
+            );
+        }
+
+        assert_eq!(
+            accept_current_graphics_result(
+                PendingWindowStatus::Current,
+                Ok::<_, &'static str>(7_u8)
+            ),
+            Some(Ok(7))
+        );
+        assert!(!graphics_initialization_stop_is_fatal(
+            PendingWindowStatus::Removed
+        ));
+        assert!(!graphics_initialization_stop_is_fatal(
+            PendingWindowStatus::Replaced
+        ));
+        assert!(graphics_initialization_stop_is_fatal(
+            PendingWindowStatus::Current
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_stalled_graphics_initialization_aborts_its_task() {
+        let task = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        let task = AbortOnDrop(task);
+
+        tokio::task::yield_now().await;
+        drop(task);
+        tokio::task::yield_now().await;
+
+        assert!(abort.is_finished());
     }
 
     #[test]
