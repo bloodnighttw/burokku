@@ -111,6 +111,7 @@ type GraphicsInitialization = Result<(GraphicsContext, WindowRenderer), Graphics
 #[derive(Debug)]
 struct PendingGraphicsInitialization {
     revision: u64,
+    dom_id: NodeId,
     window_id: WindowId,
     result: oneshot::Receiver<GraphicsInitialization>,
     task: tokio::task::JoinHandle<()>,
@@ -203,6 +204,7 @@ impl ApplicationHost {
         &mut self,
         event_loop: &ActiveEventLoop,
         revision: u64,
+        dom_id: NodeId,
         window: Arc<winit::Window>,
     ) {
         debug_assert!(self.graphics.is_none());
@@ -219,6 +221,7 @@ impl ApplicationHost {
         });
         self.pending_graphics = Some(PendingGraphicsInitialization {
             revision,
+            dom_id,
             window_id,
             result,
             task,
@@ -241,11 +244,9 @@ impl ApplicationHost {
             .take()
             .expect("completed graphics initialization remains installed");
 
-        if self
-            .windows
-            .current()
-            .is_none_or(|window| window.id() != pending.window_id)
-        {
+        if self.windows.current().is_none_or(|window| {
+            window.dom_id() != pending.dom_id || window.id() != pending.window_id
+        }) {
             return Ok(());
         }
 
@@ -345,6 +346,7 @@ impl ApplicationHost {
                 self.begin_graphics_initialization(
                     event_loop,
                     revision,
+                    native.dom_id(),
                     Arc::clone(native.window()),
                 );
             }
