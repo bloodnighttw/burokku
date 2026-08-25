@@ -125,14 +125,32 @@ impl<W> PresentedFrame<W> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentationState {
+    active_renderer_has_presented: bool,
+    usable_frame: bool,
+}
+
+fn presentation_state<W: Eq>(
+    frame: Option<&PresentedFrame<W>>,
+    active_surface: Option<&PresentedSurface<W>>,
+    last_presented_revision: Option<u64>,
+) -> PresentationState {
+    PresentationState {
+        active_renderer_has_presented: last_presented_revision.is_some(),
+        usable_frame: frame.is_some_and(|frame| {
+            active_surface == Some(&frame.surface)
+                && last_presented_revision == Some(frame.revision())
+        }),
+    }
+}
+
 fn presented_frame_is_usable<W: Eq>(
     frame: Option<&PresentedFrame<W>>,
     active_surface: Option<&PresentedSurface<W>>,
     last_presented_revision: Option<u64>,
 ) -> bool {
-    frame.is_some_and(|frame| {
-        active_surface == Some(&frame.surface) && last_presented_revision == Some(frame.revision())
-    })
+    presentation_state(frame, active_surface, last_presented_revision).usable_frame
 }
 
 type GraphicsInitialization = Result<(GraphicsContext, WindowRenderer), GraphicsError>;
@@ -520,22 +538,23 @@ impl ApplicationHost {
                 physical_size: renderer.physical_size(),
                 generation: renderer.surface_generation(),
             });
-        let has_presented_frame = presented_frame_is_usable(
+        let presentation = presentation_state(
             self.presented.as_ref(),
             active_surface.as_ref(),
             renderer.last_presented_revision(),
         );
-        if !has_presented_frame {
+        if !presentation.usable_frame {
             self.presented = None;
             self.cursor_target = None;
         }
         if let Err(error) = resize_result {
             return Err(classify_resize_failure(
                 revision,
-                has_presented_frame,
+                presentation.active_renderer_has_presented,
                 error,
             ));
         }
+        let has_presented_frame = presentation.usable_frame;
         if physical_size.width == 0 || physical_size.height == 0 {
             return Ok(PresentationOutcome::Occluded);
         }
@@ -668,17 +687,21 @@ impl ApplicationHandler for ApplicationHost {
                     physical_size: renderer.physical_size(),
                     generation: renderer.surface_generation(),
                 });
-                let has_presented_frame = presented_frame_is_usable(
+                let presentation = presentation_state(
                     self.presented.as_ref(),
                     active_surface.as_ref(),
                     renderer.last_presented_revision(),
                 );
-                if !has_presented_frame {
+                if !presentation.usable_frame {
                     self.presented = None;
                     self.cursor_target = None;
                 }
                 if let Err(error) = resize_result {
-                    let failure = classify_resize_failure(revision, has_presented_frame, error);
+                    let failure = classify_resize_failure(
+                        revision,
+                        presentation.active_renderer_has_presented,
+                        error,
+                    );
                     self.handle_redraw_failure(event_loop, failure);
                     return;
                 }
@@ -790,13 +813,13 @@ fn classify_fatal_failure(
 
 fn classify_resize_failure(
     revision: u64,
-    has_presented_frame: bool,
+    active_renderer_has_presented: bool,
     error: GraphicsError,
 ) -> RedrawFailure {
     if matches!(&error, GraphicsError::TargetTooLarge { .. }) {
         classify_candidate_failure(
             revision,
-            has_presented_frame,
+            active_renderer_has_presented,
             FailureKind::TargetTooLarge,
             FrameStage::Resize,
             error.into(),
@@ -1040,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_resize_is_recoverable_only_with_a_presented_frame() {
+    fn oversized_resize_is_recoverable_only_after_the_active_renderer_presented() {
         assert!(matches!(
             classify_resize_failure(42, false, oversized_target()),
             RedrawFailure::Fatal(HostError::Graphics(GraphicsError::TargetTooLarge { .. }))
@@ -1051,6 +1074,48 @@ mod tests {
             failure,
             RedrawFailure::Recoverable(FrameFailure {
                 revision: 42,
+                stage: FrameStage::Resize,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn oversized_native_size_keeps_renderer_recovery_state_without_a_usable_frame() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let plan = scene_plan(&dom);
+        let revision = plan.revision();
+        let surface = test_surface(1, PhysicalSize::new(320, 240), 1);
+        let presented = PresentedFrame { plan, surface };
+
+        let matching = presentation_state(Some(&presented), Some(&surface), Some(revision));
+        assert_eq!(
+            matching,
+            PresentationState {
+                active_renderer_has_presented: true,
+                usable_frame: true,
+            }
+        );
+
+        // `WindowRenderer::resize` rejects the oversized native size before
+        // changing this retained surface or its presentation history.
+        let oversized = presentation_state(Some(&presented), None, Some(revision));
+        assert_eq!(
+            oversized,
+            PresentationState {
+                active_renderer_has_presented: true,
+                usable_frame: false,
+            }
+        );
+        assert!(matches!(
+            classify_resize_failure(
+                revision,
+                oversized.active_renderer_has_presented,
+                oversized_target(),
+            ),
+            RedrawFailure::Recoverable(FrameFailure {
                 stage: FrameStage::Resize,
                 ..
             })
