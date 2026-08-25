@@ -33,6 +33,20 @@ pub trait Plugin: Send + 'static {
 
     /// Install the plugin in a newly created QuickJS context.
     fn install<'js>(&self, context: &Ctx<'js>) -> Result<()>;
+
+    /// Run after one macrotask and all currently ready QuickJS microtasks.
+    ///
+    /// Checkpoints must be short and synchronous. They run even when the
+    /// macrotask returned a JavaScript error. This callback intentionally does
+    /// not receive a QuickJS [`Ctx`]: it must not execute JavaScript or schedule
+    /// QuickJS microtasks. Deferred JavaScript work must be submitted as a
+    /// future macrotask through [`crate::MacrotaskQueue`].
+    ///
+    /// This lifecycle method is specified for the DOM plugin, which commits
+    /// pending staging DOM mutations for main-thread consumption.
+    fn checkpoint(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl<F> Plugin for F

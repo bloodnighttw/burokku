@@ -4,7 +4,9 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
-use crate::{Error, Window, WindowAttributes, WindowEvent, WindowId};
+use crate::{
+    event_loop::EventLoopWaker, Error, LogicalSize, Window, WindowAttributes, WindowEvent, WindowId,
+};
 
 pub(crate) struct PlatformEventLoop;
 
@@ -13,7 +15,11 @@ impl PlatformEventLoop {
         Err(Error::UnsupportedPlatform)
     }
 
-    pub(crate) fn create_window(&mut self, _attributes: WindowAttributes) -> crate::Result<Window> {
+    pub(crate) fn create_window(
+        &self,
+        _attributes: WindowAttributes,
+        _event_loop_waker: EventLoopWaker,
+    ) -> crate::Result<Window> {
         Err(Error::UnsupportedPlatform)
     }
 
@@ -21,7 +27,9 @@ impl PlatformEventLoop {
 
     pub(crate) fn clear_handler(&self) {}
 
-    pub(crate) fn pump(&mut self) {}
+    pub(crate) fn flush_windows(&self) {}
+
+    pub(crate) fn pump(&self) {}
 }
 
 pub(crate) struct PlatformWindow;
@@ -30,6 +38,10 @@ impl PlatformWindow {
     pub(crate) fn request_redraw(&self) {}
 
     pub(crate) fn set_title(&self, _title: &str) {}
+
+    pub(crate) fn set_inner_size(&self, _size: LogicalSize<f64>) {}
+
+    pub(crate) fn close(&self) {}
 }
 
 impl HasWindowHandle for PlatformWindow {

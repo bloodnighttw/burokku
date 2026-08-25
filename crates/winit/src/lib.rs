@@ -19,7 +19,7 @@ pub mod application {
 
 pub use dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 pub use event::{ElementState, KeyEvent, Modifiers, MouseButton, WindowEvent};
-pub use event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+pub use event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 pub use raw_window_handle;
 pub use window::{Window, WindowAttributes, WindowId};
 
@@ -30,6 +30,8 @@ pub enum Error {
     NotMainThread,
     #[error("the event loop has already been run")]
     AlreadyRun,
+    #[error("the active event loop is no longer available")]
+    EventLoopUnavailable,
     #[error("window creation failed: {0}")]
     WindowCreation(String),
     #[error("burokku-winit does not support this platform yet")]

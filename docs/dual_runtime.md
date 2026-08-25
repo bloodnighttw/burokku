@@ -158,6 +158,13 @@ No standard plugin is installed implicitly. Capabilities such as `console`,
 `JSON`, and timers must be selected using `ConsolePlugin`, `JsonPlugin`, and
 `TimersPlugin` respectively.
 
+After each macrotask and its ready QuickJS microtasks, the runtime invokes every
+plugin's `checkpoint()` callback. The callback intentionally receives no
+QuickJS `Ctx`: checkpoint code must not execute JavaScript or schedule QuickJS
+microtasks. A plugin that needs deferred JavaScript work must submit a future
+macrotask through `MacrotaskQueue`. This keeps checkpoints suitable for final
+native commits such as immutable DOM publication.
+
 ## Cross-runtime communication
 
 Use `bridge_channel()` to create a bounded, typed, bidirectional channel:
@@ -196,7 +203,7 @@ For a UI engine, bridge messages will typically include stable IDs and
 revisions:
 
 ```text
-Background -> Main: Commit { document_id, revision, mutations }
+Background -> Main: Commit { app_id, revision, mutations }
 Main -> Background: Event { window_id, target_id, revision, payload }
 ```
 
