@@ -1,4 +1,4 @@
-use crate::{Plugin, Result};
+use crate::{JsOptions, Plugin, Result};
 use rquickjs::{
     function::{Args, Opt},
     Coerced, Ctx, Function, Object, Value,
@@ -87,7 +87,7 @@ fn stringify_json<'js>(
     value: Opt<Value<'js>>,
     replacer: Opt<Value<'js>>,
     space: Opt<Value<'js>>,
-) -> Result<Option<rquickjs::String<'js>>> {
+) -> Result<JsOptions<rquickjs::String<'js>>> {
     let value = value
         .0
         .unwrap_or_else(|| Value::new_undefined(context.clone()));
@@ -98,7 +98,12 @@ fn stringify_json<'js>(
         .0
         .unwrap_or_else(|| Value::new_undefined(context.clone()));
 
-    context.json_stringify_replacer_space(value, replacer, space)
+    Ok(
+        match context.json_stringify_replacer_space(value, replacer, space)? {
+            Some(json) => JsOptions::Some(json),
+            None => JsOptions::Undefined,
+        },
+    )
 }
 
 #[cfg(test)]

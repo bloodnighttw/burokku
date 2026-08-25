@@ -1,17 +1,17 @@
 //! macOS implementation backed by AppKit.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     ptr::NonNull,
     rc::Rc,
     sync::{atomic::Ordering, Arc, Weak},
 };
 
-use crate::window::WindowState;
+use crate::{event_loop::EventLoopWaker, window::WindowState};
 use crate::{
-    ElementState, Error, KeyEvent, Modifiers, MouseButton, PhysicalPosition, PhysicalSize, Window,
-    WindowAttributes, WindowEvent, WindowId,
+    ElementState, Error, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition,
+    PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId,
 };
 use dispatch2::MainThreadBound;
 use objc2::{
@@ -294,7 +294,13 @@ impl EventDispatcher {
         };
 
         handler(event.window_id, event.event);
-        while let Some(event) = self.pending.borrow_mut().pop_front() {
+        loop {
+            // Release the pending queue borrow before application code runs;
+            // the handler can synchronously trigger another AppKit callback.
+            let event = self.pending.borrow_mut().pop_front();
+            let Some(event) = event else {
+                break;
+            };
             handler(event.window_id, event.event);
         }
 
@@ -356,18 +362,26 @@ impl PlatformWindow {
     }
 
     pub(crate) fn set_title(&self, title: &str) {
-        let mtm =
-            MainThreadMarker::new().expect("Window::set_title must be called on the main thread");
-        self.inner
-            .get(mtm)
-            .window
-            .setTitle(&NSString::from_str(title));
+        self.inner.get_on_main(|inner| {
+            inner.window.setTitle(&NSString::from_str(title));
+        });
     }
 
     pub(crate) fn request_redraw(&self) {
-        let mtm = MainThreadMarker::new()
-            .expect("Window::request_redraw must be called on the main thread");
-        self.inner.get(mtm).view.setNeedsDisplay(true);
+        self.inner
+            .get_on_main(|inner| inner.view.setNeedsDisplay(true));
+    }
+
+    pub(crate) fn set_inner_size(&self, size: LogicalSize<f64>) {
+        self.inner.get_on_main(|inner| {
+            inner
+                .window
+                .setContentSize(NSSize::new(size.width, size.height));
+        });
+    }
+
+    pub(crate) fn close(&self) {
+        self.inner.get_on_main(|inner| inner.window.close());
     }
 }
 
@@ -394,28 +408,36 @@ pub(crate) struct PlatformEventLoop {
     app: Retained<NSApplication>,
     mtm: MainThreadMarker,
     dispatcher: Rc<EventDispatcher>,
-    windows: HashMap<isize, Weak<WindowState>>,
-    next_window_id: u64,
+    windows: RefCell<HashMap<isize, Weak<WindowState>>>,
+    next_window_id: Cell<u64>,
 }
 
 impl PlatformEventLoop {
     pub(crate) fn new() -> crate::Result<Self> {
         let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
         let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         app.finishLaunching();
-        app.activate();
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        // Command-line binaries have no application bundle to activate them.
+        // Match winit's default behavior and bring the first native Window in
+        // front of the launching terminal.
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
 
         Ok(Self {
             app,
             mtm,
             dispatcher: Rc::new(EventDispatcher::default()),
-            windows: HashMap::new(),
-            next_window_id: 1,
+            windows: RefCell::new(HashMap::new()),
+            next_window_id: Cell::new(1),
         })
     }
 
-    pub(crate) fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
+    pub(crate) fn create_window(
+        &self,
+        attributes: WindowAttributes,
+        event_loop_waker: EventLoopWaker,
+    ) -> crate::Result<Window> {
         if !(attributes.inner_size.width.is_finite()
             && attributes.inner_size.height.is_finite()
             && attributes.inner_size.width > 0.0
@@ -451,8 +473,9 @@ impl PlatformEventLoop {
         // release-on-close while Rust retains the object.
         unsafe { native_window.setReleasedWhenClosed(false) };
 
-        let id = WindowId(self.next_window_id);
-        self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
+        let id = WindowId(self.next_window_id.get());
+        self.next_window_id
+            .set(self.next_window_id.get().wrapping_add(1).max(1));
         let scale_factor = native_window.backingScaleFactor();
         let state = Arc::new(WindowState::new(
             id,
@@ -461,6 +484,7 @@ impl PlatformEventLoop {
                 physical_dimension(attributes.inner_size.height, scale_factor),
             ),
             scale_factor,
+            event_loop_waker,
         ));
 
         native_window.setTitle(&NSString::from_str(&attributes.title));
@@ -483,9 +507,12 @@ impl PlatformEventLoop {
         let delegate = WindowDelegate::new(self.mtm, state.clone(), self.dispatcher.clone());
         native_window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         native_window.center();
+        #[allow(deprecated)]
+        self.app.activateIgnoringOtherApps(true);
         native_window.makeKeyAndOrderFront(None);
 
         self.windows
+            .borrow_mut()
             .insert(native_window.windowNumber(), Arc::downgrade(&state));
 
         Ok(Window {
@@ -502,7 +529,11 @@ impl PlatformEventLoop {
         self.dispatcher.clear_handler();
     }
 
-    pub(crate) fn pump(&mut self) {
+    pub(crate) fn flush_windows(&self) {
+        autoreleasepool(|_| self.app.updateWindows());
+    }
+
+    pub(crate) fn pump(&self) {
         for _ in 0..MAX_NATIVE_EVENTS_PER_TICK {
             let Some(mapped) = autoreleasepool(|_| {
                 let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
@@ -528,23 +559,33 @@ impl PlatformEventLoop {
 
         autoreleasepool(|_| self.app.updateWindows());
 
-        let dispatcher = self.dispatcher.clone();
-        self.windows.retain(|_, state| {
-            let Some(state) = state.upgrade() else {
-                return false;
-            };
-            if state.redraw_requested.swap(false, Ordering::AcqRel) {
-                dispatcher.dispatch(NativeEvent {
-                    window_id: state.id,
-                    event: WindowEvent::RedrawRequested,
-                });
-            }
-            true
-        });
+        let redraws = {
+            let mut redraws = Vec::new();
+            self.windows.borrow_mut().retain(|_, state| {
+                let Some(state) = state.upgrade() else {
+                    return false;
+                };
+                if state.redraw_requested.swap(false, Ordering::AcqRel) {
+                    redraws.push(NativeEvent {
+                        window_id: state.id,
+                        event: WindowEvent::RedrawRequested,
+                    });
+                }
+                true
+            });
+            redraws
+        };
+        for event in redraws {
+            self.dispatcher.dispatch(event);
+        }
     }
 
     fn map_event(&self, event: &NSEvent) -> Option<(WindowId, WindowEvent)> {
-        let state = self.windows.get(&event.windowNumber())?.upgrade()?;
+        let state = self
+            .windows
+            .borrow()
+            .get(&event.windowNumber())?
+            .upgrade()?;
         let event_type = event.r#type();
         let modifiers = modifiers(event.modifierFlags());
 
@@ -593,12 +634,14 @@ impl PlatformEventLoop {
                     ElementState::Released
                 },
                 button: mouse_button(event.buttonNumber()),
+                position: cursor_position(event, &state),
             }
         } else if event_type == NSEventType::ScrollWheel {
             WindowEvent::MouseWheel {
                 delta_x: event.scrollingDeltaX(),
                 delta_y: event.scrollingDeltaY(),
                 precise: event.hasPreciseScrollingDeltas(),
+                position: cursor_position(event, &state),
             }
         } else {
             return None;
@@ -658,6 +701,42 @@ mod tests {
                 WindowId(7),
                 WindowEvent::Resized(PhysicalSize::new(1024, 768))
             )]
+        );
+    }
+
+    #[test]
+    fn nested_native_events_dispatch_after_the_active_handler_returns() {
+        let dispatcher = Rc::new(EventDispatcher::default());
+        let received = Rc::new(RefCell::new(Vec::new()));
+        dispatcher.set_handler(Box::new({
+            let dispatcher = Rc::clone(&dispatcher);
+            let received = Rc::clone(&received);
+            move |window_id, event| {
+                let emit_nested = matches!(event, WindowEvent::Focused(true));
+                received.borrow_mut().push((window_id, event));
+                if emit_nested {
+                    dispatcher.dispatch(NativeEvent {
+                        window_id,
+                        event: WindowEvent::Resized(PhysicalSize::new(1024, 768)),
+                    });
+                }
+            }
+        }));
+
+        dispatcher.dispatch(NativeEvent {
+            window_id: WindowId(7),
+            event: WindowEvent::Focused(true),
+        });
+
+        assert_eq!(
+            *received.borrow(),
+            [
+                (WindowId(7), WindowEvent::Focused(true)),
+                (
+                    WindowId(7),
+                    WindowEvent::Resized(PhysicalSize::new(1024, 768))
+                )
+            ]
         );
     }
 }

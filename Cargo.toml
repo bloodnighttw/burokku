@@ -1,7 +1,10 @@
 [workspace]
 members = [
-    "crates/runtime",
-    "crates/winit",
-    "crates/burokku"
+    "crates/*",
+    "example/*",
 ]
 resolver = "2"
+
+# Performance counters are debug-only, including in optimized benchmarks.
+[profile.bench]
+debug-assertions = true

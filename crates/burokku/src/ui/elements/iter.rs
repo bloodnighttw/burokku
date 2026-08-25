@@ -1,168 +1,110 @@
 use std::iter::FusedIterator;
 
-use super::Elements;
+use super::{Dom, NodeId, NodeKind};
 
-/// A pre-order iterator over an element tree.
+/// A pre-order iterator over the reachable nodes in a [`Dom`].
 ///
-/// Children that are not valid for their parent element are skipped together
-/// with their descendants. Traversal stores one child iterator per ancestor,
-/// so its auxiliary memory usage is proportional to the tree's depth rather
-/// than its width.
-pub struct ElementsIter<'a> {
-    root: Option<&'a Elements>,
-    ancestors: Vec<Children<'a>>,
+/// Each item includes its stable [`NodeId`], which callers may retain after the
+/// borrowed node-kind reference expires. Detached nodes are not visited.
+pub struct DomIter<'a> {
+    dom: &'a Dom,
+    pending: Vec<NodeId>,
 }
 
-struct Children<'a> {
-    parent: &'a Elements,
-    children: std::slice::Iter<'a, Elements>,
-    accepted: usize,
-}
-
-impl<'a> ElementsIter<'a> {
-    pub(super) fn new(root: &'a Elements) -> Self {
+impl<'a> DomIter<'a> {
+    pub(super) fn new(dom: &'a Dom) -> Self {
         Self {
-            root: Some(root),
-            ancestors: Vec::new(),
+            dom,
+            pending: vec![dom.root()],
         }
     }
 }
 
-impl<'a> Iterator for ElementsIter<'a> {
-    type Item = &'a Elements;
+impl<'a> Iterator for DomIter<'a> {
+    type Item = (NodeId, &'a NodeKind);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let element = if let Some(root) = self.root.take() {
-            root
-        } else {
-            loop {
-                let ancestor = self.ancestors.last_mut()?;
-                let parent = ancestor.parent;
-
-                // Multiple windows are not supported yet, so an App's
-                // traversal stops after its first valid Window child.
-                if matches!(parent, Elements::App { .. }) && ancestor.accepted == 1 {
-                    self.ancestors.pop();
-                    continue;
-                }
-
-                if let Some(child) = ancestor.children.find(|child| accepts_child(parent, child)) {
-                    ancestor.accepted += 1;
-                    break child;
-                }
-
-                self.ancestors.pop();
-            }
-        };
-
-        if let Some(children) = element.children() {
-            self.ancestors.push(Children {
-                parent: element,
-                children: children.iter(),
-                accepted: 0,
-            });
-        }
-
-        Some(element)
+        let id = self.pending.pop()?;
+        let node = self
+            .dom
+            .node(id)
+            .expect("reachable DOM relationships only contain live nodes");
+        self.pending.extend(node.children().iter().rev().copied());
+        Some((id, node.kind()))
     }
 }
 
-impl FusedIterator for ElementsIter<'_> {}
-
-fn accepts_child(parent: &Elements, child: &Elements) -> bool {
-    match parent {
-        Elements::App { .. } => matches!(child, Elements::Window { .. }),
-        Elements::Window { .. }
-        | Elements::Div { .. }
-        | Elements::Flex { .. }
-        | Elements::Grid { .. } => matches!(
-            child,
-            Elements::Div { .. }
-                | Elements::Flex { .. }
-                | Elements::Grid { .. }
-                | Elements::Text { .. }
-        ),
-        Elements::Text { .. } => {
-            matches!(child, Elements::Text { .. } | Elements::_String { .. })
-        }
-        Elements::_String { .. } => false,
-    }
-}
+impl FusedIterator for DomIter<'_> {}
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DomError, Element};
     use super::*;
 
     #[test]
-    fn iterates_valid_elements_in_pre_order_and_skips_invalid_subtrees() {
-        let tree = Elements::App {
-            children: vec![
-                Elements::Div {
-                    children: vec![Elements::Window { children: vec![] }],
-                },
-                Elements::Window {
-                    children: vec![
-                        Elements::_String {
-                            string: "invalid window child".into(),
-                        },
-                        Elements::Text {
-                            children: vec![
-                                Elements::_String {
-                                    string: "valid text child".into(),
-                                },
-                                Elements::Div { children: vec![] },
-                                Elements::Text { children: vec![] },
-                            ],
-                        },
-                        Elements::Window {
-                            children: vec![Elements::Div { children: vec![] }],
-                        },
-                        Elements::Div { children: vec![] },
-                    ],
-                },
-            ],
-        };
+    fn iterates_reachable_nodes_in_pre_order_with_stable_ids() {
+        let mut dom = Dom::new();
+        let detached = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let window = dom.create_element(Element::Window {
+            style: Box::default(),
+        });
+        let text_element = dom.create_element(Element::Text {
+            style: Box::default(),
+        });
+        let text_node = dom.create_text("content");
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
 
-        let mut elements = tree.iter();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, text_element).unwrap();
+        dom.append_child(text_element, text_node).unwrap();
+        dom.append_child(window, div).unwrap();
 
-        assert!(matches!(elements.next(), Some(Elements::App { .. })));
-        assert!(matches!(elements.next(), Some(Elements::Window { .. })));
-        assert!(matches!(elements.next(), Some(Elements::Text { .. })));
-        assert!(matches!(elements.next(), Some(Elements::_String { .. })));
-        assert!(matches!(elements.next(), Some(Elements::Text { .. })));
-        assert!(matches!(elements.next(), Some(Elements::Div { .. })));
-        assert!(elements.next().is_none());
-        assert!(elements.next().is_none());
+        let nodes: Vec<_> = dom.iter().collect();
+
+        assert_eq!(
+            nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![dom.root(), window, text_element, text_node, div]
+        );
+        assert!(!nodes.iter().any(|(id, _)| *id == detached));
+        assert!(matches!(nodes[0].1, NodeKind::App));
+        assert!(matches!(
+            nodes[1].1,
+            NodeKind::Element(Element::Window { .. })
+        ));
+        assert!(matches!(
+            nodes[2].1,
+            NodeKind::Element(Element::Text { .. })
+        ));
+        assert!(matches!(nodes[3].1, NodeKind::Text(text) if text == "content"));
+        assert!(matches!(nodes[4].1, NodeKind::Element(Element::Div { .. })));
     }
 
     #[test]
-    fn borrowed_element_implements_into_iterator() {
-        let tree = Elements::Div {
-            children: vec![Elements::Text { children: vec![] }],
-        };
+    fn borrowed_dom_implements_into_iterator() {
+        let dom = Dom::new();
 
-        assert_eq!((&tree).into_iter().count(), 2);
+        assert_eq!((&dom).into_iter().count(), 1);
     }
 
     #[test]
-    fn app_traverses_only_the_first_valid_window() {
-        let tree = Elements::App {
-            children: vec![
-                Elements::Div { children: vec![] },
-                Elements::Window {
-                    children: vec![Elements::Text { children: vec![] }],
-                },
-                Elements::Window {
-                    children: vec![Elements::Div { children: vec![] }],
-                },
-            ],
-        };
+    fn app_can_only_have_one_window() {
+        let mut dom = Dom::new();
+        let first = dom.create_element(Element::Window {
+            style: Box::default(),
+        });
+        let second = dom.create_element(Element::Window {
+            style: Box::default(),
+        });
+        dom.append_child(dom.root(), first).unwrap();
 
-        let elements: Vec<_> = tree.iter().collect();
-
-        assert_eq!(elements.len(), 3);
-        assert!(matches!(elements[0], Elements::App { .. }));
-        assert!(matches!(elements[1], Elements::Window { .. }));
-        assert!(matches!(elements[2], Elements::Text { .. }));
+        assert_eq!(
+            dom.append_child(dom.root(), second),
+            Err(DomError::AppAlreadyHasWindow)
+        );
+        assert_eq!(dom.iter().count(), 2);
     }
 }

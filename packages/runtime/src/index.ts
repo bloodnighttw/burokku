@@ -1,127 +1,213 @@
-export type BurokkuStyle = Partial<{
-  display: "block" | "flex" | "grid" | "none";
-  overflow: "visible" | "hidden" | "clip" | "auto" | "scroll";
-  overflowX: "visible" | "hidden" | "clip" | "auto" | "scroll";
-  overflowY: "visible" | "hidden" | "clip" | "auto" | "scroll";
-  position: "static" | "relative" | "absolute" | "fixed";
-  top: number | string;
-  right: number | string;
-  bottom: number | string;
-  left: number | string;
-  flexDirection: "row" | "column";
-  width: number | string;
-  height: number | string;
-  minWidth: number | string;
-  minHeight: number | string;
-  maxWidth: number | string;
-  maxHeight: number | string;
+export type BurokkuTagName = "div" | "flex" | "grid" | "text" | "window";
+
+export type BurokkuEventListener = (event: unknown) => void;
+
+/** Shared behavior implemented by every Burokku-native node wrapper. */
+export interface Node<AllowedChild = never> {
+  readonly parentNode: BurokkuNode | null;
+  readonly childNodes: readonly AllowedChild[];
+  readonly firstChild: AllowedChild | null;
+  readonly lastChild: AllowedChild | null;
+  readonly nextSibling: BurokkuNode | null;
+  readonly previousSibling: BurokkuNode | null;
+  readonly isConnected: boolean;
+  readonly textContent: string;
+  readonly nodeValue: string | null;
+
+  appendChild<Child extends AllowedChild>(child: Child): Child;
+  insertBefore<Child extends AllowedChild>(
+    child: Child,
+    reference: AllowedChild | null,
+  ): Child;
+  removeChild<Child extends AllowedChild>(child: Child): Child;
+  replaceChild<OldChild extends AllowedChild>(
+    newChild: AllowedChild,
+    oldChild: OldChild,
+  ): OldChild;
+  contains(other: BurokkuNode): boolean;
+  addEventListener(type: string, callback: BurokkuEventListener): void;
+  removeEventListener(type: string, callback: BurokkuEventListener): void;
+}
+
+/** The permanent, host-created application mount root. */
+export interface AppNode extends Node<WindowElement> {
+  createElement<Tag extends BurokkuTagName>(tag: Tag): BurokkuElement<Tag>;
+  createTextNode(data: string): TextNode;
+}
+
+/** A raw DOM text node, distinct from the styled `text` element. */
+export interface TextNode extends Node<never> {
+  data: string;
+  textContent: string;
+  nodeValue: string;
+}
+
+/** The native style declaration exposed by a Burokku element. */
+export interface BurokkuStyleDeclaration {
+  supportsProperty(name: string): boolean;
+  setProperty(name: string, value: string): void;
+  removeProperty(name: string): void;
+}
+
+/** Shared behavior for script-creatable Burokku elements. */
+export interface Element<
+  Tag extends BurokkuTagName = BurokkuTagName,
+  AllowedChild = BurokkuContainerChild,
+> extends Node<AllowedChild> {
+  readonly localName: Tag;
+  readonly style: BurokkuStyleDeclaration;
+
+  getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+  setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
+}
+
+export interface DivElement extends Element<"div"> {}
+export interface FlexElement extends Element<"flex"> {}
+export interface GridElement extends Element<"grid"> {}
+export interface TextElement extends Element<"text", BurokkuTextChild> {
+  textContent: string;
+}
+export interface WindowElement extends Element<"window"> {}
+
+/** Element children accepted by window and ordinary layout containers. */
+export type BurokkuContainerChild =
+  | DivElement
+  | FlexElement
+  | GridElement
+  | TextElement;
+
+/** Children accepted by a styled text element. */
+export type BurokkuTextChild = TextNode | TextElement;
+
+/** Any node exposed by the Burokku-native facade. */
+export type BurokkuNode = AppNode | TextNode | BurokkuElement;
+
+export interface BurokkuElementTagNameMap {
+  div: DivElement;
+  flex: FlexElement;
+  grid: GridElement;
+  text: TextElement;
+  window: WindowElement;
+}
+
+export type BurokkuElement<
+  Tag extends BurokkuTagName = BurokkuTagName,
+> = BurokkuElementTagNameMap[Tag];
+
+export type BurokkuDimension = "auto" | `${number}px` | `${number}%`;
+export type BurokkuLength = `${number}px` | `${number}%`;
+/** A CSS hexadecimal color: #rgb, #rgba, #rrggbb, or #rrggbbaa. */
+export type BurokkuColor = `#${string}`;
+
+export type BurokkuItemStyle = Partial<{
+  flexBasis: BurokkuDimension;
   flexGrow: number;
   flexShrink: number;
-  gap: number | string;
-  gridTemplateColumns: string;
-  gridTemplateRows: string;
-  gridColumn: string;
+  alignSelf: "auto" | "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  justifySelf: "auto" | "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
   gridRow: string;
-  padding: number | string;
-  margin: number | string;
-  marginTop: number | string;
-  marginRight: number | string;
-  marginBottom: number | string;
-  marginLeft: number | string;
-  backgroundColor: string;
-  backgroundImage: string;
-  color: string;
-  opacity: number | string;
-  transform: string;
-  boxShadow: string;
-  textShadow: string;
-  borderColor: string;
-  borderWidth: number | string;
-  borderRadius: number | string;
-  outlineColor: string;
-  outlineWidth: number | string;
-  outlineOffset: number | string;
-  fontSize: number | string;
-  lineHeight: number | string;
-  fontWeight: number | "normal" | "bold";
-  fontFamily: string;
-  fontStyle: "normal" | "italic" | "oblique";
-  textAlign: "start" | "end" | "left" | "right" | "center" | "justify";
-  letterSpacing: number | string;
-  wordSpacing: number | string;
-  textDecoration: string;
-  textDecorationLine: "none" | string;
-  textDecorationColor: string;
-  whiteSpace: "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces";
-  overflowWrap: "normal" | "break-word" | "anywhere";
-  wordWrap: "normal" | "break-word" | "anywhere";
-  wordBreak: "normal" | "break-all" | "keep-all";
+  gridRowStart: string;
+  gridRowEnd: string;
+  gridColumn: string;
+  gridColumnStart: string;
+  gridColumnEnd: string;
 }>;
 
-export type HostProps = Record<string, unknown> & {
-  children?: unknown;
-  style?: BurokkuStyle;
-};
+/** Box and item styles shared by div, flex, grid, and text elements. */
+export type BurokkuCommonStyle = BurokkuItemStyle & Partial<{
+  width: BurokkuDimension;
+  height: BurokkuDimension;
+  padding: BurokkuLength;
+  margin: BurokkuLength;
+  backgroundColor: BurokkuColor;
+}>;
 
-const eventName = (name: string): string => name.slice(2).toLowerCase();
-const cssName = (name: string): string =>
-  name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+type BurokkuFlexContainerStyle = Partial<{
+  flexDirection: "row" | "row-reverse" | "column" | "column-reverse";
+  flexWrap: "nowrap" | "wrap" | "wrap-reverse";
+  gap: BurokkuLength;
+  columnGap: BurokkuLength;
+  rowGap: BurokkuLength;
+  alignContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  alignItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  justifyContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+}>;
 
-export function setStyles(
-  element: HTMLElement,
-  previous: BurokkuStyle | undefined,
-  next: BurokkuStyle | undefined,
+type BurokkuGridContainerStyle = Partial<{
+  gap: BurokkuLength;
+  columnGap: BurokkuLength;
+  rowGap: BurokkuLength;
+  alignContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  alignItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  justifyContent: "start" | "end" | "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+  justifyItems: "start" | "end" | "flex-start" | "flex-end" | "center" | "baseline" | "stretch";
+  gridAutoFlow: "row" | "column" | "row dense" | "column dense" | "dense";
+}>;
+
+type BurokkuTypographyStyle = Partial<{
+  fontFamily: string;
+  fontSize: `${number}px`;
+  fontWeight: number | "normal" | "bold";
+  color: BurokkuColor;
+  lineHeight: "normal" | number | `${number}px`;
+  textWrap: "wrap" | "nowrap";
+}>;
+
+type BurokkuWindowStyleProperties = Partial<{
+  width: BurokkuDimension;
+  height: BurokkuDimension;
+  backgroundColor: BurokkuColor;
+}>;
+
+type BurokkuAllStyle = BurokkuCommonStyle &
+  BurokkuFlexContainerStyle &
+  BurokkuGridContainerStyle &
+  BurokkuTypographyStyle;
+
+type BurokkuStyleFor<Style> = Style & Partial<
+  Record<Exclude<keyof BurokkuAllStyle, keyof Style>, never>
+>;
+
+export type BurokkuDivStyle = BurokkuStyleFor<BurokkuCommonStyle>;
+export type BurokkuFlexStyle = BurokkuStyleFor<
+  BurokkuCommonStyle & BurokkuFlexContainerStyle
+>;
+export type BurokkuGridStyle = BurokkuStyleFor<
+  BurokkuCommonStyle & BurokkuGridContainerStyle
+>;
+export type BurokkuTextStyle = BurokkuStyleFor<
+  BurokkuCommonStyle & BurokkuTypographyStyle
+>;
+export type BurokkuWindowStyle = BurokkuStyleFor<BurokkuWindowStyleProperties>;
+
+/** Native styles supported by each Burokku element tag. */
+export interface BurokkuElementStyleMap {
+  div: BurokkuDivStyle;
+  flex: BurokkuFlexStyle;
+  grid: BurokkuGridStyle;
+  text: BurokkuTextStyle;
+  window: BurokkuWindowStyle;
+}
+
+/** Native styles supported by a Burokku element tag. */
+export type BurokkuStyle<Tag extends BurokkuTagName = BurokkuTagName> =
+  BurokkuElementStyleMap[Tag];
+
+/** Apply native styles supported by the element's tag. */
+export function setStyles<ElementType extends BurokkuElement>(
+  element: ElementType,
+  styles: Readonly<BurokkuStyle<NoInfer<ElementType["localName"]>>>,
 ): void {
-  const names = new Set([
-    ...Object.keys(previous ?? {}),
-    ...Object.keys(next ?? {}),
-  ] as Array<keyof BurokkuStyle>);
-  const style = element.style as unknown as Record<string, unknown> & CSSStyleDeclaration;
-  for (const name of names) {
-    const oldValue = previous?.[name];
-    const value = next?.[name];
-    if (oldValue === value) continue;
-    if (value === undefined || value === null) style.removeProperty(cssName(name));
-    else style[name] = String(value);
+  for (const [name, value] of Object.entries(styles)) {
+    if (value === undefined) continue;
+    const nativeName = name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+    element.style.setProperty(nativeName, String(value));
   }
 }
 
-export function setProperty(
-  element: HTMLElement,
-  name: string,
-  value: unknown,
-  previous?: unknown,
-): void {
-  if (name === "children" || name === "ref" || name === "key") return;
-  if (name === "style") {
-    setStyles(element, previous as BurokkuStyle | undefined, value as BurokkuStyle | undefined);
-    return;
-  }
-  if (name.startsWith("on") && name.length > 2) {
-    const event = eventName(name);
-    if (typeof previous === "function") {
-      element.removeEventListener(event, previous as EventListener);
-    }
-    if (typeof value === "function") element.addEventListener(event, value as EventListener);
-    return;
-  }
-  if (name === "className") name = "class";
-  if (value === undefined || value === null || value === false) {
-    element.removeAttribute(name);
-  } else if (name in element && name !== "class") {
-    (element as unknown as Record<string, unknown>)[name] = value;
-  } else {
-    element.setAttribute(name, value === true ? "" : String(value));
-  }
-}
-
-export function updateProperties(
-  element: HTMLElement,
-  previous: HostProps,
-  next: HostProps,
-): void {
-  const names = new Set([...Object.keys(previous), ...Object.keys(next)]);
-  for (const name of names) {
-    if (previous[name] !== next[name]) setProperty(element, name, next[name], previous[name]);
-  }
+declare global {
+  /** The permanent Burokku application mount root. */
+  var app: AppNode;
 }
