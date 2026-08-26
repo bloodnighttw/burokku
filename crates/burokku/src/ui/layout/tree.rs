@@ -136,6 +136,12 @@ pub(super) fn compute_layout<M: TextMeasurer>(
         return Err(error);
     }
 
+    // CSS resolves percentage padding on every side against the containing
+    // block's inline size. Taffy's block algorithm currently overwrites child
+    // layout metadata after resolving vertical sides against the block's
+    // height, so normalize the completed boxes against their final parent width.
+    tree.normalize_percentage_padding(scratch.viewport.width())?;
+
     // Measurement callbacks are speculative and may be skipped by exact cache
     // hits. Resolve paint paragraphs only from the completed unrounded boxes.
     tree.resolve_final_paragraphs()
@@ -175,6 +181,46 @@ impl<M> DerivedLayoutTree<'_, M> {
 }
 
 impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
+    fn normalize_percentage_padding(
+        &mut self,
+        initial_containing_width: f32,
+    ) -> Result<(), LayoutError> {
+        let Some(root) = self.topology.root() else {
+            return Ok(());
+        };
+        let mut pending = vec![(root, initial_containing_width)];
+
+        while let Some((id, containing_width)) = pending.pop() {
+            let content_width = {
+                let state = self
+                    .nodes
+                    .get_mut(&id)
+                    .ok_or(LayoutError::MissingLayoutSidecar(id))?;
+                if state.style.display == Display::None {
+                    continue;
+                }
+                state.unrounded.padding = state
+                    .style
+                    .padding
+                    .resolve_or_zero(Some(containing_width), |_, _| 0.0);
+                state.unrounded.content_box_width()
+            };
+            let children = self
+                .topology
+                .children(id)
+                .ok_or(LayoutError::MissingLayoutNode(id))?;
+            pending.extend(
+                children
+                    .iter()
+                    .rev()
+                    .copied()
+                    .map(|child| (child, content_width)),
+            );
+        }
+
+        Ok(())
+    }
+
     fn compute_node_layout(
         &mut self,
         node_id: taffy::NodeId,
