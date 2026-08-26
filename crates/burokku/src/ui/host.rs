@@ -1,6 +1,6 @@
 //! Main-thread application handler that reconciles, lays out, paints, and presents.
 
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -255,7 +255,7 @@ impl ApplicationHost {
         event_loop: &ActiveEventLoop,
         revision: u64,
         dom_id: NodeId,
-        window: Arc<winit::Window>,
+        window: Rc<winit::Window>,
     ) {
         debug_assert!(self.graphics.is_none());
         debug_assert!(self.renderer.is_none());
@@ -264,7 +264,7 @@ impl ApplicationHost {
         let window_id = window.id();
         let proxy = event_loop.create_proxy();
         let (sender, result) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let task = tokio::task::spawn_local(async move {
             let initialized = GraphicsContext::for_window(window).await;
             let _ = sender.send(initialized);
             proxy.wake_up();
@@ -415,7 +415,7 @@ impl ApplicationHost {
                     event_loop,
                     revision,
                     native.dom_id(),
-                    Arc::clone(native.window()),
+                    Rc::clone(native.window()),
                 );
             }
             WindowChange::PreparedReplacement(prepared) => {
@@ -440,7 +440,7 @@ impl ApplicationHost {
                         event_loop,
                         revision,
                         native.dom_id(),
-                        Arc::clone(native.window()),
+                        Rc::clone(native.window()),
                     );
                 } else {
                     let graphics = self
@@ -448,7 +448,7 @@ impl ApplicationHost {
                         .as_ref()
                         .ok_or(HostError::MissingGraphicsContext)?;
                     let candidate_renderer =
-                        match WindowRenderer::new(graphics, Arc::clone(prepared.window())) {
+                        match WindowRenderer::new(graphics, Rc::clone(prepared.window())) {
                             Ok(renderer) => renderer,
                             Err(error) => {
                                 // `prepared` closes only the candidate on return. The

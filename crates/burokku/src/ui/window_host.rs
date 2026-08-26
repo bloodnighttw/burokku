@@ -1,6 +1,6 @@
 //! Native ownership for the single committed `<window>` element.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use thiserror::Error;
 use winit::{ActiveEventLoop, LogicalSize, Window, WindowAttributes, WindowId};
@@ -103,7 +103,7 @@ pub(crate) enum WindowChange {
 #[derive(Debug)]
 pub(crate) struct NativeWindow {
     spec: WindowSpec,
-    window: Arc<Window>,
+    window: Rc<Window>,
 }
 
 impl NativeWindow {
@@ -115,7 +115,7 @@ impl NativeWindow {
         self.window.id()
     }
 
-    pub(crate) fn window(&self) -> &Arc<Window> {
+    pub(crate) fn window(&self) -> &Rc<Window> {
         &self.window
     }
 
@@ -189,7 +189,7 @@ impl PreparedWindow {
         }
     }
 
-    pub(crate) fn window(&self) -> &Arc<Window> {
+    pub(crate) fn window(&self) -> &Rc<Window> {
         self.replacement.candidate().window()
     }
 
@@ -235,7 +235,7 @@ impl WindowManager {
                 Ok(WindowChange::Removed)
             }
             (None, Some(spec)) => {
-                let window = Arc::new(event_loop.create_window(spec.attributes())?);
+                let window = Rc::new(event_loop.create_window(spec.attributes())?);
                 self.current = Some(NativeWindow { spec, window });
                 Ok(WindowChange::Created)
             }
@@ -257,7 +257,7 @@ impl WindowManager {
                 // Keep the active native Window untouched until the host also
                 // creates a renderer for this candidate. Dropping an
                 // uncommitted candidate closes only that candidate.
-                let window = Arc::new(event_loop.create_window(spec.attributes())?);
+                let window = Rc::new(event_loop.create_window(spec.attributes())?);
                 Ok(WindowChange::PreparedReplacement(PreparedWindow::new(
                     NativeWindow { spec, window },
                 )))
