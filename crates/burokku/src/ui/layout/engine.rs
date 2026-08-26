@@ -744,6 +744,52 @@ mod tests {
     }
 
     #[test]
+    fn nested_block_vertical_percentage_padding_uses_outer_width() {
+        // <Div class="outer" style="width: 600px; height: 200px; background: yellow">
+        //   <Div class="inner" style="padding: 50% 20%; background: red">
+        //     <Text class="content" style="background: blue">hi</Text>
+        //   </Div>
+        // </Div>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let outer = element(&mut dom, ElementTag::Div);
+        let inner = element(&mut dom, ElementTag::Div);
+        let content = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("hi");
+        dom.set_style_property(outer, "width", "600px").unwrap();
+        dom.set_style_property(outer, "height", "200px").unwrap();
+        dom.set_style_property(outer, "background-color", "#ffff00")
+            .unwrap();
+        dom.set_style_property(inner, "padding", "50% 20%").unwrap();
+        dom.set_style_property(inner, "background-color", "#ff0000")
+            .unwrap();
+        dom.set_style_property(content, "background-color", "#0000ff")
+            .unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, outer).unwrap();
+        dom.append_child(outer, inner).unwrap();
+        dom.append_child(inner, content).unwrap();
+        dom.append_child(content, text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(800.0, 700.0))
+            .unwrap();
+        let inner_box = computed.box_for(inner).unwrap();
+        let layout = inner_box.layout();
+
+        assert_close(layout.padding.top, 300.0);
+        assert_close(layout.padding.bottom, 300.0);
+        assert_close(layout.padding.left, 120.0);
+        assert_close(layout.padding.right, 120.0);
+        assert_close(layout.size.height, 620.0);
+        assert_close(
+            inner_box.content_origin().y - inner_box.border_origin().y,
+            300.0,
+        );
+    }
+
+    #[test]
     fn grid_item_percentage_padding_keeps_grid_area_as_its_basis() {
         // <Window viewport="300px 200px">
         //   <Grid style="width: 200px; grid-template-columns: 50px 1fr">
