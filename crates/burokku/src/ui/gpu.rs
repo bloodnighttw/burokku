@@ -2,17 +2,15 @@
 
 use std::{
     future::Future,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use thiserror::Error;
 use vello_hybrid::{RenderSize, RenderTargetConfig, Renderer, Resources, TextureBindings};
 use wgpu::{
     Adapter, CurrentSurfaceTexture, Device, Instance, Queue, Surface, SurfaceConfiguration,
-    TextureFormat,
+    SurfaceTargetUnsafe, TextureFormat,
 };
 use winit::{PhysicalSize, Window, WindowId};
 
@@ -22,6 +20,36 @@ static NEXT_SURFACE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn next_surface_generation() -> u64 {
     NEXT_SURFACE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A WGPU surface paired with the thread-affine Window that owns its handles.
+///
+/// Fields are declared in destruction order: the surface must be released
+/// before the Window that keeps its raw native handles valid.
+#[derive(Debug)]
+struct WindowSurface {
+    surface: Surface<'static>,
+    window: Rc<Window>,
+}
+
+impl WindowSurface {
+    fn new(instance: &Instance, window: Rc<Window>) -> Result<Self, GraphicsError> {
+        let surface = Self::create(instance, &window)?;
+        Ok(Self { surface, window })
+    }
+
+    #[allow(unsafe_code)]
+    fn create(instance: &Instance, window: &Window) -> Result<Surface<'static>, GraphicsError> {
+        // SAFETY: WindowSurface retains the Window for the entire lifetime of
+        // the returned surface and drops the surface field first. Callers that
+        // replace an existing surface also retain the same Window owner.
+        let target = unsafe { SurfaceTargetUnsafe::from_display_and_window(window, window) }
+            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
+        // SAFETY: The raw handles in `target` remain valid under the retained
+        // Window ownership described above.
+        unsafe { instance.create_surface_unsafe(target) }
+            .map_err(|error| GraphicsError::Surface(error.to_string()))
+    }
 }
 
 #[derive(Debug)]
@@ -39,7 +67,7 @@ impl GraphicsContext {
     /// exists. Passing its surface to WGPU prevents windowless startup from
     /// locking the application to an adapter that cannot present later.
     pub(crate) async fn for_window(
-        window: Arc<Window>,
+        window: Rc<Window>,
     ) -> Result<(Self, WindowRenderer), GraphicsError> {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -47,11 +75,9 @@ impl GraphicsContext {
         }
 
         let instance = Instance::default();
-        let surface = instance
-            .create_surface(Arc::clone(&window))
-            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
-        let graphics = Self::request(instance, &surface).await?;
-        let renderer = WindowRenderer::from_surface(&graphics, window, surface)?;
+        let target = WindowSurface::new(&instance, window)?;
+        let graphics = Self::request(instance, &target.surface).await?;
+        let renderer = WindowRenderer::from_surface(&graphics, target)?;
         Ok((graphics, renderer))
     }
 
@@ -164,8 +190,7 @@ fn complete_presentation(
 
 #[derive(Debug)]
 pub(crate) struct WindowRenderer {
-    window: Arc<Window>,
-    surface: Surface<'static>,
+    target: WindowSurface,
     config: SurfaceConfiguration,
     renderer: Renderer,
     resources: Resources,
@@ -176,36 +201,33 @@ pub(crate) struct WindowRenderer {
 impl WindowRenderer {
     pub(crate) fn new(
         graphics: &GraphicsContext,
-        window: Arc<Window>,
+        window: Rc<Window>,
     ) -> Result<Self, GraphicsError> {
-        let surface = graphics
-            .instance
-            .create_surface(Arc::clone(&window))
-            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
-        Self::from_surface(graphics, window, surface)
+        let target = WindowSurface::new(&graphics.instance, window)?;
+        Self::from_surface(graphics, target)
     }
 
     fn from_surface(
         graphics: &GraphicsContext,
-        window: Arc<Window>,
-        surface: Surface<'static>,
+        target: WindowSurface,
     ) -> Result<Self, GraphicsError> {
-        let size = window.inner_size();
+        let size = target.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Err(GraphicsError::EmptySurface);
         }
         graphics.validate_target(size)?;
-        if !graphics.adapter.is_surface_supported(&surface) {
+        if !graphics.adapter.is_surface_supported(&target.surface) {
             return Err(GraphicsError::UnsupportedSurface);
         }
-        let capabilities = surface.get_capabilities(&graphics.adapter);
+        let capabilities = target.surface.get_capabilities(&graphics.adapter);
         let format = choose_surface_format(&capabilities.formats)
             .ok_or(GraphicsError::UnsupportedSurface)?;
-        let mut config = surface
+        let mut config = target
+            .surface
             .get_default_config(&graphics.adapter, size.width, size.height)
             .ok_or(GraphicsError::UnsupportedSurface)?;
         config.format = format;
-        surface.configure(&graphics.device, &config);
+        target.surface.configure(&graphics.device, &config);
         let (renderer, resources) = Renderer::new(
             &graphics.device,
             &RenderTargetConfig {
@@ -216,8 +238,7 @@ impl WindowRenderer {
         );
 
         Ok(Self {
-            window,
-            surface,
+            target,
             config,
             renderer,
             resources,
@@ -227,7 +248,7 @@ impl WindowRenderer {
     }
 
     pub(crate) fn window_id(&self) -> WindowId {
-        self.window.id()
+        self.target.window.id()
     }
 
     pub(crate) fn physical_size(&self) -> PhysicalSize<u32> {
@@ -292,7 +313,7 @@ impl WindowRenderer {
             });
         }
 
-        let (surface_texture, suboptimal) = match self.surface.get_current_texture() {
+        let (surface_texture, suboptimal) = match self.target.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => (texture, false),
             CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             CurrentSurfaceTexture::Timeout => return Ok(PresentationOutcome::Timeout),
@@ -332,7 +353,7 @@ impl WindowRenderer {
             )
             .map_err(|error| GraphicsError::Render(error.to_string()))?;
         graphics.queue.submit([encoder.finish()]);
-        self.window.pre_present_notify();
+        self.target.window.pre_present_notify();
         surface_texture.present();
 
         if suboptimal {
@@ -354,16 +375,15 @@ impl WindowRenderer {
     /// Keep the surface identity and presentation history synchronized with
     /// every successful reconfiguration.
     fn configure_surface_transition(&mut self, graphics: &GraphicsContext) {
-        self.surface.configure(&graphics.device, &self.config);
+        self.target
+            .surface
+            .configure(&graphics.device, &self.config);
         self.surface_identity.record_reconfiguration();
     }
 
     fn recreate_surface(&mut self, graphics: &GraphicsContext) -> Result<(), GraphicsError> {
         graphics.validate_target(self.physical_size())?;
-        let surface = graphics
-            .instance
-            .create_surface(Arc::clone(&self.window))
-            .map_err(|error| GraphicsError::Surface(error.to_string()))?;
+        let surface = WindowSurface::create(&graphics.instance, &self.target.window)?;
         if !graphics.adapter.is_surface_supported(&surface) {
             return Err(GraphicsError::UnsupportedSurface);
         }
@@ -379,7 +399,7 @@ impl WindowRenderer {
             },
         );
         self.config.format = format;
-        self.surface = surface;
+        self.target.surface = surface;
         self.configure_surface_transition(graphics);
         self.renderer = renderer;
         self.resources = resources;

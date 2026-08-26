@@ -34,6 +34,11 @@ impl Burokku {
     /// current-thread Tokio runtime so AppKit, the main QuickJS isolate, layout,
     /// and presentation remain thread-affine.
     pub async fn run(self) -> Result<(), BurokkuError> {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(self.run_local()).await
+    }
+
+    async fn run_local(self) -> Result<(), BurokkuError> {
         let mut event_loop = winit::EventLoop::new()?;
         let proxy = event_loop.create_proxy();
         let (dom_plugin, publications) = DomPlugin::new(move |_| proxy.wake_up());
