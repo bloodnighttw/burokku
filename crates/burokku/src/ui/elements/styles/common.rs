@@ -69,13 +69,8 @@ impl Styles for CommonStyle {
                 self.size.height = value;
                 true
             }),
-            "padding" => parse_non_negative_length_percentage(value).is_some_and(|value| {
-                self.padding = Rect {
-                    left: value,
-                    right: value,
-                    top: value,
-                    bottom: value,
-                };
+            "padding" => parse_padding(value).is_some_and(|value| {
+                self.padding = value;
                 true
             }),
             "margin" => parse_length_percentage(value).is_some_and(|value| {
@@ -106,6 +101,41 @@ impl Styles for CommonStyle {
             _ => return self.item.remove_property(property),
         };
         true
+    }
+}
+
+fn parse_padding(value: &str) -> Option<Rect<LengthPercentage>> {
+    let values = value
+        .split_ascii_whitespace()
+        .map(parse_non_negative_length_percentage)
+        .collect::<Option<Vec<_>>>()?;
+
+    match values.as_slice() {
+        [all] => Some(Rect {
+            left: *all,
+            right: *all,
+            top: *all,
+            bottom: *all,
+        }),
+        [vertical, horizontal] => Some(Rect {
+            left: *horizontal,
+            right: *horizontal,
+            top: *vertical,
+            bottom: *vertical,
+        }),
+        [top, horizontal, bottom] => Some(Rect {
+            left: *horizontal,
+            right: *horizontal,
+            top: *top,
+            bottom: *bottom,
+        }),
+        [top, right, bottom, left] => Some(Rect {
+            left: *left,
+            right: *right,
+            top: *top,
+            bottom: *bottom,
+        }),
+        _ => None,
     }
 }
 
@@ -143,5 +173,49 @@ mod tests {
         let style = CommonStyle::default().to_taffy_style();
 
         assert_eq!(style.display, taffy::Display::Block);
+    }
+
+    #[test]
+    fn padding_shorthand_expands_one_to_four_values() {
+        let px = LengthPercentage::length;
+        let percent = LengthPercentage::percent;
+
+        assert_eq!(
+            parse_padding("5px"),
+            Some(Rect {
+                left: px(5.0),
+                right: px(5.0),
+                top: px(5.0),
+                bottom: px(5.0),
+            })
+        );
+        assert_eq!(
+            parse_padding("50% 20%"),
+            Some(Rect {
+                left: percent(0.2),
+                right: percent(0.2),
+                top: percent(0.5),
+                bottom: percent(0.5),
+            })
+        );
+        assert_eq!(
+            parse_padding("1px 2px 3px"),
+            Some(Rect {
+                left: px(2.0),
+                right: px(2.0),
+                top: px(1.0),
+                bottom: px(3.0),
+            })
+        );
+        assert_eq!(
+            parse_padding("1px 2px 3px 4px"),
+            Some(Rect {
+                left: px(4.0),
+                right: px(2.0),
+                top: px(1.0),
+                bottom: px(3.0),
+            })
+        );
+        assert_eq!(parse_padding("1px 2px 3px 4px 5px"), None);
     }
 }
