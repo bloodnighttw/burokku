@@ -744,6 +744,49 @@ mod tests {
     }
 
     #[test]
+    fn grid_item_percentage_padding_keeps_grid_area_as_its_basis() {
+        // <Window viewport="300px 200px">
+        //   <Grid style="width: 200px; grid-template-columns: 50px 1fr">
+        //     <Text style="padding: 10%">hello</Text>
+        //     <Div />
+        //   </Grid>
+        // </Window>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let grid = dom.create_element(Element::Grid {
+            style: Box::new(GridStyle {
+                template_columns: vec![
+                    GridTemplateComponent::Single(TrackSizingFunction::length(50.0)),
+                    GridTemplateComponent::Single(TrackSizingFunction::fraction(1.0)),
+                ],
+                ..GridStyle::default()
+            }),
+        });
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("hello");
+        let filler = element(&mut dom, ElementTag::Div);
+        dom.set_style_property(grid, "width", "200px").unwrap();
+        dom.set_style_property(paragraph, "padding", "10%").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, grid).unwrap();
+        dom.append_child(grid, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        dom.append_child(grid, filler).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+        let layout = computed.box_for(paragraph).unwrap().layout();
+
+        assert_close(layout.size.width, 50.0);
+        assert_close(layout.padding.left, 5.0);
+        assert_close(layout.padding.right, 5.0);
+        assert_close(layout.padding.top, 5.0);
+        assert_close(layout.padding.bottom, 5.0);
+    }
+
+    #[test]
     fn absolute_content_origins_include_parent_padding_once() {
         let mut dom = Dom::new();
         let window = element(&mut dom, ElementTag::Window);

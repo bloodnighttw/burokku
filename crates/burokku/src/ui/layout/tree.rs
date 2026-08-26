@@ -7,7 +7,7 @@ use taffy::{
     geometry::{Point, Size},
     AvailableSpace, BlockContext, CacheTree, Display, Layout, LayoutBlockContainer,
     LayoutFlexboxContainer, LayoutGridContainer, LayoutInput, LayoutOutput, LayoutPartialTree,
-    Overflow, RunMode, Style, TraversePartialTree, TraverseTree,
+    Overflow, Position, RunMode, Style, TraversePartialTree, TraverseTree,
 };
 
 use crate::ui::{
@@ -137,10 +137,11 @@ pub(super) fn compute_layout<M: TextMeasurer>(
     }
 
     // CSS resolves percentage padding on every side against the containing
-    // block's inline size. Taffy's block algorithm currently overwrites child
-    // layout metadata after resolving vertical sides against the block's
-    // height, so normalize the completed boxes against their final parent width.
-    tree.normalize_percentage_padding(scratch.viewport.width())?;
+    // block's inline size. Taffy's block algorithm currently overwrites block
+    // child metadata after resolving vertical sides against the block's height,
+    // so correct only those two percentage fields. Flex, grid, absolute, fixed-
+    // length, and horizontal padding metadata must remain untouched.
+    tree.normalize_block_child_vertical_percentage_padding()?;
 
     // Measurement callbacks are speculative and may be skipped by exact cache
     // hits. Resolve paint paragraphs only from the completed unrounded boxes.
@@ -181,41 +182,55 @@ impl<M> DerivedLayoutTree<'_, M> {
 }
 
 impl<M: TextMeasurer> DerivedLayoutTree<'_, M> {
-    fn normalize_percentage_padding(
-        &mut self,
-        initial_containing_width: f32,
-    ) -> Result<(), LayoutError> {
+    fn normalize_block_child_vertical_percentage_padding(&mut self) -> Result<(), LayoutError> {
         let Some(root) = self.topology.root() else {
             return Ok(());
         };
-        let mut pending = vec![(root, initial_containing_width)];
+        let mut pending = vec![root];
 
-        while let Some((id, containing_width)) = pending.pop() {
-            let content_width = {
+        while let Some(parent) = pending.pop() {
+            let (display, content_width) = {
                 let state = self
                     .nodes
-                    .get_mut(&id)
-                    .ok_or(LayoutError::MissingLayoutSidecar(id))?;
-                if state.style.display == Display::None {
-                    continue;
-                }
-                state.unrounded.padding = state
-                    .style
-                    .padding
-                    .resolve_or_zero(Some(containing_width), |_, _| 0.0);
-                state.unrounded.content_box_width()
+                    .get(&parent)
+                    .ok_or(LayoutError::MissingLayoutSidecar(parent))?;
+                (state.style.display, state.unrounded.content_box_width())
             };
+            if display == Display::None {
+                continue;
+            }
+
             let children = self
                 .topology
-                .children(id)
-                .ok_or(LayoutError::MissingLayoutNode(id))?;
-            pending.extend(
-                children
-                    .iter()
-                    .rev()
-                    .copied()
-                    .map(|child| (child, content_width)),
-            );
+                .children(parent)
+                .ok_or(LayoutError::MissingLayoutNode(parent))?;
+            pending.extend(children.iter().rev().copied());
+            if display != Display::Block {
+                continue;
+            }
+
+            for child in children {
+                let state = self
+                    .nodes
+                    .get_mut(child)
+                    .ok_or(LayoutError::MissingLayoutSidecar(*child))?;
+                if state.style.display == Display::None
+                    || state.style.position == Position::Absolute
+                {
+                    continue;
+                }
+
+                let padding = state.style.padding;
+                if padding.top.into_raw().uses_percentage() {
+                    state.unrounded.padding.top =
+                        padding.top.resolve_or_zero(Some(content_width), |_, _| 0.0);
+                }
+                if padding.bottom.into_raw().uses_percentage() {
+                    state.unrounded.padding.bottom = padding
+                        .bottom
+                        .resolve_or_zero(Some(content_width), |_, _| 0.0);
+                }
+            }
         }
 
         Ok(())
