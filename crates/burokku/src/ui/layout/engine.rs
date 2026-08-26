@@ -705,6 +705,134 @@ mod tests {
     }
 
     #[test]
+    fn block_text_percentage_padding_resolves_all_sides_against_parent_width() {
+        // <Window viewport="300px 200px">
+        //   <Div style="width: 100px; height: auto">
+        //     <Text style="padding: 10%">hello</Text>
+        //   </Div>
+        // </Window>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let block = element(&mut dom, ElementTag::Div);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("hello");
+        dom.set_style_property(block, "width", "100px").unwrap();
+        dom.set_style_property(paragraph, "padding", "10%").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, block).unwrap();
+        dom.append_child(block, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+        let paragraph_box = computed.box_for(paragraph).unwrap();
+        let layout = paragraph_box.layout();
+
+        assert_close(layout.size.width, 100.0);
+        assert_close(layout.padding.left, 10.0);
+        assert_close(layout.padding.right, 10.0);
+        assert_close(layout.size.height, 40.0);
+        assert_close(layout.padding.top, 10.0);
+        assert_close(layout.padding.bottom, 10.0);
+        assert_close(computed.box_for(block).unwrap().layout().size.height, 40.0);
+        assert_close(
+            paragraph_box.content_origin().y - paragraph_box.border_origin().y,
+            10.0,
+        );
+    }
+
+    #[test]
+    fn nested_block_vertical_percentage_padding_uses_outer_width() {
+        // <Div class="outer" style="width: 600px; height: 200px; background: yellow">
+        //   <Div class="inner" style="padding: 50% 20%; background: red">
+        //     <Text class="content" style="background: blue">hi</Text>
+        //   </Div>
+        // </Div>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let outer = element(&mut dom, ElementTag::Div);
+        let inner = element(&mut dom, ElementTag::Div);
+        let content = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("hi");
+        dom.set_style_property(outer, "width", "600px").unwrap();
+        dom.set_style_property(outer, "height", "200px").unwrap();
+        dom.set_style_property(outer, "background-color", "#ffff00")
+            .unwrap();
+        dom.set_style_property(inner, "padding", "50% 20%").unwrap();
+        dom.set_style_property(inner, "background-color", "#ff0000")
+            .unwrap();
+        dom.set_style_property(content, "background-color", "#0000ff")
+            .unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, outer).unwrap();
+        dom.append_child(outer, inner).unwrap();
+        dom.append_child(inner, content).unwrap();
+        dom.append_child(content, text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(800.0, 700.0))
+            .unwrap();
+        let inner_box = computed.box_for(inner).unwrap();
+        let layout = inner_box.layout();
+
+        assert_close(layout.padding.top, 300.0);
+        assert_close(layout.padding.bottom, 300.0);
+        assert_close(layout.padding.left, 120.0);
+        assert_close(layout.padding.right, 120.0);
+        assert_close(layout.size.height, 620.0);
+        assert_close(
+            inner_box.content_origin().y - inner_box.border_origin().y,
+            300.0,
+        );
+    }
+
+    #[test]
+    fn grid_item_percentage_padding_keeps_grid_area_as_its_basis() {
+        // <Window viewport="300px 200px">
+        //   <Grid style="width: 200px; grid-template-columns: 50px 1fr">
+        //     <Text style="padding: 10%">hello</Text>
+        //     <Div />
+        //   </Grid>
+        // </Window>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let grid = dom.create_element(Element::Grid {
+            style: Box::new(GridStyle {
+                template_columns: vec![
+                    GridTemplateComponent::Single(TrackSizingFunction::length(50.0)),
+                    GridTemplateComponent::Single(TrackSizingFunction::fraction(1.0)),
+                ],
+                ..GridStyle::default()
+            }),
+        });
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("hello");
+        let filler = element(&mut dom, ElementTag::Div);
+        dom.set_style_property(grid, "width", "200px").unwrap();
+        dom.set_style_property(paragraph, "padding", "10%").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, grid).unwrap();
+        dom.append_child(grid, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        dom.append_child(grid, filler).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+        let layout = computed.box_for(paragraph).unwrap().layout();
+
+        assert_close(layout.size.width, 50.0);
+        assert_close(layout.padding.left, 5.0);
+        assert_close(layout.padding.right, 5.0);
+        assert_close(layout.padding.top, 5.0);
+        assert_close(layout.padding.bottom, 5.0);
+    }
+
+    #[test]
     fn absolute_content_origins_include_parent_padding_once() {
         let mut dom = Dom::new();
         let window = element(&mut dom, ElementTag::Window);
