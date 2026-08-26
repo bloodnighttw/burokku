@@ -190,6 +190,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "raw-window-handle",
+ "static_assertions",
  "thiserror",
  "tokio",
 ]

@@ -518,6 +518,7 @@ impl PlatformEventLoop {
         Ok(Window {
             state,
             platform: PlatformWindow::new(self.mtm, native_window, view, delegate),
+            _thread_affinity: std::marker::PhantomData,
         })
     }
 

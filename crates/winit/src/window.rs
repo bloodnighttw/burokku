@@ -1,4 +1,8 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::{
+    marker::PhantomData,
+    rc::Rc,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
@@ -100,9 +104,17 @@ const fn unpack_size(size: u64) -> PhysicalSize<u32> {
     PhysicalSize::new((size >> 32) as u32, size as u32)
 }
 
+/// A native window handle owned by the platform event-loop thread.
+///
+/// `Window` is deliberately neither [`Send`] nor [`Sync`]. Use
+/// [`crate::EventLoopProxy`] to wake the event loop from other threads.
 pub struct Window {
     pub(crate) state: std::sync::Arc<WindowState>,
     pub(crate) platform: crate::platform::PlatformWindow,
+    // Native windows are owned by the platform event-loop thread. Keep this
+    // handle thread-affine so operations and final release cannot synchronously
+    // dispatch back to a main thread that may already be shutting down.
+    pub(crate) _thread_affinity: PhantomData<Rc<()>>,
 }
 
 impl Window {
@@ -205,9 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn window_is_send_and_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-
-        assert_send_sync::<Window>();
+    fn window_is_thread_affine() {
+        static_assertions::assert_not_impl_any!(Window: Send, Sync);
     }
 }
