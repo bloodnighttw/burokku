@@ -705,6 +705,45 @@ mod tests {
     }
 
     #[test]
+    fn block_text_percentage_padding_resolves_all_sides_against_parent_width() {
+        // <Window viewport="300px 200px">
+        //   <Div style="width: 100px; height: auto">
+        //     <Text style="padding: 10%">hello</Text>
+        //   </Div>
+        // </Window>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let block = element(&mut dom, ElementTag::Div);
+        let paragraph = element(&mut dom, ElementTag::Text);
+        let text = dom.create_text("hello");
+        dom.set_style_property(block, "width", "100px").unwrap();
+        dom.set_style_property(paragraph, "padding", "10%").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, block).unwrap();
+        dom.append_child(block, paragraph).unwrap();
+        dom.append_child(paragraph, text).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine
+            .compute(publication(&dom), viewport(300.0, 200.0))
+            .unwrap();
+        let paragraph_box = computed.box_for(paragraph).unwrap();
+        let layout = paragraph_box.layout();
+
+        assert_close(layout.size.width, 100.0);
+        assert_close(layout.padding.left, 10.0);
+        assert_close(layout.padding.right, 10.0);
+        assert_close(layout.size.height, 40.0);
+        assert_close(layout.padding.top, 10.0);
+        assert_close(layout.padding.bottom, 10.0);
+        assert_close(computed.box_for(block).unwrap().layout().size.height, 40.0);
+        assert_close(
+            paragraph_box.content_origin().y - paragraph_box.border_origin().y,
+            10.0,
+        );
+    }
+
+    #[test]
     fn absolute_content_origins_include_parent_padding_once() {
         let mut dom = Dom::new();
         let window = element(&mut dom, ElementTag::Window);
