@@ -1255,6 +1255,45 @@ mod tests {
     }
 
     #[test]
+    fn reconfiguration_then_candidate_failure_cannot_recover_from_old_pixels() {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let plan = scene_plan(&dom);
+        let revision = plan.revision();
+        let old_surface = test_surface(1, PhysicalSize::new(320, 240), 11);
+        let reconfigured_surface = test_surface(1, PhysicalSize::new(320, 240), 12);
+        let presented = PresentedFrame {
+            plan,
+            surface: old_surface,
+        };
+
+        assert!(presented_frame_is_usable(
+            Some(&presented),
+            Some(&old_surface),
+            Some(revision),
+        ));
+        let state = presentation_state(Some(&presented), Some(&reconfigured_surface), None);
+        assert_eq!(
+            state,
+            PresentationState {
+                active_renderer_has_presented: false,
+                usable_frame: false,
+            }
+        );
+        assert!(matches!(
+            classify_candidate_failure(
+                revision + 1,
+                state.usable_frame,
+                FailureKind::Scene,
+                FrameStage::Scene,
+                HostError::MissingRenderer,
+            ),
+            RedrawFailure::Fatal(HostError::MissingRenderer)
+        ));
+    }
+
+    #[test]
     fn resize_then_failure_cannot_recover_from_the_old_surface() {
         let mut dom = Dom::new();
         let window = dom.create_element(Element::from_tag(ElementTag::Window));
