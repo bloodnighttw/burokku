@@ -124,6 +124,44 @@ pub(crate) enum PresentationOutcome {
     Reconfigure,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurfaceIdentity {
+    generation: u64,
+    last_presented_revision: Option<u64>,
+}
+
+impl SurfaceIdentity {
+    fn new() -> Self {
+        Self {
+            generation: next_surface_generation(),
+            last_presented_revision: None,
+        }
+    }
+
+    fn record_presentation(&mut self, revision: u64) {
+        self.last_presented_revision = Some(revision);
+    }
+
+    fn record_reconfiguration(&mut self) {
+        self.generation = next_surface_generation();
+        self.last_presented_revision = None;
+    }
+}
+
+fn complete_presentation(
+    identity: &mut SurfaceIdentity,
+    revision: u64,
+    reconfigured_after_present: bool,
+) -> PresentationOutcome {
+    if reconfigured_after_present {
+        debug_assert_eq!(identity.last_presented_revision, None);
+        PresentationOutcome::Reconfigure
+    } else {
+        identity.record_presentation(revision);
+        PresentationOutcome::Presented { revision }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct WindowRenderer {
     window: Arc<Window>,
@@ -132,8 +170,7 @@ pub(crate) struct WindowRenderer {
     renderer: Renderer,
     resources: Resources,
     suspended: bool,
-    surface_generation: u64,
-    last_presented_revision: Option<u64>,
+    surface_identity: SurfaceIdentity,
 }
 
 impl WindowRenderer {
@@ -185,8 +222,7 @@ impl WindowRenderer {
             renderer,
             resources,
             suspended: false,
-            surface_generation: next_surface_generation(),
-            last_presented_revision: None,
+            surface_identity: SurfaceIdentity::new(),
         })
     }
 
@@ -203,11 +239,11 @@ impl WindowRenderer {
     }
 
     pub(crate) fn surface_generation(&self) -> u64 {
-        self.surface_generation
+        self.surface_identity.generation
     }
 
     pub(crate) fn last_presented_revision(&self) -> Option<u64> {
-        self.last_presented_revision
+        self.surface_identity.last_presented_revision
     }
 
     pub(crate) fn resize(
@@ -227,7 +263,7 @@ impl WindowRenderer {
         self.suspended = false;
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface.configure(&graphics.device, &self.config);
+        self.configure_surface_transition(graphics);
         let (renderer, resources) = Renderer::new(
             &graphics.device,
             &RenderTargetConfig {
@@ -238,8 +274,6 @@ impl WindowRenderer {
         );
         self.renderer = renderer;
         self.resources = resources;
-        self.surface_generation = next_surface_generation();
-        self.last_presented_revision = None;
         Ok(())
     }
 
@@ -265,7 +299,7 @@ impl WindowRenderer {
             CurrentSurfaceTexture::Occluded => return Ok(PresentationOutcome::Occluded),
             CurrentSurfaceTexture::Outdated => {
                 graphics.validate_target(self.physical_size())?;
-                self.surface.configure(&graphics.device, &self.config);
+                self.configure_surface_transition(graphics);
                 return Ok(PresentationOutcome::Reconfigure);
             }
             CurrentSurfaceTexture::Lost => {
@@ -300,15 +334,28 @@ impl WindowRenderer {
         graphics.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         surface_texture.present();
-        self.last_presented_revision = Some(frame.plan().revision());
 
         if suboptimal {
             graphics.validate_target(self.physical_size())?;
-            self.surface.configure(&graphics.device, &self.config);
+            self.configure_surface_transition(graphics);
         }
-        Ok(PresentationOutcome::Presented {
-            revision: frame.plan().revision(),
-        })
+
+        Ok(complete_presentation(
+            &mut self.surface_identity,
+            frame.plan().revision(),
+            suboptimal,
+        ))
+    }
+
+    /// Configure the current surface as a new presentation epoch.
+    ///
+    /// WGPU does not guarantee that pixels presented before `configure` remain
+    /// available afterward, even when the configuration values are unchanged.
+    /// Keep the surface identity and presentation history synchronized with
+    /// every successful reconfiguration.
+    fn configure_surface_transition(&mut self, graphics: &GraphicsContext) {
+        self.surface.configure(&graphics.device, &self.config);
+        self.surface_identity.record_reconfiguration();
     }
 
     fn recreate_surface(&mut self, graphics: &GraphicsContext) -> Result<(), GraphicsError> {
@@ -323,8 +370,6 @@ impl WindowRenderer {
         let capabilities = surface.get_capabilities(&graphics.adapter);
         let format = choose_surface_format(&capabilities.formats)
             .ok_or(GraphicsError::UnsupportedSurface)?;
-        self.config.format = format;
-        surface.configure(&graphics.device, &self.config);
         let (renderer, resources) = Renderer::new(
             &graphics.device,
             &RenderTargetConfig {
@@ -333,11 +378,11 @@ impl WindowRenderer {
                 height: self.config.height,
             },
         );
+        self.config.format = format;
         self.surface = surface;
+        self.configure_surface_transition(graphics);
         self.renderer = renderer;
         self.resources = resources;
-        self.surface_generation = next_surface_generation();
-        self.last_presented_revision = None;
         Ok(())
     }
 }
@@ -476,6 +521,49 @@ mod tests {
                 }) if rejected == size
             ));
         }
+    }
+
+    #[test]
+    fn outdated_reconfiguration_advances_identity_and_discards_presented_revision() {
+        let mut identity = SurfaceIdentity::new();
+        identity.record_presentation(41);
+        let presented_generation = identity.generation;
+
+        // Inject the identity transition performed by the `Outdated` branch
+        // after it successfully configures the surface.
+        identity.record_reconfiguration();
+
+        assert_ne!(identity.generation, presented_generation);
+        assert_eq!(identity.last_presented_revision, None);
+    }
+
+    #[test]
+    fn suboptimal_reconfiguration_does_not_report_preconfiguration_plan_as_presented() {
+        let mut identity = SurfaceIdentity::new();
+        identity.record_presentation(41);
+        let presented_generation = identity.generation;
+
+        // A suboptimal texture is presented before its surface is configured.
+        // Inject that post-presentation configuration transition, then verify
+        // that the pre-configuration revision cannot become current.
+        identity.record_reconfiguration();
+        let outcome = complete_presentation(&mut identity, 42, true);
+
+        assert_eq!(outcome, PresentationOutcome::Reconfigure);
+        assert_ne!(identity.generation, presented_generation);
+        assert_eq!(identity.last_presented_revision, None);
+    }
+
+    #[test]
+    fn optimal_presentation_records_revision_without_changing_surface_identity() {
+        let mut identity = SurfaceIdentity::new();
+        let generation = identity.generation;
+
+        let outcome = complete_presentation(&mut identity, 42, false);
+
+        assert_eq!(outcome, PresentationOutcome::Presented { revision: 42 });
+        assert_eq!(identity.generation, generation);
+        assert_eq!(identity.last_presented_revision, Some(42));
     }
 
     #[test]
