@@ -79,9 +79,8 @@ mod appkit {
             };
             self.in_tick.set(false);
 
-            if result.has_more_work {
-                self.wake.signal();
-            }
+            // The runtime re-signals the CF source when a bounded tick leaves
+            // runnable work, including during AppKit's live-resize loop.
             let fire = result
                 .next_deadline
                 .map(|deadline| unsafe {
