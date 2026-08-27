@@ -184,6 +184,7 @@ dependencies = [
 name = "burokku-winit"
 version = "0.1.0"
 dependencies = [
+ "core-foundation-sys",
  "dispatch2",
  "objc2",
  "objc2-app-kit",
@@ -265,6 +266,12 @@ checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
 dependencies = [
  "unicode-segmentation",
 ]
+
+[[package]]
+name = "core-foundation-sys"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cpufeatures"
@@ -1940,8 +1947,6 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "1.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "libc",
  "mio",

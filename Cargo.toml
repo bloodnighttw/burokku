@@ -3,7 +3,11 @@ members = [
     "crates/*",
     "example/*",
 ]
+exclude = ["crates/tokio"]
 resolver = "2"
+
+[patch.crates-io]
+tokio = { path = "crates/tokio/tokio" }
 
 # Performance counters are debug-only, including in optimized benchmarks.
 [profile.bench]
