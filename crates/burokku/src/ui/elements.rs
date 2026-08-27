@@ -1382,6 +1382,48 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_grid_placements_never_enter_dom_state() {
+        let mut dom = Dom::new();
+        let div = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        assert_eq!(dom.set_style_property(div, "grid-row", "2"), Ok(true));
+        assert_eq!(dom.set_style_property(div, "grid-column", "3"), Ok(true));
+        let revision = dom.revision();
+
+        for property in ["grid-row", "grid-column"] {
+            for value in ["span -1", "span 0", "span 65536", "32768"] {
+                assert_eq!(
+                    dom.set_style_property(div, property, value),
+                    Err(StyleError::InvalidValue {
+                        property: property.into(),
+                        value: value.into(),
+                    })
+                );
+                assert_eq!(dom.revision(), revision);
+            }
+        }
+
+        let Some(Element::Div { style }) = dom.element(div) else {
+            panic!("expected div element");
+        };
+        assert_eq!(
+            style.item.grid_row,
+            taffy::Line {
+                start: styles::item::GridPlacement::Line(2),
+                end: styles::item::GridPlacement::Auto,
+            }
+        );
+        assert_eq!(
+            style.item.grid_column,
+            taffy::Line {
+                start: styles::item::GridPlacement::Line(3),
+                end: styles::item::GridPlacement::Auto,
+            }
+        );
+    }
+
+    #[test]
     fn style_no_ops_do_not_advance_revisions() {
         let mut dom = Dom::new();
         let div = dom.create_element(Element::Div {
