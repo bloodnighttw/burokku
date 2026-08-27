@@ -156,7 +156,11 @@ fn _assert_kinds() {
 impl Driver {
     /// Creates a new event loop, returning any error that happened during the
     /// creation.
-    pub(crate) fn new(
+    pub(crate) fn new(nevents: usize) -> io::Result<(Driver, Handle)> {
+        Self::new_with_external_wake(nevents, None)
+    }
+
+    pub(crate) fn new_with_external_wake(
         nevents: usize,
         external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
     ) -> io::Result<(Driver, Handle)> {

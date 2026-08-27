@@ -186,7 +186,10 @@ cfg_io_driver! {
 
         let (io_stack, inner, signal_handle) = if enabled {
             let (io_driver, io_handle) =
-                crate::runtime::io::Driver::new(nevents, external_wake.clone())?;
+                crate::runtime::io::Driver::new_with_external_wake(
+                    nevents,
+                    external_wake.clone(),
+                )?;
 
             let (signal_driver, signal_handle) = create_signal_driver(io_driver, &io_handle)?;
             let process_driver = create_process_driver(signal_driver);
