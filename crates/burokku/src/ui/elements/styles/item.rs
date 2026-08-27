@@ -32,6 +32,69 @@ impl IntoTaffyStyle for GridPlacement {
     }
 }
 
+impl TryFrom<&str> for GridPlacement {
+    type Error = GridPlacementParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let parsed = value
+            .trim()
+            .parse::<TaffyGridPlacement<String>>()
+            .map_err(|_| GridPlacementParseError)?;
+        if matches!(parsed, TaffyGridPlacement::Auto) {
+            return Ok(GridPlacement::Auto);
+        }
+
+        let mut span = false;
+        let mut number = None;
+        let mut has_ident = false;
+        for component in value.split_ascii_whitespace() {
+            match component {
+                "auto" => return Err(GridPlacementParseError),
+                "span" if !span => span = true,
+                "span" => return Err(GridPlacementParseError),
+                component => match component.parse::<i32>() {
+                    Ok(0) => return Err(GridPlacementParseError),
+                    Ok(value) if number.is_none() => number = Some(value),
+                    Ok(_) => return Err(GridPlacementParseError),
+                    Err(_) if !has_ident => has_ident = true,
+                    Err(_) => return Err(GridPlacementParseError),
+                },
+            }
+        }
+
+        match (parsed, span, number, has_ident) {
+            (TaffyGridPlacement::Span(_), true, None, false) => Ok(GridPlacement::Span(0)),
+            (TaffyGridPlacement::Span(_), true, Some(number), false) => u16::try_from(number)
+                .map(GridPlacement::Span)
+                .map_err(|_| GridPlacementParseError),
+            (TaffyGridPlacement::NamedSpan(name, _), true, None, true) => {
+                Ok(GridPlacement::NamedSpan(name, 0))
+            }
+            (TaffyGridPlacement::NamedSpan(name, _), true, Some(number), true) => {
+                u16::try_from(number)
+                    .map(|number| GridPlacement::NamedSpan(name, number))
+                    .map_err(|_| GridPlacementParseError)
+            }
+            (TaffyGridPlacement::Line(_), false, Some(number), false) => i16::try_from(number)
+                .map(GridPlacement::Line)
+                .map_err(|_| GridPlacementParseError),
+            (TaffyGridPlacement::NamedLine(name, _), false, Some(number), true) => {
+                i16::try_from(number)
+                    .map(|number| GridPlacement::NamedLine(name, number))
+                    .map_err(|_| GridPlacementParseError)
+            }
+            (TaffyGridPlacement::NamedLine(name, _), false, None, true) => {
+                Ok(GridPlacement::NamedLine(name, 0))
+            }
+            _ => Err(GridPlacementParseError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("invalid grid placement")]
+pub struct GridPlacementParseError;
+
 /// Item properties shared by every regular layout element.
 ///
 /// Flex and grid placement belong to the child, not to the container. Keeping
@@ -191,16 +254,7 @@ where
 }
 
 fn parse_grid_placement(value: &str) -> Option<GridPlacement> {
-    let placement = value.trim().parse::<TaffyGridPlacement<String>>().ok()?;
-    Some(match placement {
-        TaffyGridPlacement::Auto => GridPlacement::Auto,
-        TaffyGridPlacement::Line(index) => GridPlacement::Line(index.as_i16()),
-        TaffyGridPlacement::NamedLine(name, index) => GridPlacement::NamedLine(name, index),
-        TaffyGridPlacement::Span(tracks) => GridPlacement::Span(tracks),
-        TaffyGridPlacement::NamedSpan(name, occurrence) => {
-            GridPlacement::NamedSpan(name, occurrence)
-        }
-    })
+    GridPlacement::try_from(value).ok()
 }
 
 fn parse_grid_line(value: &str) -> Option<Line<GridPlacement>> {
@@ -235,6 +289,35 @@ mod tests {
             Line {
                 start: GridPlacement::NamedLine("content".into(), 2),
                 end: GridPlacement::NamedSpan("sidebar".into(), 0),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_overflowing_grid_placements() {
+        let mut style = ItemStyle::default();
+        assert!(style.set_property("grid-row", "2 / span 3"));
+        let original = style.grid_row.clone();
+
+        for value in [
+            "span -1",
+            "span 0",
+            "span 65536",
+            "32768",
+            "-32769",
+            "content 32768",
+            "span content -1",
+        ] {
+            assert!(!style.set_property("grid-row", value), "accepted {value:?}");
+            assert_eq!(style.grid_row, original, "mutated style for {value:?}");
+        }
+
+        assert!(style.set_property("grid-row", "-32768 / span 65535"));
+        assert_eq!(
+            style.grid_row,
+            Line {
+                start: GridPlacement::Line(-32768),
+                end: GridPlacement::Span(65535),
             }
         );
     }
