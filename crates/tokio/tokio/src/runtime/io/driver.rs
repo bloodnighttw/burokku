@@ -13,43 +13,54 @@ use crate::io::ready::Ready;
 use crate::loom::sync::Mutex;
 use crate::runtime::driver;
 use crate::runtime::io::registration_set;
+use crate::runtime::park::{ParkThread, UnparkThread};
 use crate::runtime::io::{IoDriverMetrics, RegistrationSet, ScheduledIo};
 
 use mio::event::Source;
 use std::fmt;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// I/O driver, backed by Mio.
 pub(crate) struct Driver {
-    /// True when an event with the signal token is received
-    signal_ready: bool,
+    mode: DriverMode,
 
+    /// True when an event with the signal token is received.
+    signal_ready: Arc<AtomicBool>,
+}
+
+enum DriverMode {
+    Inline(Reactor),
+
+    #[cfg(not(target_os = "wasi"))]
+    Threaded(ThreadedReactor),
+}
+
+struct Reactor {
     /// Reuse the `mio::Events` value across calls to poll.
     events: mio::Events,
 
-    /// The system event queue.
+    /// The system event queue. Exactly one thread owns and polls this value.
     poll: mio::Poll,
+
+    signal_ready: Arc<AtomicBool>,
 }
 
-/// A reference to an I/O driver.
-pub(crate) struct Handle {
-    /// Registers I/O resources.
-    registry: mio::Registry,
+#[cfg(not(target_os = "wasi"))]
+struct ThreadedReactor {
+    stop: Arc<AtomicBool>,
+    poll_waker: Arc<mio::Waker>,
+    parker: ParkThread,
+    thread: Option<JoinHandle<()>>,
+}
 
-    /// Tracks all registrations
-    registrations: RegistrationSet,
-
-    /// State that should be synchronized
-    synced: Mutex<registration_set::Synced>,
-
-    /// Used to wake up the reactor from a call to `turn`.
-    /// Not supported on `Wasi` due to lack of threading support.
-    #[cfg(not(target_os = "wasi"))]
-    waker: mio::Waker,
-
-    pub(crate) metrics: IoDriverMetrics,
+struct ReactorHandle {
+    registrations: Arc<RegistrationSet>,
+    synced: Arc<Mutex<registration_set::Synced>>,
+    metrics: Arc<IoDriverMetrics>,
 
     #[cfg(all(
         tokio_unstable,
@@ -58,7 +69,38 @@ pub(crate) struct Handle {
         feature = "fs",
         target_os = "linux",
     ))]
-    pub(crate) uring_context: Mutex<UringContext>,
+    uring_context: Arc<Mutex<UringContext>>,
+}
+
+/// A reference to an I/O driver.
+pub(crate) struct Handle {
+    /// Registers I/O resources.
+    registry: mio::Registry,
+
+    /// Tracks all registrations
+    registrations: Arc<RegistrationSet>,
+
+    /// State that should be synchronized
+    synced: Arc<Mutex<registration_set::Synced>>,
+
+    /// Used to wake up the reactor from a call to `turn`.
+    /// Not supported on `Wasi` due to lack of threading support.
+    #[cfg(not(target_os = "wasi"))]
+    waker: Arc<mio::Waker>,
+
+    /// Wakes a scheduler thread parked outside Mio when the reactor is split.
+    scheduler_unpark: Option<UnparkThread>,
+
+    pub(crate) metrics: Arc<IoDriverMetrics>,
+
+    #[cfg(all(
+        tokio_unstable,
+        feature = "io-uring",
+        feature = "rt",
+        feature = "fs",
+        target_os = "linux",
+    ))]
+    pub(crate) uring_context: Arc<Mutex<UringContext>>,
 
     #[cfg(all(
         tokio_unstable,
@@ -114,27 +156,39 @@ fn _assert_kinds() {
 impl Driver {
     /// Creates a new event loop, returning any error that happened during the
     /// creation.
-    pub(crate) fn new(nevents: usize) -> io::Result<(Driver, Handle)> {
+    pub(crate) fn new(
+        nevents: usize,
+        external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
+    ) -> io::Result<(Driver, Handle)> {
         let poll = mio::Poll::new()?;
         #[cfg(not(target_os = "wasi"))]
-        let waker = mio::Waker::new(poll.registry(), TOKEN_WAKEUP)?;
+        let waker = Arc::new(mio::Waker::new(poll.registry(), TOKEN_WAKEUP)?);
         let registry = poll.registry().try_clone()?;
-
-        let driver = Driver {
-            signal_ready: false,
+        let signal_ready = Arc::new(AtomicBool::new(false));
+        let reactor = Reactor {
+            signal_ready: signal_ready.clone(),
             events: mio::Events::with_capacity(nevents),
             poll,
         };
 
         let (registrations, synced) = RegistrationSet::new();
+        let registrations = Arc::new(registrations);
+        let synced = Arc::new(Mutex::new(synced));
+        let metrics = Arc::new(IoDriverMetrics::default());
 
-        let handle = Handle {
-            registry,
-            registrations,
-            synced: Mutex::new(synced),
-            #[cfg(not(target_os = "wasi"))]
-            waker,
-            metrics: IoDriverMetrics::default(),
+        #[cfg(all(
+            tokio_unstable,
+            feature = "io-uring",
+            feature = "rt",
+            feature = "fs",
+            target_os = "linux",
+        ))]
+        let uring_context = Arc::new(Mutex::new(UringContext::new()));
+
+        let reactor_handle = ReactorHandle {
+            registrations: registrations.clone(),
+            synced: synced.clone(),
+            metrics: metrics.clone(),
             #[cfg(all(
                 tokio_unstable,
                 feature = "io-uring",
@@ -142,7 +196,68 @@ impl Driver {
                 feature = "fs",
                 target_os = "linux",
             ))]
-            uring_context: Mutex::new(UringContext::new()),
+            uring_context: uring_context.clone(),
+        };
+
+        #[cfg(not(target_os = "wasi"))]
+        let (mode, scheduler_unpark) = if let Some(external_wake) = external_wake {
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let poll_waker = waker.clone();
+            let parker = ParkThread::new();
+            let scheduler_unpark = parker.unpark();
+            let reactor_scheduler_unpark = scheduler_unpark.clone();
+            let thread = std::thread::Builder::new()
+                .name("tokio-mio-reactor".to_owned())
+                .spawn(move || {
+                    let mut reactor = reactor;
+                    loop {
+                        reactor.turn(&reactor_handle, None);
+                        // Special signal/process tokens do not wake a
+                        // ScheduledIo, so wake an ordinary block_on parker
+                        // directly after every completed Mio turn.
+                        reactor_scheduler_unpark.unpark();
+                        if thread_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        external_wake.wake();
+                    }
+                })?;
+            (
+                DriverMode::Threaded(ThreadedReactor {
+                    stop,
+                    poll_waker,
+                    parker,
+                    thread: Some(thread),
+                }),
+                Some(scheduler_unpark),
+            )
+        } else {
+            (DriverMode::Inline(reactor), None)
+        };
+
+        #[cfg(target_os = "wasi")]
+        let (mode, scheduler_unpark) = {
+            let _ = external_wake;
+            (DriverMode::Inline(reactor), None)
+        };
+
+        let handle = Handle {
+            registry,
+            registrations,
+            synced,
+            #[cfg(not(target_os = "wasi"))]
+            waker,
+            scheduler_unpark,
+            metrics,
+            #[cfg(all(
+                tokio_unstable,
+                feature = "io-uring",
+                feature = "rt",
+                feature = "fs",
+                target_os = "linux",
+            ))]
+            uring_context,
             #[cfg(all(
                 tokio_unstable,
                 feature = "io-uring",
@@ -153,21 +268,41 @@ impl Driver {
             uring_probe: OnceCell::new(),
         };
 
-        Ok((driver, handle))
+        Ok((
+            Driver {
+                mode,
+                signal_ready,
+            },
+            handle,
+        ))
     }
 
     pub(crate) fn park(&mut self, rt_handle: &driver::Handle) {
-        let handle = rt_handle.io();
-        self.turn(handle, None);
+        match &mut self.mode {
+            DriverMode::Inline(reactor) => reactor.turn(&ReactorHandle::from(rt_handle.io()), None),
+            #[cfg(not(target_os = "wasi"))]
+            DriverMode::Threaded(threaded) => threaded.parker.park(),
+        }
     }
 
     pub(crate) fn park_timeout(&mut self, rt_handle: &driver::Handle, duration: Duration) {
-        let handle = rt_handle.io();
-        self.turn(handle, Some(duration));
+        match &mut self.mode {
+            DriverMode::Inline(reactor) => {
+                reactor.turn(&ReactorHandle::from(rt_handle.io()), Some(duration))
+            }
+            #[cfg(not(target_os = "wasi"))]
+            DriverMode::Threaded(threaded) => threaded.parker.park_timeout(duration),
+        }
     }
 
     pub(crate) fn shutdown(&mut self, rt_handle: &driver::Handle) {
         let handle = rt_handle.io();
+
+        #[cfg(not(target_os = "wasi"))]
+        if let DriverMode::Threaded(threaded) = &mut self.mode {
+            threaded.stop_and_join();
+        }
+
         let ios = handle.registrations.shutdown(&mut handle.synced.lock());
 
         // `shutdown()` must be called without holding the lock.
@@ -175,49 +310,41 @@ impl Driver {
             io.shutdown();
         }
     }
+}
 
-    fn turn(&mut self, handle: &Handle, max_wait: Option<Duration>) {
+impl Reactor {
+    fn turn(&mut self, handle: &ReactorHandle, max_wait: Option<Duration>) {
         debug_assert!(!handle.registrations.is_shutdown(&handle.synced.lock()));
 
         handle.release_pending_registrations();
 
         let events = &mut self.events;
-
-        // Block waiting for an event to happen, peeling out how many events
-        // happened.
         match self.poll.poll(events, max_wait) {
             Ok(()) => {}
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
             #[cfg(target_os = "wasi")]
-            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-                // In case of wasm32_wasi this error happens, when trying to poll without subscriptions
-                // just return from the park, as there would be nothing, which wakes us up.
-            }
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
             Err(e) => panic!("unexpected error when polling the I/O driver: {e:?}"),
         }
 
-        // Process all the events that came in, dispatching appropriately
         let mut ready_count = 0;
         for event in events.iter() {
             let token = event.token();
 
             if token == TOKEN_WAKEUP {
-                // Nothing to do, the event is used to unblock the I/O driver
+                // Control notification only.
             } else if token == TOKEN_SIGNAL {
-                self.signal_ready = true;
+                self.signal_ready.store(true, Ordering::Release);
             } else {
                 let ready = Ready::from_mio(event);
                 let ptr = super::EXPOSE_IO.from_exposed_addr(token.0);
 
-                // Safety: we ensure that the pointers used as tokens are not freed
-                // until they are both deregistered from mio **and** we know the I/O
-                // driver is not concurrently polling. The I/O driver holds ownership of
-                // an `Arc<ScheduledIo>` so we can safely cast this to a ref.
+                // Safety: the registration set retains an Arc until Mio has
+                // deregistered the source and this sole poll owner has crossed
+                // a subsequent turn boundary.
                 let io: &ScheduledIo = unsafe { &*ptr };
-
                 io.set_readiness(Tick::Set, |curr| curr | ready);
                 io.wake(ready);
-
                 ready_count += 1;
             }
         }
@@ -230,12 +357,9 @@ impl Driver {
             target_os = "linux",
         ))]
         {
-            let mut guard = handle.get_uring().lock();
+            let mut guard = handle.uring_context.lock();
             let ctx = &mut *guard;
             ctx.dispatch_completions();
-
-            // There might be some cases where the CQ overflows, so we need to flush
-            // the remaining buffered CQEs.
             while ctx
                 .uring
                 .as_mut()
@@ -248,6 +372,58 @@ impl Driver {
         }
 
         handle.metrics.incr_ready_count_by(ready_count);
+    }
+}
+
+impl ReactorHandle {
+    fn release_pending_registrations(&self) {
+        if self.registrations.needs_release() {
+            self.registrations.release(&mut self.synced.lock());
+        }
+    }
+}
+
+impl From<&Handle> for ReactorHandle {
+    fn from(handle: &Handle) -> Self {
+        Self {
+            registrations: handle.registrations.clone(),
+            synced: handle.synced.clone(),
+            metrics: handle.metrics.clone(),
+            #[cfg(all(
+                tokio_unstable,
+                feature = "io-uring",
+                feature = "rt",
+                feature = "fs",
+                target_os = "linux",
+            ))]
+            uring_context: handle.uring_context.clone(),
+        }
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl ThreadedReactor {
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.poll_waker.wake();
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("Tokio Mio reactor thread panicked");
+        }
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        #[cfg(not(target_os = "wasi"))]
+        if let DriverMode::Threaded(threaded) = &mut self.mode {
+            if threaded.thread.is_some() {
+                threaded.stop.store(true, Ordering::Release);
+                let _ = threaded.poll_waker.wake();
+                if let Some(thread) = threaded.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
     }
 }
 
@@ -270,6 +446,10 @@ impl Handle {
     pub(crate) fn unpark(&self) {
         #[cfg(not(target_os = "wasi"))]
         self.waker.wake().expect("failed to wake I/O driver");
+
+        if let Some(unpark) = &self.scheduler_unpark {
+            unpark.unpark();
+        }
     }
 
     /// Registers an I/O resource with the reactor for a given `mio::Ready` state.
@@ -311,10 +491,13 @@ impl Handle {
         // Cleanup ALWAYS happens
         let os_result = self.registry.deregister(source);
 
-        if self
+        let reached_release_batch = self
             .registrations
-            .deregister(&mut self.synced.lock(), registration)
-        {
+            .deregister(&mut self.synced.lock(), registration);
+        if reached_release_batch || self.scheduler_unpark.is_some() {
+            // A dedicated reactor must cross a poll boundary before the token's
+            // retained Arc can be released, even when fewer than the inline
+            // driver's batching threshold have accumulated.
             self.unpark();
         }
 

@@ -538,6 +538,9 @@ cfg_signal_internal_and_unix! {
 cfg_rt! {
     pub(crate) mod task;
 
+    mod external;
+    pub use external::{ExternalWake, TickResult};
+
     mod config;
     use config::Config;
 

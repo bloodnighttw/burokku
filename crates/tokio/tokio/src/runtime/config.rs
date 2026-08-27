@@ -12,6 +12,9 @@ pub(crate) struct Config {
     /// How many ticks before yielding to the driver for timer and I/O events?
     pub(crate) event_interval: u32,
 
+    /// Maximum number of regular tasks polled by one external tick.
+    pub(crate) external_tick_budget: usize,
+
     /// Callback for a worker parking itself
     pub(crate) before_park: Option<Callback>,
 

@@ -120,6 +120,19 @@ impl LocalRuntime {
         &self.handle
     }
 
+    /// Runs one bounded, nonblocking scheduler iteration on this runtime's
+    /// owning thread.
+    ///
+    /// Configure the builder with [`Builder::external_event_loop`] to move the
+    /// blocking Mio wait to the dedicated readiness-only reactor thread.
+    pub fn tick_nonblocking(&self) -> crate::runtime::TickResult {
+        if let LocalRuntimeScheduler::CurrentThread(exec) = &self.scheduler {
+            exec.tick_nonblocking(&self.handle.inner, None)
+        } else {
+            unreachable!("LocalRuntime only supports current_thread")
+        }
+    }
+
     /// Spawns a task on the runtime.
     ///
     /// This is analogous to the [`spawn`] method on the standard [`Runtime`], but works even if the task is not thread-safe.

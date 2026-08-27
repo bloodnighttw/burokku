@@ -547,6 +547,14 @@ impl LocalSet {
         )
     }
 
+    pub(crate) fn poll_external(&mut self, cx: &mut std::task::Context<'_>) {
+        let _no_blocking = crate::runtime::context::disallow_block_in_place();
+        self.context.shared.waker.register_by_ref(cx.waker());
+        if self.with(|| self.tick()) {
+            cx.waker().wake_by_ref();
+        }
+    }
+
     /// Spawns a `!Send` task onto the local task set.
     ///
     /// This task is guaranteed to be run on the current thread.

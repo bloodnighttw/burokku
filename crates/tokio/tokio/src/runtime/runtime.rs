@@ -202,6 +202,59 @@ impl Runtime {
         &self.handle
     }
 
+    /// Runs one bounded, nonblocking current-thread scheduler iteration.
+    ///
+    /// This directly enters Tokio's current-thread scheduler, expires timers,
+    /// polls at most the configured external task budget, and performs only
+    /// zero-duration driver turns. It never waits for I/O. Configure the
+    /// runtime with [`Builder::external_event_loop`] to move Mio's blocking
+    /// readiness wait to the dedicated reactor thread.
+    ///
+    /// If `has_more_work` is returned, arrange another platform-loop callback.
+    /// Arm a platform-native timer for `next_deadline` when present.
+    ///
+    /// # Panics
+    ///
+    /// Panics for a multi-thread runtime or when called recursively/concurrently
+    /// on the same current-thread runtime.
+    ///
+    /// [`Builder::external_event_loop`]: crate::runtime::Builder::external_event_loop
+    pub fn tick_nonblocking(&self) -> crate::runtime::TickResult {
+        match &self.scheduler {
+            Scheduler::CurrentThread(exec) => exec.tick_nonblocking(&self.handle.inner, None),
+            #[cfg(feature = "rt-multi-thread")]
+            Scheduler::MultiThread(_) => {
+                panic!("tick_nonblocking requires a current_thread runtime")
+            }
+        }
+    }
+
+    /// Runs one bounded scheduler iteration while also driving a [`LocalSet`].
+    ///
+    /// This is the external-event-loop counterpart to driving
+    /// `LocalSet::run_until`: local futures are always polled on the calling
+    /// thread, while the Mio reactor thread only publishes readiness.
+    ///
+    /// [`LocalSet`]: crate::task::LocalSet
+    pub fn tick_nonblocking_with_local_set(
+        &self,
+        local_set: &mut crate::task::LocalSet,
+    ) -> crate::runtime::TickResult {
+        let mut poll_local = |cx: &mut std::task::Context<'_>| {
+            local_set.poll_external(cx);
+        };
+
+        match &self.scheduler {
+            Scheduler::CurrentThread(exec) => {
+                exec.tick_nonblocking(&self.handle.inner, Some(&mut poll_local))
+            }
+            #[cfg(feature = "rt-multi-thread")]
+            Scheduler::MultiThread(_) => {
+                panic!("tick_nonblocking_with_local_set requires a current_thread runtime")
+            }
+        }
+    }
+
     /// Spawns a future onto the Tokio runtime.
     ///
     /// This spawns the given future onto the runtime's executor, usually a
