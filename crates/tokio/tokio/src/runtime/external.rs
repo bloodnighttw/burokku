@@ -25,8 +25,10 @@ where
 pub struct TickResult {
     /// Tokio still has immediately runnable scheduler or local-set work.
     ///
-    /// The platform integration should arrange another prompt tick when this
-    /// is true rather than looping indefinitely in one native callback.
+    /// When an [`ExternalWake`] is configured, Tokio
+    /// signals it before returning this result so the platform can promptly
+    /// run another bounded tick. Integrations should not wait for
+    /// [`next_deadline`](Self::next_deadline) while this is true.
     pub has_more_work: bool,
 
     /// The earliest Tokio timer deadline currently known to the timer wheel.

@@ -61,9 +61,12 @@ fn unhandled_panic_restores_core_before_tick_panics() {
 
 #[test]
 fn bounded_tick_reports_remaining_work() {
-    let wake = Arc::new(|| {});
+    let wake_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_pending = wake_pending.clone();
     let runtime = Builder::new_current_thread()
-        .external_event_loop(wake)
+        .external_event_loop(Arc::new(move || {
+            callback_pending.store(true, std::sync::atomic::Ordering::Release);
+        }))
         .external_tick_budget(2)
         .build()
         .unwrap();
@@ -76,13 +79,83 @@ fn bounded_tick_reports_remaining_work() {
         });
     }
 
+    // Model a coalescing native-loop source consuming its pending signal.
+    wake_pending.store(false, std::sync::atomic::Ordering::Release);
     let first = runtime.tick_nonblocking();
     assert_eq!(first.tasks_polled, 2);
     assert!(first.has_more_work);
+    assert!(
+        wake_pending.swap(false, std::sync::atomic::Ordering::AcqRel),
+        "budget exhaustion did not request a prompt external tick"
+    );
     assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 2);
 
     while runtime.tick_nonblocking().has_more_work {}
     assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 5);
+}
+
+#[test]
+fn prompt_reticks_discover_short_timer_after_many_long_timers() {
+    let wake_pending = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let callback_pending = wake_pending.clone();
+    let runtime = Builder::new_current_thread()
+        .enable_time()
+        .external_event_loop(Arc::new(move || {
+            callback_pending.store(true, std::sync::atomic::Ordering::Release);
+        }))
+        .external_tick_budget(1)
+        .build()
+        .unwrap();
+
+    // Model many 100 ms timers followed by one 1 ms timer with scaled-up
+    // deadlines so a slow test runner cannot expire them during setup.
+    let started = Instant::now();
+    let long_deadline = tokio::time::Instant::from_std(started + Duration::from_secs(60));
+    let short_deadline = tokio::time::Instant::from_std(started + Duration::from_secs(10));
+    let long_timers_registered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let short_timer_registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    for _ in 0..100 {
+        let handle = runtime.handle().clone();
+        let long_timers_registered = long_timers_registered.clone();
+        let short_timer_registered = short_timer_registered.clone();
+        runtime.spawn(async move {
+            let long_sleep = tokio::time::sleep_until(long_deadline);
+            if long_timers_registered.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 99 {
+                handle.spawn(async move {
+                    short_timer_registered.store(true, std::sync::atomic::Ordering::Release);
+                    tokio::time::sleep_until(short_deadline).await;
+                });
+            }
+            long_sleep.await;
+        });
+    }
+
+    let result = (0..128)
+        .find_map(|_| {
+            assert!(
+                wake_pending.swap(false, std::sync::atomic::Ordering::AcqRel),
+                "runnable work did not request the next external-loop callback"
+            );
+            let result = runtime.tick_nonblocking();
+            if short_timer_registered.load(std::sync::atomic::Ordering::Acquire) {
+                Some(result)
+            } else {
+                assert!(result.has_more_work);
+                None
+            }
+        })
+        .expect("short timer task was not polled after prompt budget reticks");
+
+    assert_eq!(
+        long_timers_registered.load(std::sync::atomic::Ordering::Acquire),
+        100
+    );
+    let reported = result.next_deadline.expect("short timer deadline");
+    assert!(
+        reported < started + Duration::from_secs(20),
+        "reported long timer deadline instead of short timer: {reported:?}"
+    );
 }
 
 #[test]

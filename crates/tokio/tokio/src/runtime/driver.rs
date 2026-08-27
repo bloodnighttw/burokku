@@ -103,6 +103,10 @@ impl Handle {
         }
     }
 
+    pub(crate) fn wake_external(&self) {
+        self.io.wake_external();
+    }
+
     cfg_io_driver! {
         #[track_caller]
         pub(crate) fn io(&self) -> &crate::runtime::io::Handle {
@@ -249,15 +253,19 @@ cfg_io_driver! {
                 IoHandleInner::Disabled(handle) => handle.unpark(),
             }
 
-            if let Some(wake) = &self.external_wake {
-                wake.wake();
-            }
+            self.wake_external();
         }
 
         pub(crate) fn as_ref(&self) -> Option<&crate::runtime::io::Handle> {
             match &self.inner {
                 IoHandleInner::Enabled(v) => Some(v),
                 IoHandleInner::Disabled(..) => None,
+            }
+        }
+
+        fn wake_external(&self) {
+            if let Some(wake) = &self.external_wake {
+                wake.wake();
             }
         }
     }
@@ -301,6 +309,10 @@ cfg_not_io_driver! {
     impl IoHandle {
         pub(crate) fn unpark(&self) {
             self.inner.unpark();
+            self.wake_external();
+        }
+
+        fn wake_external(&self) {
             if let Some(wake) = &self.external_wake {
                 wake.wake();
             }

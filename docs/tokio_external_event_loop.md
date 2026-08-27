@@ -90,7 +90,14 @@ A tick:
 5. polls at most `external_tick_budget` regular scheduler tasks;
 6. performs another zero-duration driver turn so timers registered by those
    tasks are visible;
-7. returns immediate-work state and the earliest timer-wheel deadline.
+7. signals `ExternalWake` when the budget leaves immediately runnable work;
+8. returns immediate-work state and the earliest timer-wheel deadline.
+
+A returned deadline only covers timers registered by tasks polled so far. When
+`has_more_work` is true, the automatic wake requests another bounded platform
+callback instead of allowing the host to sleep until that partial deadline.
+This promptly exposes an earlier timer created by a task beyond the previous
+budget while preserving UI responsiveness.
 
 The count bound is not preemption. One future can perform arbitrarily long
 synchronous work in one `poll`, which blocks both AppKit and Tokio as expected.
@@ -147,9 +154,12 @@ not only at the scheduler handle. This covers:
 - ordinary scheduler unpark transitions.
 
 The callback can execute on the main thread, the Mio reactor, or another
-producer thread. It must only signal the native loop and return. It must not
-recursively tick Tokio. Platform integrations should coalesce signals if their
-native primitive does not already do so.
+producer thread. It is also invoked before a bounded tick returns when
+`has_more_work` is true, so work left by `external_tick_budget` causes a prompt
+follow-up callback rather than a wait for `next_deadline`. It must only signal
+the native loop and return. It must not recursively tick Tokio. Platform
+integrations should coalesce signals if their native primitive does not already
+do so.
 
 `next_deadline` queries the authoritative traditional timer wheel under its
 existing lock and converts the remaining duration using Tokio's runtime clock.

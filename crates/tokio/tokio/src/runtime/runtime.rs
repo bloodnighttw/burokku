@@ -210,8 +210,10 @@ impl Runtime {
     /// runtime with [`Builder::external_event_loop`] to move Mio's blocking
     /// readiness wait to the dedicated reactor thread.
     ///
-    /// If `has_more_work` is returned, arrange another platform-loop callback.
-    /// Arm a platform-native timer for `next_deadline` when present.
+    /// When `has_more_work` is returned, Tokio signals the configured external
+    /// wake before returning so the platform can run another prompt callback.
+    /// Do not wait for `next_deadline` while immediate work remains; otherwise,
+    /// arm a platform-native timer for that deadline when present.
     ///
     /// # Panics
     ///

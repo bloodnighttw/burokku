@@ -257,7 +257,14 @@ impl CurrentThread {
                 .shared
                 .worker_metrics
                 .set_thread_id(thread::current().id());
-            core.tick_nonblocking(root)
+            let result = core.tick_nonblocking(root);
+            if result.has_more_work {
+                // A deadline only describes timers registered by tasks polled
+                // so far. Promptly re-enter the host loop to expose timers in
+                // work left behind by the external tick budget.
+                handle.driver.wake_external();
+            }
+            result
         })
     }
 

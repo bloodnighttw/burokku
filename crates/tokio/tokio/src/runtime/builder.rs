@@ -1248,8 +1248,11 @@ impl Builder {
     /// signals `wake`; it never polls application futures. Scheduler tasks and
     /// timer expiration remain driven by [`Runtime::tick_nonblocking`].
     ///
-    /// The callback may run from any thread. It should only signal the host
-    /// event loop and return; it must not call Tokio's tick recursively.
+    /// The callback may run from any thread. Tokio also invokes it when a
+    /// bounded external tick leaves immediately runnable work, ensuring the
+    /// host promptly discovers timers registered by later tasks. It should only
+    /// signal the host event loop and return; it must not call Tokio's tick
+    /// recursively.
     ///
     /// Paused/virtual time is not supported with native deadline driving.
     /// On WASI, building external mode with I/O enabled returns an unsupported
