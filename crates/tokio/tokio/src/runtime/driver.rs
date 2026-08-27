@@ -10,6 +10,7 @@
 use crate::runtime::park::{ParkThread, UnparkThread};
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -41,11 +42,13 @@ pub(crate) struct Cfg {
     pub(crate) start_paused: bool,
     pub(crate) nevents: usize,
     pub(crate) timer_flavor: crate::runtime::TimerFlavor,
+    pub(crate) external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
 }
 
 impl Driver {
     pub(crate) fn new(cfg: Cfg) -> io::Result<(Self, Handle)> {
-        let (io_stack, io_handle, signal_handle) = create_io_stack(cfg.enable_io, cfg.nevents)?;
+        let (io_stack, io_handle, signal_handle) =
+            create_io_stack(cfg.enable_io, cfg.nevents, cfg.external_wake)?;
 
         let clock = create_clock(cfg.enable_pause_time, cfg.start_paused);
 
@@ -84,6 +87,20 @@ impl Handle {
         }
 
         self.io.unpark();
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        #[cfg(feature = "time")]
+        {
+            self.time
+                .as_ref()
+                .and_then(|time| time.next_deadline(&self.clock))
+        }
+
+        #[cfg(not(feature = "time"))]
+        {
+            None
+        }
     }
 
     cfg_io_driver! {
@@ -140,30 +157,63 @@ cfg_io_driver! {
         Disabled(ParkThread),
     }
 
+    pub(crate) struct IoHandle {
+        inner: IoHandleInner,
+        external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
+    }
+
     #[derive(Debug)]
-    pub(crate) enum IoHandle {
+    enum IoHandleInner {
         Enabled(crate::runtime::io::Handle),
         Disabled(UnparkThread),
     }
 
-    fn create_io_stack(enabled: bool, nevents: usize) -> io::Result<(IoStack, IoHandle, SignalHandle)> {
+    fn create_io_stack(
+        enabled: bool,
+        nevents: usize,
+        external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
+    ) -> io::Result<(IoStack, IoHandle, SignalHandle)> {
         #[cfg(loom)]
         assert!(!enabled);
 
-        let ret = if enabled {
-            let (io_driver, io_handle) = crate::runtime::io::Driver::new(nevents)?;
+        #[cfg(target_os = "wasi")]
+        if enabled && external_wake.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "external event-loop I/O requires a dedicated Mio reactor thread, which is unavailable on WASI",
+            ));
+        }
+
+        let (io_stack, inner, signal_handle) = if enabled {
+            let (io_driver, io_handle) =
+                crate::runtime::io::Driver::new(nevents, external_wake.clone())?;
 
             let (signal_driver, signal_handle) = create_signal_driver(io_driver, &io_handle)?;
             let process_driver = create_process_driver(signal_driver);
 
-            (IoStack::Enabled(process_driver), IoHandle::Enabled(io_handle), signal_handle)
+            (
+                IoStack::Enabled(process_driver),
+                IoHandleInner::Enabled(io_handle),
+                signal_handle,
+            )
         } else {
             let park_thread = ParkThread::new();
             let unpark_thread = park_thread.unpark();
-            (IoStack::Disabled(park_thread), IoHandle::Disabled(unpark_thread), Default::default())
+            (
+                IoStack::Disabled(park_thread),
+                IoHandleInner::Disabled(unpark_thread),
+                Default::default(),
+            )
         };
 
-        Ok(ret)
+        Ok((
+            io_stack,
+            IoHandle {
+                inner,
+                external_wake,
+            },
+            signal_handle,
+        ))
     }
 
     impl IoStack {
@@ -191,31 +241,76 @@ cfg_io_driver! {
 
     impl IoHandle {
         pub(crate) fn unpark(&self) {
-            match self {
-                IoHandle::Enabled(handle) => handle.unpark(),
-                IoHandle::Disabled(handle) => handle.unpark(),
+            match &self.inner {
+                IoHandleInner::Enabled(handle) => handle.unpark(),
+                IoHandleInner::Disabled(handle) => handle.unpark(),
+            }
+
+            if let Some(wake) = &self.external_wake {
+                wake.wake();
             }
         }
 
         pub(crate) fn as_ref(&self) -> Option<&crate::runtime::io::Handle> {
-            match self {
-                IoHandle::Enabled(v) => Some(v),
-                IoHandle::Disabled(..) => None,
+            match &self.inner {
+                IoHandleInner::Enabled(v) => Some(v),
+                IoHandleInner::Disabled(..) => None,
             }
+        }
+    }
+
+    impl std::fmt::Debug for IoHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("IoHandle")
+                .field("inner", &self.inner)
+                .field("external_wake", &self.external_wake.as_ref().map(|_| "configured"))
+                .finish()
         }
     }
 }
 
 cfg_not_io_driver! {
-    pub(crate) type IoHandle = UnparkThread;
+    pub(crate) struct IoHandle {
+        inner: UnparkThread,
+        external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
+    }
 
     #[derive(Debug)]
     pub(crate) struct IoStack(ParkThread);
 
-    fn create_io_stack(_enabled: bool, _nevents: usize) -> io::Result<(IoStack, IoHandle, SignalHandle)> {
+    fn create_io_stack(
+        _enabled: bool,
+        _nevents: usize,
+        external_wake: Option<Arc<dyn crate::runtime::ExternalWake>>,
+    ) -> io::Result<(IoStack, IoHandle, SignalHandle)> {
         let park_thread = ParkThread::new();
         let unpark_thread = park_thread.unpark();
-        Ok((IoStack(park_thread), unpark_thread, Default::default()))
+        Ok((
+            IoStack(park_thread),
+            IoHandle {
+                inner: unpark_thread,
+                external_wake,
+            },
+            Default::default(),
+        ))
+    }
+
+    impl IoHandle {
+        pub(crate) fn unpark(&self) {
+            self.inner.unpark();
+            if let Some(wake) = &self.external_wake {
+                wake.wake();
+            }
+        }
+    }
+
+    impl std::fmt::Debug for IoHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("IoHandle")
+                .field("inner", &self.inner)
+                .field("external_wake", &self.external_wake.as_ref().map(|_| "configured"))
+                .finish()
+        }
     }
 
     impl IoStack {

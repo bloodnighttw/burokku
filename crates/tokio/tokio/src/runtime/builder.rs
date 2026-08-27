@@ -2,7 +2,7 @@
 
 use crate::runtime::handle::Handle;
 use crate::runtime::{
-    blocking, driver, Callback, HistogramBuilder, Runtime, TaskCallback, TimerFlavor,
+    blocking, driver, Callback, ExternalWake, HistogramBuilder, Runtime, TaskCallback, TimerFlavor,
 };
 #[cfg(tokio_unstable)]
 use crate::runtime::{metrics::HistogramConfiguration, TaskMeta};
@@ -123,6 +123,12 @@ pub struct Builder {
 
     /// How many ticks before yielding to the driver for timer and I/O events?
     pub(super) event_interval: u32,
+
+    /// Platform event-loop notifier and Mio reactor-thread switch.
+    external_wake: Option<std::sync::Arc<dyn ExternalWake>>,
+
+    /// Maximum regular scheduler tasks polled by one external tick.
+    external_tick_budget: usize,
 
     /// When true, the multi-threade scheduler LIFO slot should not be used.
     ///
@@ -331,6 +337,8 @@ impl Builder {
             // as parameters.
             global_queue_interval: None,
             event_interval,
+            external_wake: None,
+            external_tick_budget: 64,
 
             seed_generator: RngSeedGenerator::new(RngSeed::new()),
 
@@ -1121,6 +1129,7 @@ impl Builder {
             start_paused: self.start_paused,
             nevents: self.nevents,
             timer_flavor: self.timer_flavor,
+            external_wake: self.external_wake.clone(),
         }
     }
 
@@ -1229,6 +1238,45 @@ impl Builder {
     pub fn event_interval(&mut self, val: u32) -> &mut Self {
         assert!(val > 0, "event_interval must be greater than 0");
         self.event_interval = val;
+        self
+    }
+
+    /// Configures this current-thread runtime for external event-loop driving.
+    ///
+    /// When I/O is enabled, Tokio moves the blocking Mio readiness wait to one
+    /// dedicated reactor thread. That thread only publishes readiness and
+    /// signals `wake`; it never polls application futures. Scheduler tasks and
+    /// timer expiration remain driven by [`Runtime::tick_nonblocking`].
+    ///
+    /// The callback may run from any thread. It should only signal the host
+    /// event loop and return; it must not call Tokio's tick recursively.
+    ///
+    /// Paused/virtual time is not supported with native deadline driving.
+    /// On WASI, building external mode with I/O enabled returns an unsupported
+    /// error because no dedicated Mio reactor thread is available.
+    ///
+    /// # Panics
+    ///
+    /// Building a multi-thread runtime after setting this option panics.
+    ///
+    /// [`Runtime::tick_nonblocking`]: crate::runtime::Runtime::tick_nonblocking
+    pub fn external_event_loop(
+        &mut self,
+        wake: std::sync::Arc<dyn ExternalWake>,
+    ) -> &mut Self {
+        self.external_wake = Some(wake);
+        self
+    }
+
+    /// Sets the maximum number of regular scheduler tasks polled by one
+    /// externally driven tick. The default is 64.
+    ///
+    /// A task's individual `poll` call is cooperative and cannot be preempted,
+    /// so this is a poll-count bound rather than a wall-clock deadline.
+    #[track_caller]
+    pub fn external_tick_budget(&mut self, max_tasks: usize) -> &mut Self {
+        assert!(max_tasks > 0, "external tick budget must be greater than 0");
+        self.external_tick_budget = max_tasks;
         self
     }
 
@@ -1710,6 +1758,7 @@ impl Builder {
                 after_termination: self.after_termination.clone(),
                 global_queue_interval: self.global_queue_interval,
                 event_interval: self.event_interval,
+                external_tick_budget: self.external_tick_budget,
                 #[cfg(tokio_unstable)]
                 unhandled_panic: self.unhandled_panic.clone(),
                 disable_lifo_slot: self.disable_lifo_slot,
@@ -2003,6 +2052,11 @@ cfg_rt_multi_thread! {
         fn build_threaded_runtime(&mut self) -> io::Result<Runtime> {
             use crate::loom::sys::num_cpus;
             use crate::runtime::{Config, runtime::Scheduler};
+
+            assert!(
+                self.external_wake.is_none(),
+                "external event-loop driving is only supported by the current_thread runtime"
+            );
             use crate::runtime::scheduler::{self, MultiThread};
 
             let worker_threads = self.worker_threads.unwrap_or_else(num_cpus);
@@ -2035,6 +2089,7 @@ cfg_rt_multi_thread! {
                     after_termination: self.after_termination.clone(),
                     global_queue_interval: self.global_queue_interval,
                     event_interval: self.event_interval,
+                    external_tick_budget: self.external_tick_budget,
                     #[cfg(tokio_unstable)]
                     unhandled_panic: self.unhandled_panic.clone(),
                     disable_lifo_slot: self.disable_lifo_slot,

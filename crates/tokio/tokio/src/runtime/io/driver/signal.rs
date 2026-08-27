@@ -15,8 +15,7 @@ impl Handle {
 
 impl Driver {
     pub(crate) fn consume_signal_ready(&mut self) -> bool {
-        let ret = self.signal_ready;
-        self.signal_ready = false;
-        ret
+        self.signal_ready
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 }

@@ -293,6 +293,20 @@ impl Handle {
         self.process_at_time(now);
     }
 
+    pub(crate) fn next_deadline(&self, clock: &Clock) -> Option<std::time::Instant> {
+        let next_tick = match &self.inner {
+            Inner::Traditional { state, .. } => state.lock().wheel.next_expiration_time(),
+            #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))]
+            Inner::Alternative { .. } => None,
+        }?;
+
+        let now = self.time_source().now(clock);
+        let remaining = self
+            .time_source()
+            .tick_to_duration(next_tick.saturating_sub(now));
+        clock.now().into_std().checked_add(remaining)
+    }
+
     pub(self) fn process_at_time(&self, mut now: u64) {
         let mut waker_list = WakeList::new();
 

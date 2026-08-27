@@ -7,7 +7,8 @@ use crate::runtime::task::{
     TaskHarnessScheduleHooks,
 };
 use crate::runtime::{
-    blocking, context, Config, MetricsBatch, SchedulerMetrics, TaskHooks, TaskMeta, WorkerMetrics,
+    blocking, context, Config, MetricsBatch, SchedulerMetrics, TaskHooks, TaskMeta, TickResult,
+    WorkerMetrics,
 };
 use crate::sync::notify::Notify;
 use crate::util::atomic_cell::AtomicCell;
@@ -241,6 +242,25 @@ impl CurrentThread {
         })
     }
 
+    #[track_caller]
+    pub(crate) fn tick_nonblocking(
+        &self,
+        handle: &scheduler::Handle,
+        root: Option<&mut dyn FnMut(&mut std::task::Context<'_>)>,
+    ) -> TickResult {
+        crate::runtime::context::enter_runtime(handle, false, |_| {
+            let handle = handle.as_current_thread();
+            let core = self.take_core(handle).unwrap_or_else(|| {
+                panic!("cannot recursively or concurrently tick a current_thread runtime")
+            });
+            handle
+                .shared
+                .worker_metrics
+                .set_thread_id(thread::current().id());
+            core.tick_nonblocking(root)
+        })
+    }
+
     fn take_core(&self, handle: &Arc<Handle>) -> Option<CoreGuard<'_>> {
         let core = self.core.take()?;
 
@@ -457,7 +477,10 @@ impl Context {
     }
 
     fn has_pending_work(&self, core: &Core) -> bool {
-        !core.tasks.is_empty() || !self.defer.is_empty() || self.handle.shared.woken.load(Acquire)
+        !core.tasks.is_empty()
+            || !self.defer.is_empty()
+            || self.handle.shared.inject.len() != 0
+            || self.handle.shared.woken.load(Acquire)
     }
 
     fn park_internal(
@@ -889,6 +912,75 @@ impl CoreGuard<'_> {
                 panic!("a spawned task panicked and the runtime is configured to shut down on unhandled panic");
             }
         }
+    }
+
+    fn tick_nonblocking(
+        self,
+        mut root: Option<&mut dyn FnMut(&mut std::task::Context<'_>)>,
+    ) -> TickResult {
+        let (result, unhandled_panic) = self.enter(|mut core, context| {
+            let handle = &context.handle;
+
+            core.metrics.start_processing_scheduled_tasks();
+
+            // Expire timers before polling ready work. In external-reactor mode
+            // the nested I/O park is a zero-duration scheduler parker; Mio is
+            // exclusively owned by the reactor thread.
+            core.metrics.end_processing_scheduled_tasks();
+            core = context.park_yield(core, handle);
+            core.metrics.start_processing_scheduled_tasks();
+
+            if let Some(root) = root.as_mut() {
+                let waker = Handle::waker_ref(handle);
+                let mut cx = std::task::Context::from_waker(&waker);
+                // waker_ref primes the bit. Clear that synthetic wake, then
+                // always poll a supplied root once so a fresh LocalSet can
+                // register its waker and discover pre-existing local tasks.
+                handle.reset_woken();
+                let (c, ()) = context.enter(core, || {
+                    crate::task::coop::budget(|| root(&mut cx));
+                });
+                core = c;
+            } else {
+                // Do not retain a wake bit from a root future used by an earlier
+                // tick-with-local-set call.
+                handle.reset_woken();
+            }
+
+            let mut tasks_polled = 0;
+            while tasks_polled < handle.shared.config.external_tick_budget {
+                if core.unhandled_panic {
+                    break;
+                }
+
+                core.tick();
+                let Some(task) = core.next_task(handle) else {
+                    break;
+                };
+                let task = handle.shared.owned.assert_owner(task);
+                core = context.run_task(task, core);
+                tasks_polled += 1;
+            }
+
+            core.metrics.end_processing_scheduled_tasks();
+            if !core.unhandled_panic {
+                core = context.park_yield(core, handle);
+            }
+
+            let unhandled_panic = core.unhandled_panic;
+            let result = TickResult {
+                has_more_work: context.has_pending_work(&core),
+                next_deadline: handle.driver.next_deadline(),
+                tasks_polled,
+            };
+            (core, (result, unhandled_panic))
+        });
+
+        if unhandled_panic {
+            // Panic only after CoreGuard::enter restored the scheduler core.
+            panic!("a spawned task panicked and the runtime is configured to shut down on unhandled panic");
+        }
+        result
     }
 
     /// Enters the scheduler context. This sets the queue and other necessary
