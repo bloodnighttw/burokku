@@ -149,13 +149,9 @@ where
     /// Advances the timer up to the instant represented by `now`.
     pub(crate) fn poll(&mut self, now: u64, store: &mut T::Store) -> Option<T::Owned> {
         loop {
-            let expiration = self.next_expiration().and_then(|expiration| {
-                if expiration.deadline > now {
-                    None
-                } else {
-                    Some(expiration)
-                }
-            });
+            let expiration = self
+                .next_expiration()
+                .filter(|expiration| expiration.deadline <= now);
 
             match expiration {
                 Some(ref expiration) => {
