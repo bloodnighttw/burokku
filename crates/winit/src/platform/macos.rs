@@ -47,6 +47,7 @@ const DORMANT_TIMER_INTERVAL: f64 = 86_400.0;
 
 struct PlatformWakeState {
     run_loop: usize,
+    // hold the pointer to the CFRunLoopSourceRef
     source: Mutex<usize>,
 }
 
