@@ -3,18 +3,15 @@ use std::{
     collections::VecDeque,
     rc::{Rc, Weak},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use tokio::{
     runtime::{Builder, Runtime, RuntimeFlavor},
-    sync::Notify,
     task::LocalSet,
 };
 
 use crate::{platform::PlatformTick, Window, WindowAttributes, WindowEvent, WindowId};
-
-const POLL_INTERVAL: Duration = Duration::from_millis(4);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ControlFlow {
@@ -55,27 +52,22 @@ pub trait ApplicationHandler {
 
 #[derive(Clone, Debug)]
 pub(crate) struct EventLoopWaker {
-    notified: Arc<Notify>,
     platform: crate::platform::PlatformWake,
 }
 
 impl EventLoopWaker {
     fn new(platform: crate::platform::PlatformWake) -> Self {
-        Self {
-            notified: Arc::new(Notify::new()),
-            platform,
-        }
+        Self { platform }
     }
 
     pub(crate) fn wake_up(&self) {
-        self.notified.notify_one();
         self.platform.wake_up();
     }
 }
 
 /// Buffers native events emitted while an application callback is already
-/// active. Events emitted by the native platform pump are otherwise delivered
-/// immediately so nested platform loops, including macOS live resize, can keep
+/// active. Events emitted by native callbacks are otherwise delivered immediately
+/// so nested platform loops, including macOS live resize, can keep
 /// the application surface and layout synchronized.
 #[derive(Clone, Default)]
 struct WindowEventQueue {
@@ -121,7 +113,7 @@ fn dispatch_or_defer<A>(
 }
 
 /// Clears an installed native event handler on every exit path, including
-/// cancellation while [`EventLoop::run_app`] is suspended at an await point.
+/// application or runtime panics during [`EventLoop::run_app_external`].
 struct EventHandlerGuard<F: FnOnce()> {
     clear: Option<F>,
 }
@@ -146,9 +138,9 @@ impl<F: FnOnce()> Drop for EventHandlerGuard<F> {
 
 /// A thread-safe handle for promptly waking an idle native event loop.
 ///
-/// Waking does not itself dispatch an application event. It causes the loop to
-/// pump native events and invoke `about_to_wait`, where cross-thread state can
-/// be consumed without busy polling.
+/// Waking does not itself dispatch an application event. It schedules a bounded
+/// Tokio tick and invokes `about_to_wait`, where cross-thread state can be consumed
+/// without busy polling.
 #[derive(Clone, Debug)]
 pub struct EventLoopProxy {
     waker: EventLoopWaker,
@@ -255,12 +247,12 @@ impl EventLoop {
     /// Create and show a native window.
     ///
     /// This must be called on the platform event-loop thread, before or during
-    /// [`run_app`](Self::run_app). On macOS, that is the process main thread.
+    /// [`run_app_external`](Self::run_app_external). On macOS, that is the process main thread.
     pub fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
         self.active.create_window(attributes)
     }
 
-    /// Flush pending native window ordering before the asynchronous event loop
+    /// Flush pending native window ordering before the external event loop
     /// starts. This is useful when renderer initialization happens after the
     /// first Window is created.
     pub fn flush_windows(&self) {
@@ -283,113 +275,11 @@ impl EventLoop {
         builder
     }
 
-    /// Drive the native event queue as part of the current Tokio runtime.
-    ///
-    /// This future is intentionally `!Send` because native event loops are
-    /// thread-affine (AppKit requires the process main thread). Drive it
-    /// directly from the runtime's main `block_on` future; other `Send` tasks
-    /// may use Tokio worker threads normally.
-    /// The handler is returned after the loop exits so callers can inspect
-    /// application state or deferred errors.
-    pub async fn run_app<A: ApplicationHandler + 'static>(
-        &mut self,
-        application: A,
-    ) -> crate::Result<A> {
-        if self.has_run {
-            return Err(crate::Error::AlreadyRun);
-        }
-        self.has_run = true;
-
-        let application = Rc::new(RefCell::new(application));
-        let events = WindowEventQueue::default();
-        self.platform.borrow().set_handler({
-            let active = self.active.clone();
-            let application = Rc::clone(&application);
-            let deferred = events.clone();
-            move |window_id, event| {
-                dispatch_or_defer(
-                    &application,
-                    &deferred,
-                    window_id,
-                    event,
-                    |application, window_id, event| {
-                        application.window_event(&active, window_id, event);
-                    },
-                );
-            }
-        });
-        let mut handler_guard = EventHandlerGuard::new({
-            let platform = Rc::clone(&self.platform);
-            move || platform.borrow().clear_handler()
-        });
-
-        application.borrow_mut().resumed(&self.active);
-        events.drain(|window_id, event| {
-            application
-                .borrow_mut()
-                .window_event(&self.active, window_id, event);
-        });
-
-        while !self.active.exiting() {
-            // Platform callbacks dispatch immediately while the pump holds only
-            // a shared platform borrow. This remains responsive inside nested
-            // native loops such as macOS live resize.
-            self.platform.borrow().pump();
-            events.drain(|window_id, event| {
-                application
-                    .borrow_mut()
-                    .window_event(&self.active, window_id, event);
-            });
-
-            application.borrow_mut().about_to_wait(&self.active);
-            events.drain(|window_id, event| {
-                application
-                    .borrow_mut()
-                    .window_event(&self.active, window_id, event);
-            });
-            if self.active.exiting() {
-                break;
-            }
-
-            match self.active.control_flow() {
-                ControlFlow::Poll => tokio::task::yield_now().await,
-                ControlFlow::Wait => {
-                    tokio::select! {
-                        _ = self.waker.notified.notified() => {}
-                        _ = tokio::time::sleep(POLL_INTERVAL) => {}
-                    }
-                }
-                ControlFlow::WaitUntil(deadline) => {
-                    let now = Instant::now();
-                    if deadline <= now {
-                        tokio::task::yield_now().await;
-                    } else {
-                        tokio::select! {
-                            _ = self.waker.notified.notified() => {}
-                            _ = tokio::time::sleep(
-                                deadline.saturating_duration_since(now).min(POLL_INTERVAL),
-                            ) => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        application.borrow_mut().exiting(&self.active);
-
-        handler_guard.clear();
-
-        match Rc::try_unwrap(application) {
-            Ok(application) => Ok(application.into_inner()),
-            Err(_) => unreachable!("the platform event handler retains the application"),
-        }
-    }
-
     /// Let the native main loop drive a patched Tokio current-thread runtime.
     ///
-    /// This is the inverse of [`run_app`](Self::run_app): the platform owns the
-    /// outer wait while native callbacks perform bounded nonblocking Tokio
-    /// ticks. This keeps nested native loops responsive (for example, AppKit's
+    /// The platform owns the outer wait while native callbacks perform bounded
+    /// nonblocking Tokio ticks. This keeps nested native loops responsive
+    /// (for example, AppKit's
     /// live-resize loop) while local Tokio, QuickJS, or LLRT tasks continue to
     /// run on the event-loop thread.
     ///
@@ -513,10 +403,7 @@ impl EventLoop {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future::Future,
-        task::{Context, Poll, Waker},
-    };
+    use std::time::Duration;
 
     use super::*;
 
@@ -550,21 +437,14 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_guarded_future_runs_handler_cleanup() {
+    fn dropping_guard_runs_handler_cleanup() {
         let cleared = Rc::new(Cell::new(false));
-        let mut future = Box::pin({
-            let cleared = Rc::clone(&cleared);
-            async move {
-                let _handler_guard = EventHandlerGuard::new(move || cleared.set(true));
-                std::future::pending::<()>().await;
-            }
-        });
-        let mut context = Context::from_waker(Waker::noop());
+        {
+            let guard_cleared = Rc::clone(&cleared);
+            let _handler_guard = EventHandlerGuard::new(move || guard_cleared.set(true));
+            assert!(!cleared.get());
+        }
 
-        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
-        assert!(!cleared.get());
-
-        drop(future);
         assert!(cleared.get());
     }
 

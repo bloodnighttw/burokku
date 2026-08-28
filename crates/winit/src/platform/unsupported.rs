@@ -50,8 +50,6 @@ impl PlatformEventLoop {
 
     pub(crate) fn flush_windows(&self) {}
 
-    pub(crate) fn pump(&self) {}
-
     pub(crate) fn run_external(
         &self,
         _tick: impl FnMut() -> PlatformTick,
