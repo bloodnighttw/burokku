@@ -1,8 +1,9 @@
 //! AppKit-owned main loop driving a patched Tokio current-thread runtime.
 //!
-//! Run on macOS, then continuously live-resize the window. `timer tick` and
-//! the HTTP request continue because both the CF source and timer are installed
-//! in `NSEventTrackingRunLoopMode` as well as common modes.
+//! Run on macOS, then continuously live-resize the window. LLRT executes
+//! JavaScript that increments a counter every second and fetches example.com
+//! every three seconds. Both continue because the CF source and timer are
+//! installed in `NSEventTrackingRunLoopMode` as well as common modes.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -21,6 +22,7 @@ mod appkit {
     use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease};
     use core_foundation_sys::date::CFAbsoluteTimeGetCurrent;
     use core_foundation_sys::runloop::*;
+    use llrt_utils::primordials::{BasePrimordials, Primordial};
     use objc2::MainThreadOnly;
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
@@ -28,6 +30,15 @@ mod appkit {
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
     use tokio::runtime::{Builder, ExternalWake, Runtime};
+    use tokio::task::LocalSet;
+
+    const LLRT_SCRIPT: &str = include_str!("cf_run_loop_tokio.js");
+
+    fn install_llrt_globals(context: &runtime::rquickjs::Ctx<'_>) -> runtime::Result<()> {
+        BasePrimordials::init(context)?;
+        let (_, _, globals) = llrt_modules::module_builder::ModuleBuilder::default().build();
+        globals.attach(context)
+    }
 
     struct Wake {
         run_loop: AtomicUsize,
@@ -56,6 +67,7 @@ mod appkit {
 
     struct State {
         runtime: RefCell<Option<Runtime>>,
+        local: RefCell<Option<LocalSet>>,
         wake: Arc<Wake>,
         timer: Cell<CFRunLoopTimerRef>,
         in_tick: Cell<bool>,
@@ -68,14 +80,14 @@ mod appkit {
                 self.wake.signal();
                 return;
             }
-            let Some(result) = self
-                .runtime
-                .borrow()
-                .as_ref()
-                .map(Runtime::tick_nonblocking)
-            else {
-                self.in_tick.set(false);
-                return;
+            let result = {
+                let runtime = self.runtime.borrow();
+                let mut local = self.local.borrow_mut();
+                let (Some(runtime), Some(local)) = (runtime.as_ref(), local.as_mut()) else {
+                    self.in_tick.set(false);
+                    return;
+                };
+                runtime.tick_nonblocking_with_local_set(local)
             };
             self.in_tick.set(false);
 
@@ -140,7 +152,7 @@ mod appkit {
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str(
-            "Tokio external loop — live-resize for at least five seconds",
+            "LLRT + Tokio external loop — live-resize for at least five seconds",
         ));
         window.center();
         window.makeKeyAndOrderFront(None);
@@ -159,26 +171,31 @@ mod appkit {
             .build()
             .unwrap();
         let main_thread = std::thread::current().id();
-
-        runtime.spawn(async move {
-            let mut second = 1_u64;
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                assert_eq!(std::thread::current().id(), main_thread);
-                println!("hi {second}");
-                second += 1;
-            }
-        });
-        runtime.spawn(async {
-            let host = std::env::var("TOKIO_EXTERNAL_HTTP_HOST")
-                .unwrap_or_else(|_| "example.com".to_owned());
-            loop {
-                match tokio::time::timeout(Duration::from_secs(5), http_probe(&host)).await {
-                    Ok(Ok(line)) => println!("network progressed during AppKit loop: {line}"),
-                    Ok(Err(error)) => eprintln!("HTTP probe failed: {error}"),
-                    Err(_) => eprintln!("HTTP probe timed out"),
+        let local = LocalSet::new();
+        local.spawn_local(async move {
+            assert_eq!(std::thread::current().id(), main_thread);
+            let (javascript, driver) = match runtime::Runtime::builder()
+                .plugin(install_llrt_globals)
+                .build_driven()
+                .await
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("failed to initialize the LLRT-backed runtime: {error}");
+                    return;
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
+            };
+            let driver = tokio::task::spawn_local(driver.run());
+
+            if let Err(error) = javascript.eval::<()>(LLRT_SCRIPT).await {
+                eprintln!("failed to evaluate the LLRT test script: {error}");
+                return;
+            }
+            assert_eq!(std::thread::current().id(), main_thread);
+
+            match driver.await {
+                Ok(()) => eprintln!("LLRT JavaScript driver stopped unexpectedly"),
+                Err(error) => eprintln!("LLRT JavaScript driver failed: {error}"),
             }
         });
 
@@ -198,6 +215,7 @@ mod appkit {
 
         let mut state = Box::new(State {
             runtime: RefCell::new(Some(runtime)),
+            local: RefCell::new(Some(local)),
             wake: wake.clone(),
             timer: Cell::new(ptr::null_mut()),
             in_tick: Cell::new(false),
@@ -245,9 +263,10 @@ mod appkit {
         app.run();
 
         wake.source.store(0, Ordering::Release);
-        // Stop and join Tokio's reactor while the source and State context are
-        // still retained. A producer that loaded the old source pointer before
-        // the atomic clear can therefore signal it safely during shutdown.
+        // Cancel LLRT, then stop and join Tokio's reactor while the source and
+        // State context are still retained. A producer that loaded the old
+        // source pointer before the atomic clear can therefore signal it safely.
+        drop(state.local.borrow_mut().take());
         drop(state.runtime.borrow_mut().take());
         unsafe {
             CFRunLoopRemoveSource(run_loop, source, kCFRunLoopCommonModes);
@@ -261,39 +280,6 @@ mod appkit {
         }
         drop(state); // Source/timer callbacks can no longer observe this context.
         drop(window);
-    }
-
-    async fn http_probe(host: &str) -> std::io::Result<String> {
-        let stream = tokio::net::TcpStream::connect((host, 80)).await?;
-        let request = format!("GET / HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-        let request = request.as_bytes();
-        let mut offset = 0;
-        while offset < request.len() {
-            stream.writable().await?;
-            match stream.try_write(&request[offset..]) {
-                Ok(0) => break,
-                Ok(count) => offset += count,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error),
-            }
-        }
-
-        let mut response = Vec::new();
-        let mut chunk = [0; 1024];
-        loop {
-            stream.readable().await?;
-            match stream.try_read(&mut chunk) {
-                Ok(0) => break,
-                Ok(count) => response.extend_from_slice(&chunk[..count]),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(String::from_utf8_lossy(&response)
-            .lines()
-            .next()
-            .unwrap_or("empty response")
-            .to_owned())
     }
 }
 

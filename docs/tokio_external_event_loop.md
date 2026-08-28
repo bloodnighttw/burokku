@@ -169,14 +169,20 @@ calls `ExternalWake`, causing the platform loop to tick and re-arm.
 ## AppKit proof of concept
 
 `crates/winit/examples/cf_run_loop_tokio.rs` creates an `NSApplication`, an
-`NSWindow`, a level-0 `CFRunLoopSource`, and a reusable `CFRunLoopTimer`.
+`NSWindow`, a level-0 `CFRunLoopSource`, and a reusable `CFRunLoopTimer`. It
+installs selected LLRT 0.9 modules into the repository's rquickjs runtime and
+runs `crates/winit/examples/cf_run_loop_tokio.js` on a persistent `LocalSet`.
+The script increments a counter every second and fetches `https://example.com`
+every three seconds. LLRT is pinned to a Git revision and shares rquickjs 0.12
+and this workspace's patched Tokio through Cargo dependency resolution.
+
 Both source and timer are installed in:
 
 - `kCFRunLoopCommonModes`; and
 - `NSEventTrackingRunLoopMode` explicitly.
 
-The explicit tracking-mode registration is what keeps Tokio progressing during
-AppKit's nested live-resize loop.
+The explicit tracking-mode registration is what keeps Tokio, rquickjs, and LLRT
+progressing during AppKit's nested live-resize loop.
 
 Build and run:
 
@@ -186,17 +192,16 @@ cargo run -p burokku-winit --example cf_run_loop_tokio
 
 Manual acceptance procedure:
 
-1. Confirm `timer tick` prints every approximately 250 ms.
-2. Confirm the HTTP status line is printed (or use a reachable host if
-   `example.com` is blocked by the environment).
+1. Confirm `[llrt] count = N` prints approximately once per second.
+2. Confirm `[llrt] fetched example.com: status=200, ...` prints approximately
+   once per three seconds. A sandbox without direct network access may instead
+   print the script's `[llrt] fetch failed: ...` diagnostic.
 3. Grab a window resize handle and continuously resize for at least five
-   seconds. The HTTP probe repeats every two seconds (with a five-second
-   timeout), so observe at least one `network progressed during AppKit loop`
-   line while the drag is still active. Override the endpoint with
-   `TOKIO_EXTERNAL_HTTP_HOST` when needed.
-4. Confirm the window remains responsive and timer output has no multi-second
+   seconds. Observe the counter and at least one fetch attempt while the drag is
+   still active.
+4. Confirm the window remains responsive and counter output has no multi-second
    gap ending only when resize stops.
-5. Confirm the task's main-thread assertion does not fail.
+5. Confirm the Rust main-thread assertions do not fail.
 
 Expected limitation test:
 
