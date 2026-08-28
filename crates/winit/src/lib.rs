@@ -3,8 +3,11 @@
 //! The API follows the useful parts of winit's application-handler model, but
 //! [`EventLoop::run_app`] is asynchronous. Native events are drained in small
 //! batches and the driver yields to Tokio whenever the native queue is idle.
-//! macOS is currently implemented; other platform backends can be added behind
-//! the crate's internal platform boundary without changing this public API.
+//! [`EventLoop::run_app_external`] inverts ownership so a native main loop can
+//! drive a patched Tokio current-thread runtime and `LocalSet` through shared
+//! wake/timer hooks. macOS is currently implemented; other platform backends
+//! can be added behind the crate's internal boundary without changing either
+//! public API.
 
 pub mod dpi;
 pub mod event;
@@ -30,6 +33,8 @@ pub enum Error {
     NotMainThread,
     #[error("the event loop has already been run")]
     AlreadyRun,
+    #[error("the external event loop requires a Tokio current-thread runtime")]
+    InvalidExternalRuntime,
     #[error("the active event loop is no longer available")]
     EventLoopUnavailable,
     #[error("window creation failed: {0}")]

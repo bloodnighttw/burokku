@@ -3,15 +3,24 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
-    ptr::NonNull,
+    ffi::c_void,
+    fmt,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    ptr::{self, NonNull},
     rc::Rc,
-    sync::{atomic::Ordering, Arc, Weak},
+    sync::{atomic::Ordering, Arc, Mutex, Weak},
+    time::Instant,
 };
 
 use crate::{event_loop::EventLoopWaker, window::WindowState};
 use crate::{
     ElementState, Error, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition,
     PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId,
+};
+use core_foundation_sys::{
+    base::{kCFAllocatorDefault, CFRelease},
+    date::CFAbsoluteTimeGetCurrent,
+    runloop::*,
 };
 use dispatch2::MainThreadBound;
 use objc2::{
@@ -22,9 +31,9 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSView, NSViewFrameDidChangeNotification,
-    NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
-    NSWindowStyleMask,
+    NSEventModifierFlags, NSEventTrackingRunLoopMode, NSEventType, NSView,
+    NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSObject,
@@ -36,7 +45,196 @@ use raw_window_handle::{
     HasWindowHandle, WindowHandle,
 };
 
+use super::PlatformTick;
+
 const MAX_NATIVE_EVENTS_PER_TICK: usize = 256;
+const DORMANT_TIMER_INTERVAL: f64 = 86_400.0;
+
+struct PlatformWakeState {
+    run_loop: usize,
+    source: Mutex<usize>,
+}
+
+/// Thread-safe bridge from Tokio producers to the AppKit-owned run loop.
+#[derive(Clone)]
+pub(crate) struct PlatformWake(Arc<PlatformWakeState>);
+
+impl PlatformWake {
+    fn new(run_loop: CFRunLoopRef) -> Self {
+        Self(Arc::new(PlatformWakeState {
+            run_loop: run_loop as usize,
+            source: Mutex::new(0),
+        }))
+    }
+
+    pub(crate) fn wake_up(&self) {
+        let source_guard = self
+            .0
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let source = *source_guard as CFRunLoopSourceRef;
+        let run_loop = self.0.run_loop as CFRunLoopRef;
+        if !source.is_null() && !run_loop.is_null() {
+            // SAFETY: Signalling is serialized with clear_source, and
+            // run_external retains the source until after it is cleared.
+            unsafe {
+                CFRunLoopSourceSignal(source);
+                CFRunLoopWakeUp(run_loop);
+            }
+        }
+    }
+
+    fn set_source(&self, source: CFRunLoopSourceRef) {
+        *self
+            .0
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = source as usize;
+    }
+
+    fn clear_source(&self) {
+        *self
+            .0
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0;
+    }
+}
+
+impl fmt::Debug for PlatformWake {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PlatformWake")
+    }
+}
+
+struct ExternalLoopState<F> {
+    app: Retained<NSApplication>,
+    tick: RefCell<F>,
+    wake: PlatformWake,
+    timer: Cell<CFRunLoopTimerRef>,
+    in_tick: Cell<bool>,
+    retick_pending: Cell<bool>,
+    panic: RefCell<Option<Box<dyn std::any::Any + Send>>>,
+}
+
+impl<F: FnMut() -> PlatformTick> ExternalLoopState<F> {
+    fn tick(&self) {
+        if self.panic.borrow().is_some() {
+            self.app.stop(None);
+            return;
+        }
+
+        // AppKit can nest its run loop during tracking. Record one deferred
+        // tick without re-signalling inside the nested loop, which could spin.
+        if self.in_tick.replace(true) {
+            self.retick_pending.set(true);
+            return;
+        }
+
+        // Never let an application/runtime panic cross the extern "C" callback.
+        let result = catch_unwind(AssertUnwindSafe(|| (self.tick.borrow_mut())()));
+        self.in_tick.set(false);
+        let result = match result {
+            Ok(result) => result,
+            Err(panic) => {
+                *self.panic.borrow_mut() = Some(panic);
+                self.app.stop(None);
+                return;
+            }
+        };
+
+        let fire = result
+            .next_deadline
+            .map(|deadline| unsafe {
+                CFAbsoluteTimeGetCurrent()
+                    + deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_secs_f64()
+            })
+            .unwrap_or_else(|| unsafe { CFAbsoluteTimeGetCurrent() } + DORMANT_TIMER_INTERVAL);
+        let timer = self.timer.get();
+        if !timer.is_null() {
+            unsafe { CFRunLoopTimerSetNextFireDate(timer, fire) };
+        }
+
+        if result.exit {
+            self.app.stop(None);
+        } else if self.retick_pending.replace(false) {
+            self.wake.wake_up();
+        }
+    }
+}
+
+struct ExternalCallbackGuard {
+    run_loop: CFRunLoopRef,
+    source: CFRunLoopSourceRef,
+    timer: CFRunLoopTimerRef,
+    wake: PlatformWake,
+    installed: bool,
+}
+
+impl ExternalCallbackGuard {
+    fn deactivate(&mut self) {
+        self.wake.clear_source();
+        if !self.installed {
+            return;
+        }
+        self.installed = false;
+
+        unsafe {
+            CFRunLoopRemoveSource(self.run_loop, self.source, kCFRunLoopCommonModes);
+            CFRunLoopRemoveTimer(self.run_loop, self.timer, kCFRunLoopCommonModes);
+            CFRunLoopRemoveSource(self.run_loop, self.source, tracking_run_loop_mode());
+            CFRunLoopRemoveTimer(self.run_loop, self.timer, tracking_run_loop_mode());
+            CFRunLoopSourceInvalidate(self.source);
+            CFRunLoopTimerInvalidate(self.timer);
+        }
+    }
+}
+
+impl Drop for ExternalCallbackGuard {
+    fn drop(&mut self) {
+        self.deactivate();
+        unsafe {
+            if !self.source.is_null() {
+                CFRelease(self.source.cast());
+            }
+            if !self.timer.is_null() {
+                CFRelease(self.timer.cast());
+            }
+        }
+    }
+}
+
+extern "C" fn external_source_callback<F: FnMut() -> PlatformTick>(info: *const c_void) {
+    // SAFETY: The source is invalidated before its boxed state is dropped.
+    unsafe { (&*info.cast::<ExternalLoopState<F>>()).tick() };
+}
+
+extern "C" fn external_timer_callback<F: FnMut() -> PlatformTick>(
+    _timer: CFRunLoopTimerRef,
+    info: *mut c_void,
+) {
+    // SAFETY: The timer is invalidated before its boxed state is dropped.
+    unsafe { (&*info.cast::<ExternalLoopState<F>>()).tick() };
+}
+
+unsafe fn tracking_run_loop_mode() -> core_foundation_sys::string::CFStringRef {
+    NSEventTrackingRunLoopMode as *const _ as *const _
+}
+
+unsafe fn install_external_callbacks(
+    run_loop: CFRunLoopRef,
+    source: CFRunLoopSourceRef,
+    timer: CFRunLoopTimerRef,
+) {
+    CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+    CFRunLoopAddTimer(run_loop, timer, kCFRunLoopCommonModes);
+    // AppKit enters this nested mode during live resize.
+    CFRunLoopAddSource(run_loop, source, tracking_run_loop_mode());
+    CFRunLoopAddTimer(run_loop, timer, tracking_run_loop_mode());
+}
 
 #[derive(Debug)]
 struct NativeEvent {
@@ -407,6 +605,7 @@ impl HasDisplayHandle for PlatformWindow {
 pub(crate) struct PlatformEventLoop {
     app: Retained<NSApplication>,
     mtm: MainThreadMarker,
+    wake: PlatformWake,
     dispatcher: Rc<EventDispatcher>,
     windows: RefCell<HashMap<isize, Weak<WindowState>>>,
     next_window_id: Cell<u64>,
@@ -427,10 +626,15 @@ impl PlatformEventLoop {
         Ok(Self {
             app,
             mtm,
+            wake: PlatformWake::new(unsafe { CFRunLoopGetMain() }),
             dispatcher: Rc::new(EventDispatcher::default()),
             windows: RefCell::new(HashMap::new()),
             next_window_id: Cell::new(1),
         })
+    }
+
+    pub(crate) fn waker(&self) -> PlatformWake {
+        self.wake.clone()
     }
 
     pub(crate) fn create_window(
@@ -522,8 +726,15 @@ impl PlatformEventLoop {
         })
     }
 
-    pub(crate) fn set_handler(&self, handler: impl FnMut(WindowId, WindowEvent) + 'static) {
-        self.dispatcher.set_handler(Box::new(handler));
+    pub(crate) fn set_handler(&self, mut handler: impl FnMut(WindowId, WindowEvent) + 'static) {
+        let wake = self.wake.clone();
+        self.dispatcher
+            .set_handler(Box::new(move |window_id, event| {
+                handler(window_id, event);
+                // A platform-owned loop must run about_to_wait after native
+                // dispatch even when no Tokio task independently wakes it.
+                wake.wake_up();
+            }));
     }
 
     pub(crate) fn clear_handler(&self) {
@@ -532,6 +743,92 @@ impl PlatformEventLoop {
 
     pub(crate) fn flush_windows(&self) {
         autoreleasepool(|_| self.app.updateWindows());
+    }
+
+    pub(crate) fn run_external<F>(&self, tick: F, shutdown: impl FnOnce()) -> crate::Result<()>
+    where
+        F: FnMut() -> PlatformTick,
+    {
+        let run_loop = unsafe { CFRunLoopGetMain() };
+        let mut state = Box::new(ExternalLoopState {
+            app: self.app.clone(),
+            tick: RefCell::new(tick),
+            wake: self.wake.clone(),
+            timer: Cell::new(ptr::null_mut()),
+            in_tick: Cell::new(false),
+            retick_pending: Cell::new(false),
+            panic: RefCell::new(None),
+        });
+        let info = (&mut *state as *mut ExternalLoopState<_>).cast::<c_void>();
+        let mut source_context = CFRunLoopSourceContext {
+            version: 0,
+            info,
+            retain: None,
+            release: None,
+            copyDescription: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform: external_source_callback::<F>,
+        };
+        let source = unsafe { CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &mut source_context) };
+        assert!(
+            !source.is_null(),
+            "failed to create the external run-loop source"
+        );
+        let mut callbacks = ExternalCallbackGuard {
+            run_loop,
+            source,
+            timer: ptr::null_mut(),
+            wake: self.wake.clone(),
+            installed: false,
+        };
+
+        let mut timer_context = CFRunLoopTimerContext {
+            version: 0,
+            info,
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+        let timer = unsafe {
+            CFRunLoopTimerCreate(
+                kCFAllocatorDefault,
+                CFAbsoluteTimeGetCurrent() + DORMANT_TIMER_INTERVAL,
+                DORMANT_TIMER_INTERVAL,
+                0,
+                0,
+                external_timer_callback::<F>,
+                &mut timer_context,
+            )
+        };
+        assert!(
+            !timer.is_null(),
+            "failed to create the external run-loop timer"
+        );
+        callbacks.timer = timer;
+        state.timer.set(timer);
+        unsafe { install_external_callbacks(run_loop, source, timer) };
+        callbacks.installed = true;
+        self.wake.set_source(source);
+
+        self.wake.wake_up();
+        let app_panic = catch_unwind(AssertUnwindSafe(|| self.app.run())).err();
+
+        // Prevent callbacks before dropping arbitrary user futures. The guard
+        // still retains both CF objects until runtime wake producers stop.
+        callbacks.deactivate();
+        let shutdown_panic = catch_unwind(AssertUnwindSafe(shutdown)).err();
+        let callback_panic = state.panic.borrow_mut().take();
+        drop(callbacks);
+        drop(state);
+
+        if let Some(panic) = callback_panic.or(app_panic).or(shutdown_panic) {
+            resume_unwind(panic);
+        }
+
+        Ok(())
     }
 
     pub(crate) fn pump(&self) {

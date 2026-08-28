@@ -168,15 +168,23 @@ calls `ExternalWake`, causing the platform loop to tick and re-arm.
 
 ## AppKit proof of concept
 
-`crates/winit/examples/cf_run_loop_tokio.rs` creates an `NSApplication`, an
-`NSWindow`, a level-0 `CFRunLoopSource`, and a reusable `CFRunLoopTimer`. It
-installs selected LLRT 0.9 modules into the repository's rquickjs runtime and
-runs `crates/winit/examples/cf_run_loop_tokio.js` on a persistent `LocalSet`.
-The script increments a counter every second and fetches `https://example.com`
+`burokku-winit` exposes the platform-neutral `EventLoop::run_app_external`
+interface. `EventLoop::external_runtime_builder` returns a current-thread
+builder already connected through an `EventLoopProxy`, which implements Tokio's
+`ExternalWake`. Each platform backend supplies its native wake source, deadline
+timer, and owned main-loop implementation. The macOS backend currently implements that contract
+with a level-0 `CFRunLoopSource` and a reusable `CFRunLoopTimer`; unsupported
+backends can add their own implementation without changing application code.
+
+`crates/winit/examples/cf_run_loop_tokio.rs` uses only this shared interface and
+contains no AppKit or Core Foundation code. It installs selected LLRT 0.9
+modules into the repository's rquickjs runtime and runs
+`crates/winit/examples/cf_run_loop_tokio.js` on a persistent `LocalSet`. The
+script increments a counter every second and fetches `https://example.com`
 every three seconds. LLRT is pinned to a Git revision and shares rquickjs 0.12
 and this workspace's patched Tokio through Cargo dependency resolution.
 
-Both source and timer are installed in:
+On macOS, both source and timer are installed in:
 
 - `kCFRunLoopCommonModes`; and
 - `NSEventTrackingRunLoopMode` explicitly.
@@ -214,11 +222,13 @@ After three seconds, one Tokio task spins synchronously for two seconds. The
 window and timer intentionally stall for those two seconds, demonstrating that
 the patch moves only blocking readiness waiting—not application computation.
 
-The source callback has a reentrancy guard because AppKit can nest run loops.
-A nested notification is deferred by re-signalling the source. During teardown,
-the runtime and its producers are stopped and the Mio reactor is joined while
-the CF source is still retained; only then are source/timer callbacks invalidated
-and released.
+The macOS source callback has a reentrancy guard because AppKit can nest run
+loops. A nested notification sets one pending-retick flag, which is signalled
+only after the outer callback returns to avoid spinning inside the nested loop.
+During teardown, callbacks are unpublished and invalidated first, their CF
+objects remain retained while the runtime and Mio reactor stop, and only then
+are the source and timer released. Callback and shutdown panics are caught long
+enough to complete that cleanup before unwinding resumes on the Rust side.
 
 ## Automated coverage
 
