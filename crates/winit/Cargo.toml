@@ -12,8 +12,6 @@ tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
 static_assertions = "1"
-
-[target.'cfg(target_os = "macos")'.dev-dependencies]
 llrt_modules = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", default-features = false, features = [
     "abort",
     "buffer",
