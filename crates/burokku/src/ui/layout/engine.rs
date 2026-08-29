@@ -15,7 +15,7 @@ use super::{
     LogicalViewport,
 };
 
-/// MTS owner of the last complete computed layout and the text measurement
+/// UI-thread owner of the last complete computed layout and text measurement
 /// implementation used by Taffy paragraph leaves.
 #[derive(Debug)]
 pub(crate) struct LayoutEngine<M> {
@@ -39,7 +39,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         &mut self.measurer
     }
 
-    /// Reconcile and compute one publication under an actual logical viewport.
+    /// Reconcile and compute one live-DOM revision under a logical viewport.
     ///
     /// The previous complete state is replaced only after lowering, Taffy
     /// computation, measurement, and computed-box validation all succeed.

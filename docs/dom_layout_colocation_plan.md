@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft migration plan for replacing Burokku's cross-thread DOM publication model with a UI-thread-owned live DOM driven by the patched Tokio/native event-loop integration.
+Implemented. The migration phases are complete; this document remains the architecture record and invariant checklist.
 
 ## Summary
 

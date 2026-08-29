@@ -207,12 +207,6 @@ impl BurokkuBuilder {
         self
     }
 
-    /// Install a plugin in the JavaScript runtime.
-    pub fn main_runtime_plugin<P: Plugin>(mut self, plugin: P) -> Self {
-        self.runtime = self.runtime.plugin(plugin);
-        self
-    }
-
     /// Register an embedded OpenType font before the first layout frame.
     pub fn font_data(mut self, data: impl Into<Vec<u8>>) -> Self {
         self.fonts.push(data.into());

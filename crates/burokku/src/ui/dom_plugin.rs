@@ -88,7 +88,7 @@ mod tests {
         }
     }
 
-    fn snapshot_text(dom: &Dom, root: NodeId) -> String {
+    fn subtree_text(dom: &Dom, root: NodeId) -> String {
         let mut text = String::new();
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_detached_wrappers_release_and_reclaim_at_checkpoint() {
+    fn unreachable_detached_wrappers_release_and_reclaim_during_host_maintenance() {
         let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
@@ -502,7 +502,7 @@ mod tests {
             let dom = &state.dom;
             let window = dom.children(dom.root()).unwrap()[0];
             let list = dom.children(window).unwrap()[0];
-            assert_eq!(snapshot_text(dom, list), "ABC");
+            assert_eq!(subtree_text(dom, list), "ABC");
         }
 
         context.with(|context| {
@@ -520,7 +520,7 @@ mod tests {
             assert_eq!(items.len(), 2);
             assert_eq!(dom.attribute(items[0], "data-id"), Some("c"));
             assert_eq!(dom.attribute(items[1], "data-id"), Some("a"));
-            assert_eq!(snapshot_text(dom, list), "CA updated");
+            assert_eq!(subtree_text(dom, list), "CA updated");
         }
 
         context.with(|context| {

@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::ui::elements::NodeId;
 
-/// Failure while deriving or computing MTS text state from a committed DOM.
+/// Failure while deriving or computing text state from the live UI DOM.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub(crate) enum TextError {
     #[error("committed text node {0:?} is missing or stale")]

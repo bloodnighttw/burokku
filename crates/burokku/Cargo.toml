@@ -2,7 +2,7 @@
 name = "burokku"
 version = "0.1.0"
 edition = "2021"
-description = "A builder-based native UI crate with pluggable dual JavaScript runtimes"
+description = "A native UI crate with one thread-affine JavaScript runtime and live DOM"
 license = "MIT"
 
 [dependencies]
@@ -20,7 +20,7 @@ taffy = { version = "0.11", default-features = false, features = [
     "parse",
 ] }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 vello_common = { version = "0.2", default-features = false, features = ["std"] }
 vello_hybrid = { version = "0.2", default-features = false, features = ["text", "wgpu"] }
 wgpu = { version = "29", features = ["std", "wgsl"] }
