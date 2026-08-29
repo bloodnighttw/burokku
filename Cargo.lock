@@ -214,6 +214,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "burokku-example-counter"
+version = "0.1.0"
+dependencies = [
+ "burokku",
+]
+
+[[package]]
 name = "burokku-example-layouts"
 version = "0.1.0"
 dependencies = [
