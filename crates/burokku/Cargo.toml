@@ -6,7 +6,6 @@ description = "A builder-based native UI crate with pluggable dual JavaScript ru
 license = "MIT"
 
 [dependencies]
-arc-swap = "1"
 glifo = { version = "0.3.0", default-features = false, features = ["std"] }
 parley = "0.11.1"
 runtime = { path = "../runtime" }
