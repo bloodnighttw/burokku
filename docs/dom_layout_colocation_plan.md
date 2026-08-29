@@ -16,7 +16,7 @@ Application code that needs asynchronous I/O continues to use Tokio. CPU-intensi
 AppKit event loop
   -> patched Tokio bounded tick
   -> main QuickJS macrotask and ready microtasks
-  -> DOM checkpoint
+  -> bounded Tokio tick returns
   -> about_to_wait observes the DOM revision
   -> native-window reconciliation
   -> redraw: borrow DOM -> layout -> build scene and hit-test plan
@@ -135,13 +135,23 @@ A frame must materialize all DOM-dependent data under one uninterrupted immutabl
 
 The retained `ComputedLayout`, `BuiltScene`, `ScenePlan`, and `PresentedFrame` must not contain Rust references into `Dom`.
 
-### Checkpoint scheduling
+### `about_to_wait` scheduling
 
-Same-thread ownership does not by itself preserve atomic updates. Burokku must continue using the runtime checkpoint after one macrotask and all ready QuickJS microtasks.
+The target architecture removes `Plugin::checkpoint` and the runtime's post-macrotask plugin iteration. The production checkpoint override is used only by `DomPlugin`; its snapshot-publication responsibility disappears, and its detached-node reclamation moves to `ApplicationHost::about_to_wait`.
 
-DOM mutations may increment the live DOM revision immediately so JavaScript can read its own writes. The native host only reacts after the Tokio tick returns and `about_to_wait` runs. Several completed JavaScript tasks may be coalesced into one native reconciliation and redraw, but layout must never run in the middle of one macrotask/microtask checkpoint.
+The local QuickJS task executes one synchronous macrotask and drains its ready microtasks before yielding back to Tokio. `run_app_external` invokes `about_to_wait` after the bounded Tokio tick returns, so the host cannot observe the middle of that JavaScript work. One tick may complete several JavaScript tasks; processing only the latest DOM revision intentionally coalesces them into one native reconciliation and redraw request.
 
-Native callbacks that dispatch JavaScript events must enqueue a macrotask. They must not synchronously poll the JavaScript runtime from inside the callback.
+`about_to_wait` should:
+
+1. acquire `UiDomState` with `try_borrow_mut`;
+2. reclaim detached nodes;
+3. read the current DOM revision and extract any owned state needed for reconciliation;
+4. release the `RefCell` borrow;
+5. clear caches for reclaimed nodes;
+6. reconcile the native window when the revision changed;
+7. request a redraw when a renderer is available.
+
+Actual layout, scene construction, and presentation remain in `WindowEvent::RedrawRequested`. Native callbacks that dispatch JavaScript events must enqueue a macrotask and must not synchronously poll JavaScript from inside the callback.
 
 ## 1. Code to remove
 
@@ -159,6 +169,17 @@ Delete `crates/burokku/src/ui/elements/publication.rs`, including:
 - publication-specific unit tests.
 
 Remove `arc-swap` from `crates/burokku/Cargo.toml`.
+
+### Plugin checkpoint API
+
+Remove from `crates/runtime`:
+
+- `Plugin::checkpoint`;
+- post-macrotask plugin checkpoint iteration in `src/event_loop.rs`;
+- checkpoint-specific error logging and documentation;
+- checkpoint-only tests such as `RecordingCheckpoint` and `plugin_checkpoint_runs_after_microtasks_and_failed_macrotasks`.
+
+Remove `DomPlugin::checkpoint`. Move detached-node reclamation and cache cleanup to the host's `about_to_wait` processing. Keep `Plugin` as an installation-only interface.
 
 ### Snapshot-oriented DOM storage
 
@@ -272,7 +293,7 @@ Change `DomPlugin` so it:
 - installs only in the one local QuickJS runtime;
 - returns the shared live DOM handle needed by `ApplicationHost`;
 - no longer owns a publisher;
-- retains `Plugin::checkpoint` for detached-node reclamation and revision/dirty bookkeeping.
+- no longer implements a post-task checkpoint; detached-node reclamation is owned by `ApplicationHost::about_to_wait`.
 
 The application script is evaluated on this same local runtime. Runtime roles and main/background installation branches are unnecessary once `DualRuntime` is removed.
 
@@ -408,7 +429,7 @@ Target path:
 ```text
 JavaScript mutation
   -> mutate live UI DOM
-  -> runtime checkpoint completes the batch
+  -> QuickJS task drains ready microtasks and yields
   -> about_to_wait compares revisions
   -> reconcile and request redraw
 ```
@@ -442,7 +463,7 @@ Tests should create `Dom` directly and pass `&Dom` to window, text, layout, and 
 
 ### Batch consistency
 
-Layout and rendering may only observe DOM state after one JavaScript macrotask and all currently ready microtasks have finished. No native callback may synchronously poll QuickJS and then render before the checkpoint completes.
+Layout and rendering may only observe DOM state after one JavaScript macrotask and all currently ready microtasks have finished and the bounded Tokio tick has returned. No native callback may synchronously poll QuickJS and then render before that scheduler boundary.
 
 ### No long-lived DOM references
 
@@ -491,13 +512,14 @@ Snapshots are removable; temporal identity is not.
 5. Make `RuntimeDriver` explicitly `!Send`.
 6. Replace automatic `tokio::spawn` driving with explicit `build_driven` plus `spawn_local`.
 7. Remove the rquickjs `parallel` feature.
-8. Update runtime tests to use a current-thread runtime and `LocalSet`.
+8. Remove `Plugin::checkpoint`, runtime checkpoint iteration, and checkpoint-only tests.
+9. Update remaining runtime tests to use a current-thread runtime and `LocalSet`.
 
 Exit criteria:
 
 - no `DualRuntime`, background JavaScript thread, or runtime bridge symbols remain;
 - the compiler prevents moving `RuntimeDriver` to another thread;
-- QuickJS evaluation, timers, promises, plugin checkpoints, and Tokio I/O still pass on a `LocalSet`;
+- QuickJS evaluation, timers, promises, plugin installation, and Tokio I/O still pass on a `LocalSet`;
 - no runtime path calls `tokio::spawn(driver.run())`.
 
 ### Phase 2: Integrate the external event loop and single runtime
@@ -516,7 +538,7 @@ Exit criteria:
 
 - Burokku compiles against the current winit API;
 - QuickJS timers and tasks progress while the native loop runs;
-- application JavaScript, DOM bindings, checkpoints, layout, and scene construction run on the process main thread;
+- application JavaScript, DOM bindings, `about_to_wait` housekeeping, layout, and scene construction run on the process main thread;
 - startup and shutdown failures are surfaced;
 - Burokku creates no dedicated JavaScript background thread.
 
@@ -529,6 +551,7 @@ Exit criteria:
 5. Build layout and scene under one immutable DOM borrow.
 6. Release the borrow before native or GPU work.
 7. Replace publication authority checks with short live-DOM revision and window-identity checks.
+8. Move detached-node reclamation and reclaimed-cache cleanup to `ApplicationHost::about_to_wait`.
 
 Exit criteria:
 
@@ -586,6 +609,9 @@ Exit criteria:
 - DOM plugin and application script execute through the one local QuickJS runtime.
 - A macrotask plus its ready microtasks produces one observable DOM batch.
 - Several completed batches may coalesce before one redraw.
+- `about_to_wait` reclaims detached nodes before layout and clears their derived caches.
+- Successful DOM mutations made before a JavaScript exception are observed on the next `about_to_wait` pass.
+- The runtime plugin API is installation-only and has no post-task checkpoint callback.
 - A timer can mount or remove a window after startup.
 - Runtime startup failure exits the native host with a useful error.
 
@@ -595,7 +621,7 @@ Record and compare thread IDs for:
 
 - event-loop creation;
 - DOM binding invocation;
-- plugin checkpoint;
+- `about_to_wait` detached-node reclamation and revision observation;
 - layout computation;
 - scene construction;
 - presentation callback.
@@ -635,4 +661,4 @@ The current host can retain a previously presented frame after a recoverable can
 
 ## Final architectural rule
 
-The UI DOM and the single QuickJS runtime have one owner thread. JavaScript mutation, checkpointing, native-window reconciliation, layout, scene materialization, and presentation are serialized by the native event loop and patched Tokio scheduler. `DualRuntime`, its background JavaScript thread, and its bridge are not part of the target architecture. A frame may borrow the live DOM while producing owned derived data, but no DOM borrow or reference survives that frame-building scope.
+The UI DOM and the single QuickJS runtime have one owner thread. JavaScript mutation is completed by the local Tokio task before `about_to_wait` performs detached-node reclamation, revision observation, native-window reconciliation, and redraw scheduling. Layout, scene materialization, and presentation then run through the native redraw lifecycle. `DualRuntime`, plugin checkpointing, the background JavaScript thread, and the cross-runtime bridge are not part of the target architecture. A frame may borrow the live DOM while producing owned derived data, but no DOM borrow or reference survives that frame-building scope.
