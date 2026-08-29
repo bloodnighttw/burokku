@@ -1,91 +1,59 @@
-//! BTS ownership and QuickJS publication for the native DOM facade.
+//! UI-thread ownership and QuickJS bindings for the live DOM.
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    rc::Rc,
-    sync::{Arc, Mutex},
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use runtime::{rquickjs::Ctx, Plugin};
 
-use super::elements::{
-    CommitNotifier, Dom, DomPublisher, NodeId, PublishedDomReader, ReclaimReport,
-};
+use super::elements::{Dom, NodeId, ReclaimReport};
 
 mod bindings;
 mod errors;
 mod lifetime;
 
-pub(super) type SharedDomState = Arc<Mutex<DomPluginState>>;
+pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
-pub(super) struct DomPluginState {
-    // the staging domJavascript read and modify/
-    pub(super) staging: Dom,
-    // the javascript facade side of dom reference tracking
-    pub(super) live_wrappers: HashMap<NodeId, usize>,
-    // the node last cleanup
-    pub(super) last_reclaim: ReclaimReport,
+#[derive(Debug)]
+pub(crate) struct UiDomState {
+    pub(crate) dom: Dom,
+    pub(crate) live_wrappers: HashMap<NodeId, usize>,
+    pub(crate) last_reclaim: ReclaimReport,
 }
 
-/// The single BTS owner of staging DOM state and immutable publication.
+/// Installs bindings backed by the UI thread's live DOM.
 pub(crate) struct DomPlugin {
-    state: SharedDomState,
-    publisher: Rc<RefCell<DomPublisher>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct DomPublication {
-    state: SharedDomState,
-    publisher: Rc<RefCell<DomPublisher>>,
-}
-
-impl DomPublication {
-    pub(crate) fn publish(&self) -> runtime::Result<()> {
-        let mut state = self.state.lock().map_err(|_| runtime::Error::Unknown)?;
-        state.reclaim_detached()?;
-        self.publisher.borrow_mut().checkpoint(&state.staging);
-        Ok(())
-    }
-}
-impl std::fmt::Debug for DomPublication {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DomPublication")
-            .finish_non_exhaustive()
-    }
+    state: SharedUiDom,
 }
 
 impl DomPlugin {
-    /// Create a BTS DOM plugin and the corresponding MTS publication reader.
-    pub(crate) fn new(notifier: impl CommitNotifier) -> (Self, DomPublication, PublishedDomReader) {
-        let staging = Dom::new();
-        let (publisher, reader) = DomPublisher::new(&staging, notifier);
-        let state = Arc::new(Mutex::new(DomPluginState {
-            staging,
+    pub(crate) fn new() -> (Self, SharedUiDom) {
+        let state = Rc::new(RefCell::new(UiDomState {
+            dom: Dom::new(),
             live_wrappers: HashMap::new(),
             last_reclaim: ReclaimReport::default(),
         }));
-        let publisher = Rc::new(RefCell::new(publisher));
-        let publication = DomPublication {
-            state: Arc::clone(&state),
-            publisher: Rc::clone(&publisher),
-        };
-
-        (Self { state, publisher }, publication, reader)
+        (
+            Self {
+                state: Rc::clone(&state),
+            },
+            state,
+        )
     }
 
     #[cfg(test)]
-    fn publish_for_test(&mut self) -> runtime::Result<()> {
-        DomPublication {
-            state: Arc::clone(&self.state),
-            publisher: Rc::clone(&self.publisher),
-        }
-        .publish()
-    }
     #[cfg(test)]
-    fn state(&self) -> std::sync::MutexGuard<'_, DomPluginState> {
-        self.state.lock().expect("DOM plugin state is not poisoned")
+    fn reclaim_for_test(&self) {
+        self.state
+            .try_borrow_mut()
+            .expect("DOM plugin state is not borrowed")
+            .reclaim_detached()
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    fn state(&self) -> std::cell::Ref<'_, UiDomState> {
+        self.state
+            .try_borrow()
+            .expect("DOM plugin state is not borrowed")
     }
 }
 
@@ -95,21 +63,17 @@ impl Plugin for DomPlugin {
     }
 
     fn install<'js>(&self, context: &Ctx<'js>) -> runtime::Result<()> {
-        bindings::install(context, self.state.clone())
+        bindings::install(context, Rc::clone(&self.state))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
 
     use runtime::rquickjs::{CatchResultExt, Context, Runtime as JsRuntime};
 
     use super::*;
-    use crate::ui::elements::{DomSnapshot, Element, NodeKind};
+    use crate::ui::elements::{Element, NodeKind};
 
     fn context() -> (JsRuntime, Context) {
         let runtime = JsRuntime::new().unwrap();
@@ -124,13 +88,13 @@ mod tests {
         }
     }
 
-    fn snapshot_text(snapshot: &DomSnapshot, root: NodeId) -> String {
+    fn snapshot_text(dom: &Dom, root: NodeId) -> String {
         let mut text = String::new();
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
-            if let Some(value) = snapshot.text(id) {
+            if let Some(value) = dom.text(id) {
                 text.push_str(value);
-            } else if let Some(children) = snapshot.children(id) {
+            } else if let Some(children) = dom.children(id) {
                 pending.extend(children.iter().rev().copied());
             }
         }
@@ -139,7 +103,7 @@ mod tests {
 
     #[test]
     fn installs_permanent_app_and_host_only_node_classes() {
-        let (plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -160,18 +124,12 @@ mod tests {
 
         let state = plugin.state();
         assert_eq!(state.live_wrappers.len(), 1);
-        assert_eq!(state.live_wrappers.get(&state.staging.root()), Some(&1));
+        assert_eq!(state.live_wrappers.get(&state.dom.root()), Some(&1));
     }
 
     #[test]
-    fn facade_mutates_staging_synchronously_and_publishes_at_checkpoint() {
-        let notifications = Arc::new(AtomicUsize::new(0));
-        let (mut plugin, _, reader) = DomPlugin::new({
-            let notifications = notifications.clone();
-            move |_| {
-                notifications.fetch_add(1, Ordering::AcqRel);
-            }
-        });
+    fn facade_mutates_live_dom_synchronously() {
+        let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -209,34 +167,28 @@ mod tests {
             );
         });
 
-        assert_eq!(reader.load().revision(), 0);
-        plugin.publish_for_test().unwrap();
-        let published = reader.load();
-        let snapshot = published.snapshot();
-        let window = snapshot.children(snapshot.root()).unwrap()[0];
-        let div = snapshot.children(window).unwrap()[0];
-        let paragraph = snapshot.children(div).unwrap()[0];
-        let text = snapshot.children(paragraph).unwrap()[0];
-
+        plugin.reclaim_for_test();
+        let state = plugin.state();
+        let dom = &state.dom;
+        let window = dom.children(dom.root()).unwrap()[0];
+        let div = dom.children(window).unwrap()[0];
+        let paragraph = dom.children(div).unwrap()[0];
+        let text = dom.children(paragraph).unwrap()[0];
         assert!(matches!(
-            snapshot.kind(window),
+            dom.kind(window),
             Some(NodeKind::Element(Element::Window { .. }))
         ));
         assert!(matches!(
-            snapshot.kind(div),
+            dom.kind(div),
             Some(NodeKind::Element(Element::Div { .. }))
         ));
-        assert_eq!(snapshot.text(text), Some("after"));
-        assert_eq!(snapshot.attribute(div, "role"), Some("status"));
-        assert_eq!(notifications.load(Ordering::Acquire), 1);
-
-        plugin.publish_for_test().unwrap();
-        assert_eq!(notifications.load(Ordering::Acquire), 1);
+        assert_eq!(dom.text(text), Some("after"));
+        assert_eq!(dom.attribute(div, "role"), Some("status"));
     }
 
     #[test]
     fn facade_enforces_text_only_raw_children_without_partial_mutation() {
-        let (plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -253,7 +205,7 @@ mod tests {
                 )
                 .unwrap();
         });
-        let revision = plugin.state().staging.revision();
+        let revision = plugin.state().dom.revision();
 
         context.with(|context| {
             let results: Vec<String> = context
@@ -295,7 +247,7 @@ mod tests {
                 ]
             );
         });
-        assert_eq!(plugin.state().staging.revision(), revision);
+        assert_eq!(plugin.state().dom.revision(), revision);
 
         context.with(|context| {
             assert!(context
@@ -319,7 +271,7 @@ mod tests {
 
     #[test]
     fn unreachable_detached_wrappers_release_and_reclaim_at_checkpoint() {
-        let (mut plugin, _, reader) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -333,16 +285,16 @@ mod tests {
                 )
                 .unwrap();
         });
-        assert_eq!(plugin.state().staging.node_count(), 2);
+        assert_eq!(plugin.state().dom.node_count(), 2);
         assert_eq!(plugin.state().live_wrappers.len(), 2);
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 1);
 
-        plugin.publish_for_test().unwrap();
-        assert_eq!(plugin.state().staging.node_count(), 1);
+        plugin.reclaim_for_test();
+        assert_eq!(plugin.state().dom.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 1);
-        assert_eq!(reader.load().snapshot().iter().count(), 1);
+        assert_eq!(plugin.state().dom.iter().count(), 1);
         context.with(|context| {
             assert!(context
                 .eval::<bool, _>("detachedWeakRef.deref() === undefined")
@@ -352,7 +304,7 @@ mod tests {
 
     #[test]
     fn a_live_descendant_wrapper_retains_its_complete_detached_component() {
-        let (mut plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -370,12 +322,12 @@ mod tests {
                 )
                 .unwrap();
         });
-        assert_eq!(plugin.state().staging.node_count(), 4);
+        assert_eq!(plugin.state().dom.node_count(), 4);
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 2);
-        plugin.publish_for_test().unwrap();
-        assert_eq!(plugin.state().staging.node_count(), 4);
+        plugin.reclaim_for_test();
+        assert_eq!(plugin.state().dom.node_count(), 4);
         assert!(plugin.state().last_reclaim.nodes.is_empty());
 
         context.with(|context| {
@@ -396,14 +348,14 @@ mod tests {
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 1);
 
-        plugin.publish_for_test().unwrap();
-        assert_eq!(plugin.state().staging.node_count(), 1);
+        plugin.reclaim_for_test();
+        assert_eq!(plugin.state().dom.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 3);
     }
 
     #[test]
     fn text_content_replacement_keeps_a_wrapped_old_child_valid_and_detached() {
-        let (mut plugin, _, reader) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -425,28 +377,20 @@ mod tests {
                 .unwrap());
         });
 
-        plugin.publish_for_test().unwrap();
-        let snapshot = reader.load();
-        let window = snapshot
-            .snapshot()
-            .children(snapshot.snapshot().root())
-            .unwrap()[0];
-        let parent = snapshot.snapshot().children(window).unwrap()[0];
-        let replacement = snapshot.snapshot().children(parent).unwrap()[0];
-        assert_eq!(snapshot.snapshot().text(replacement), Some("new"));
-        assert_eq!(
-            plugin.state().staging.text_content(parent),
-            Ok("new".into())
-        );
-        assert_eq!(
-            plugin.state().staging.text_content(replacement),
-            Ok("new".into())
-        );
+        plugin.reclaim_for_test();
+        let state = plugin.state();
+        let dom = &state.dom;
+        let window = dom.children(dom.root()).unwrap()[0];
+        let parent = dom.children(window).unwrap()[0];
+        let replacement = dom.children(parent).unwrap()[0];
+        assert_eq!(dom.text(replacement), Some("new"));
+        assert_eq!(dom.text_content(parent), Ok("new".into()));
+        assert_eq!(dom.text_content(replacement), Ok("new".into()));
     }
 
     #[test]
     fn wrapper_listener_cycles_do_not_retain_detached_native_nodes() {
-        let (mut plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -462,12 +406,12 @@ mod tests {
                 )
                 .unwrap();
         });
-        assert_eq!(plugin.state().staging.node_count(), 2);
+        assert_eq!(plugin.state().dom.node_count(), 2);
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 1);
-        plugin.publish_for_test().unwrap();
-        assert_eq!(plugin.state().staging.node_count(), 1);
+        plugin.reclaim_for_test();
+        assert_eq!(plugin.state().dom.node_count(), 1);
         context.with(|context| {
             assert!(context
                 .eval::<bool, _>("listenerCycleWeakRef.deref() === undefined")
@@ -477,7 +421,7 @@ mod tests {
 
     #[test]
     fn a_collected_attached_wrapper_is_recreated_canonically() {
-        let (plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -516,7 +460,7 @@ mod tests {
 
     #[test]
     fn repeated_detached_wrapper_cycles_return_the_arena_to_baseline() {
-        let (mut plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -531,23 +475,17 @@ mod tests {
                 )
                 .unwrap();
         });
-        assert_eq!(plugin.state().staging.node_count(), 101);
+        assert_eq!(plugin.state().dom.node_count(), 101);
 
         collect_garbage(&runtime, &context);
-        plugin.publish_for_test().unwrap();
+        plugin.reclaim_for_test();
         assert_eq!(plugin.state().live_wrappers.len(), 1);
-        assert_eq!(plugin.state().staging.node_count(), 1);
+        assert_eq!(plugin.state().dom.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 100);
     }
 
     fn run_framework_fixture(prefix: &str, bundle: &str) {
-        let notifications = Arc::new(AtomicUsize::new(0));
-        let (mut plugin, _, reader) = DomPlugin::new({
-            let notifications = notifications.clone();
-            move |_| {
-                notifications.fetch_add(1, Ordering::AcqRel);
-            }
-        });
+        let (plugin, _) = DomPlugin::new();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -558,43 +496,43 @@ mod tests {
                 .catch(&context)
                 .unwrap());
         });
-        plugin.publish_for_test().unwrap();
-        let mounted = reader.load();
-        let window = mounted
-            .snapshot()
-            .children(mounted.snapshot().root())
-            .unwrap()[0];
-        let list = mounted.snapshot().children(window).unwrap()[0];
-        assert_eq!(snapshot_text(mounted.snapshot(), list), "ABC");
+        plugin.reclaim_for_test();
+        {
+            let state = plugin.state();
+            let dom = &state.dom;
+            let window = dom.children(dom.root()).unwrap()[0];
+            let list = dom.children(window).unwrap()[0];
+            assert_eq!(snapshot_text(dom, list), "ABC");
+        }
 
         context.with(|context| {
             assert!(context
                 .eval::<bool, _>(format!("{prefix}UpdateFixture()"))
                 .unwrap());
         });
-        plugin.publish_for_test().unwrap();
-        let updated = reader.load();
-        let window = updated
-            .snapshot()
-            .children(updated.snapshot().root())
-            .unwrap()[0];
-        let list = updated.snapshot().children(window).unwrap()[0];
-        let items = updated.snapshot().children(list).unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(updated.snapshot().attribute(items[0], "data-id"), Some("c"));
-        assert_eq!(updated.snapshot().attribute(items[1], "data-id"), Some("a"));
-        assert_eq!(snapshot_text(updated.snapshot(), list), "CA updated");
+        plugin.reclaim_for_test();
+        {
+            let state = plugin.state();
+            let dom = &state.dom;
+            let window = dom.children(dom.root()).unwrap()[0];
+            let list = dom.children(window).unwrap()[0];
+            let items = dom.children(list).unwrap();
+            assert_eq!(items.len(), 2);
+            assert_eq!(dom.attribute(items[0], "data-id"), Some("c"));
+            assert_eq!(dom.attribute(items[1], "data-id"), Some("a"));
+            assert_eq!(snapshot_text(dom, list), "CA updated");
+        }
 
         context.with(|context| {
             assert!(context
                 .eval::<bool, _>(format!("{prefix}UnmountFixture()"))
                 .unwrap());
         });
-        plugin.publish_for_test().unwrap();
-        let unmounted = reader.load();
-        assert!(unmounted
-            .snapshot()
-            .children(unmounted.snapshot().root())
+        plugin.reclaim_for_test();
+        assert!(plugin
+            .state()
+            .dom
+            .children(plugin.state().dom.root())
             .unwrap()
             .is_empty());
 
@@ -604,14 +542,13 @@ mod tests {
                 .unwrap();
         });
         collect_garbage(&runtime, &context);
-        plugin.publish_for_test().unwrap();
-        assert_eq!(plugin.state().staging.node_count(), 1);
-        assert_eq!(notifications.load(Ordering::Acquire), 4);
+        plugin.reclaim_for_test();
+        assert_eq!(plugin.state().dom.node_count(), 1);
     }
 
     #[test]
     fn facade_reports_named_errors_without_partial_mutation() {
-        let (plugin, _, _) = DomPlugin::new(|_| {});
+        let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -634,9 +571,6 @@ mod tests {
         });
 
         let state = plugin.state();
-        assert_eq!(
-            state.staging.children(state.staging.root()).unwrap().len(),
-            1
-        );
+        assert_eq!(state.dom.children(state.dom.root()).unwrap().len(), 1);
     }
 }

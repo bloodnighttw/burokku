@@ -1,6 +1,6 @@
 use slotmap::{Key, KeyData};
 
-use super::DomPluginState;
+use super::UiDomState;
 use crate::ui::elements::{DomError, NodeId};
 
 pub(super) fn encode_node_id(id: NodeId) -> String {
@@ -18,10 +18,10 @@ pub(super) fn decode_node_id(token: &str) -> Result<NodeId, InvalidNodeToken> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct InvalidNodeToken;
 
-impl DomPluginState {
+impl UiDomState {
     // insert the dom wrapper reference
     pub(super) fn acquire_wrapper(&mut self, id: NodeId) -> Result<(), DomError> {
-        self.staging
+        self.dom
             .contains(id)
             .then_some(())
             .ok_or(DomError::NodeNotFound(id))?;
@@ -45,10 +45,10 @@ impl DomPluginState {
     }
 
     // remove detached nodes that has no live wrappers
-    pub(super) fn reclaim_detached(&mut self) -> runtime::Result<()> {
+    pub(crate) fn reclaim_detached(&mut self) -> runtime::Result<()> {
         let live = self.live_wrappers.keys().copied().collect::<Vec<_>>();
         self.last_reclaim = self
-            .staging
+            .dom
             .reclaim_unreachable_detached(live)
             .map_err(|error| {
                 runtime::Error::new_from_js_message(

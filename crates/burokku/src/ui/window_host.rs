@@ -5,7 +5,7 @@ use std::rc::Rc;
 use thiserror::Error;
 use winit::{ActiveEventLoop, LogicalSize, Window, WindowAttributes, WindowId};
 
-use super::elements::{styles::window::WindowSize, Element, NodeId, NodeKind, PublishedDom};
+use super::elements::{styles::window::WindowSize, Dom, Element, NodeId, NodeKind};
 
 const DEFAULT_WINDOW_WIDTH: f64 = 800.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 600.0;
@@ -18,24 +18,19 @@ pub(crate) struct WindowSpec {
 }
 
 impl WindowSpec {
-    pub(crate) fn from_publication(
-        publication: &PublishedDom,
-    ) -> Result<Option<Self>, WindowHostError> {
-        let snapshot = publication.snapshot();
-        let app = snapshot.root();
-        if !matches!(snapshot.kind(app), Some(NodeKind::App)) {
+    pub(crate) fn from_dom(dom: &Dom) -> Result<Option<Self>, WindowHostError> {
+        let app = dom.root();
+        if !matches!(dom.kind(app), Some(NodeKind::App)) {
             return Err(WindowHostError::InvalidAppRoot);
         }
-        let children = snapshot
-            .children(app)
-            .ok_or(WindowHostError::InvalidAppRoot)?;
+        let children = dom.children(app).ok_or(WindowHostError::InvalidAppRoot)?;
         let Some(&dom_id) = children.first() else {
             return Ok(None);
         };
-        if children.len() != 1 || snapshot.parent(dom_id) != Some(app) {
+        if children.len() != 1 || dom.parent(dom_id) != Some(app) {
             return Err(WindowHostError::InvalidAppChildren(children.len()));
         }
-        let Some(Element::Window { style }) = snapshot.element(dom_id) else {
+        let Some(Element::Window { style }) = dom.element(dom_id) else {
             return Err(WindowHostError::ExpectedWindow(dom_id));
         };
 
@@ -51,7 +46,7 @@ impl WindowSpec {
 
         Ok(Some(Self {
             dom_id,
-            title: snapshot
+            title: dom
                 .attribute(dom_id, "title")
                 .unwrap_or("Burokku")
                 .to_owned(),
@@ -224,9 +219,8 @@ impl WindowManager {
     pub(crate) fn reconcile(
         &mut self,
         event_loop: &ActiveEventLoop,
-        publication: &PublishedDom,
+        desired: Option<WindowSpec>,
     ) -> Result<WindowChange, WindowHostError> {
-        let desired = WindowSpec::from_publication(publication)?;
         match (self.current.as_mut(), desired) {
             (None, None) => Ok(WindowChange::Unchanged),
             (Some(current), None) => {
@@ -281,7 +275,7 @@ fn apply_same_window_update<E>(
 ) -> Result<(), E> {
     debug_assert_eq!(current.dom_id, desired.dom_id);
 
-    // WindowSpec::from_publication validated the complete desired spec before
+    // WindowSpec::from_dom validated the complete desired spec before
     // this function is reached. Perform the fallible operation first so a
     // reported size failure cannot leave the title or committed spec changed.
     if current.inner_size != desired.inner_size {
@@ -328,17 +322,11 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
-        sync::Arc,
     };
 
-    use crate::ui::elements::{Dom, DomPublisher, ElementTag};
+    use crate::ui::elements::{Dom, ElementTag};
 
     use super::*;
-
-    fn publication(dom: &Dom) -> Arc<PublishedDom> {
-        let (_publisher, reader) = DomPublisher::new(dom, |_| {});
-        reader.load()
-    }
 
     #[derive(Debug)]
     struct ReplacementProbe {
@@ -551,10 +539,7 @@ mod tests {
         assert!(manager.current().is_none());
 
         let dom = Dom::new();
-        assert_eq!(
-            WindowSpec::from_publication(&publication(&dom)).unwrap(),
-            None
-        );
+        assert_eq!(WindowSpec::from_dom(&dom).unwrap(), None);
     }
 
     #[test]
@@ -567,9 +552,7 @@ mod tests {
             .unwrap();
         dom.append_child(dom.root(), window).unwrap();
 
-        let spec = WindowSpec::from_publication(&publication(&dom))
-            .unwrap()
-            .unwrap();
+        let spec = WindowSpec::from_dom(&dom).unwrap().unwrap();
 
         assert_eq!(spec.dom_id(), window);
         assert_eq!(spec.title(), "Demo");
@@ -583,9 +566,7 @@ mod tests {
         dom.set_style_property(window, "width", "50%").unwrap();
         dom.append_child(dom.root(), window).unwrap();
 
-        let spec = WindowSpec::from_publication(&publication(&dom))
-            .unwrap()
-            .unwrap();
+        let spec = WindowSpec::from_dom(&dom).unwrap().unwrap();
 
         assert_eq!(spec.title(), "Burokku");
         assert_eq!(spec.inner_size(), LogicalSize::new(400.0, 600.0));
@@ -598,7 +579,7 @@ mod tests {
         dom.set_style_property(window, "width", "0px").unwrap();
         dom.append_child(dom.root(), window).unwrap();
 
-        let error = WindowSpec::from_publication(&publication(&dom)).unwrap_err();
+        let error = WindowSpec::from_dom(&dom).unwrap_err();
 
         assert!(matches!(error, WindowHostError::InvalidInitialSize { .. }));
     }

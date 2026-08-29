@@ -41,11 +41,11 @@ pub(super) fn invalid_token<T>(context: &Ctx<'_>) -> Result<T> {
     )
 }
 
-pub(super) fn poisoned<T>(context: &Ctx<'_>) -> Result<T> {
-    Err(Exception::throw_internal(
+pub(super) fn borrow_conflict(context: &Ctx<'_>) -> runtime::Error {
+    Exception::throw_internal(
         context,
-        "the native DOM state is unavailable",
-    ))
+        "the live DOM is already borrowed by reentrant host work",
+    )
 }
 
 fn throw_dom(context: &Ctx<'_>, operation: &str, error: DomError) -> runtime::Error {

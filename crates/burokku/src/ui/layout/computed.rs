@@ -1,13 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::Arc,
 };
 
 use taffy::{geometry::Point, Layout};
 
 use crate::ui::{
-    elements::{NodeId as DomNodeId, PublishedDom},
+    elements::NodeId as DomNodeId,
     text::{ShapedParagraph, TextConstraint},
 };
 
@@ -46,7 +45,6 @@ impl ComputedBox {
 
 #[derive(Debug)]
 pub(crate) struct ComputedLayout {
-    publication: Arc<PublishedDom>,
     revision: u64,
     viewport: LogicalViewport,
     text_generation: u64,
@@ -60,7 +58,6 @@ pub(crate) struct ComputedLayout {
 
 impl ComputedLayout {
     pub(super) fn from_scratch(
-        publication: Arc<PublishedDom>,
         scratch: ScratchLayout,
         text_generation: u64,
         final_paragraphs: HashMap<DomNodeId, Rc<ShapedParagraph>>,
@@ -75,14 +72,9 @@ impl ComputedLayout {
             topology: scratch.topology,
             nodes: scratch.nodes,
             text_owner: scratch.text_owner,
-            publication,
             boxes,
             final_paragraphs,
         })
-    }
-
-    pub(crate) fn publication(&self) -> &Arc<PublishedDom> {
-        &self.publication
     }
 
     pub(crate) fn revision(&self) -> u64 {

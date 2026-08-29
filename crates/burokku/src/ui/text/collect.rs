@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ui::elements::{
-    styles::text::ComputedTextStyle, DomSnapshot, Element, NodeId, NodeKind,
-};
+use crate::ui::elements::{styles::text::ComputedTextStyle, Dom, Element, NodeId, NodeKind};
 
 use super::{ParagraphInput, StyledTextRun, TextError};
 
@@ -33,26 +31,24 @@ struct PendingNode {
 /// Traversal is iterative so script-created nesting cannot overflow the Rust
 /// stack.
 pub(crate) fn collect_paragraph(
-    snapshot: &DomSnapshot,
+    dom: &Dom,
     source: NodeId,
 ) -> Result<CollectedParagraph, TextError> {
-    let source_style = match snapshot.element(source) {
+    let source_style = match dom.element(source) {
         Some(Element::Text { style }) => &style.text,
         Some(_) => return Err(TextError::ExpectedParagraph(source)),
         None => return Err(TextError::MissingNode(source)),
     };
-    if snapshot
+    if dom
         .parent(source)
-        .and_then(|parent| snapshot.element(parent))
+        .and_then(|parent| dom.element(parent))
         .is_some_and(|parent| matches!(parent, Element::Text { .. }))
     {
         return Err(TextError::ExpectedParagraph(source));
     }
 
     let base_style = source_style.resolve(None);
-    let children = snapshot
-        .children(source)
-        .ok_or(TextError::MissingNode(source))?;
+    let children = dom.children(source).ok_or(TextError::MissingNode(source))?;
     let mut pending = children
         .iter()
         .rev()
@@ -68,7 +64,7 @@ pub(crate) fn collect_paragraph(
     let mut runs: Vec<StyledTextRun> = Vec::new();
 
     while let Some(next) = pending.pop() {
-        if snapshot.parent(next.id) != Some(next.parent) {
+        if dom.parent(next.id) != Some(next.parent) {
             return Err(TextError::InvalidRelationship {
                 parent: next.parent,
                 child: next.id,
@@ -82,9 +78,7 @@ pub(crate) fn collect_paragraph(
         }
         descendants.push(next.id);
 
-        let node = snapshot
-            .node(next.id)
-            .ok_or(TextError::MissingNode(next.id))?;
+        let node = dom.node(next.id).ok_or(TextError::MissingNode(next.id))?;
         match node.kind() {
             NodeKind::Text(value) => append_run(&mut text, &mut runs, value, next.inherited_style),
             NodeKind::Element(Element::Text { style }) => {
@@ -179,14 +173,12 @@ fn validate_runs(source: NodeId, text: &str, runs: &[StyledTextRun]) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::ui::elements::{
         styles::{
             color::RgbaColor,
             text::{FontWeight, TextWrap},
         },
-        Dom, DomPublisher, Element, ElementTag, PublishedDom,
+        Dom, Element, ElementTag,
     };
 
     use super::*;
@@ -195,14 +187,8 @@ mod tests {
         dom.create_element(Element::from_tag(tag))
     }
 
-    fn publication(dom: &Dom) -> Arc<PublishedDom> {
-        let (_publisher, reader) = DomPublisher::new(dom, |_| {});
-        reader.load()
-    }
-
     fn collect(dom: &Dom, source: NodeId) -> CollectedParagraph {
-        let publication = publication(dom);
-        collect_paragraph(publication.snapshot(), source).unwrap()
+        collect_paragraph(dom, source).unwrap()
     }
 
     #[test]
