@@ -8,9 +8,9 @@ Draft migration plan for replacing Burokku's cross-thread DOM publication model 
 
 Layout already runs on the UI thread inside `ApplicationHost`; the mutable DOM and application JavaScript currently run in the background runtime. The patched Tokio integration allows the main QuickJS driver to progress inside the native event loop, so the DOM-facing JavaScript runtime can move onto the UI thread beside window management, layout, scene construction, and presentation.
 
-The recommended final architecture is one JavaScript runtime for the Burokku application. If a background JavaScript isolate is still required, it should be an optional worker that exchanges owned messages with the UI runtime and cannot directly mutate the DOM.
+The final architecture uses one JavaScript runtime for the Burokku application. `DualRuntime`, its dedicated background JavaScript thread, and its cross-runtime bridge are removed rather than retained as optional infrastructure.
 
-Keeping DOM mutation on the background thread while removing snapshot or message transport is not safe.
+Application code that needs asynchronous I/O continues to use Tokio. CPU-intensive or blocking Rust work must use `spawn_blocking` or an explicit non-JavaScript worker designed separately from the UI runtime.
 
 ```text
 AppKit event loop
@@ -30,13 +30,13 @@ AppKit event loop
 2. Replace immutable snapshot publication with controlled borrowing of one live DOM.
 3. Preserve macrotask/microtask batch boundaries and revision-based consistency.
 4. Make the native event loop the outer owner of the process main thread.
-5. Reduce Burokku's application path from two JavaScript runtimes to one unless a separate worker is explicitly requested.
+5. Remove `DualRuntime` and make Burokku's JavaScript runtime explicitly local to the UI thread.
 6. Preserve stale-result checks for asynchronous GPU work and generation-checked node handles.
 
 ## Non-goals
 
 - Removing DOM revisions or `NodeId` generations.
-- Allowing a background isolate to borrow or synchronously mutate the UI DOM.
+- Reintroducing a background JavaScript isolate or cross-runtime DOM bridge.
 - Holding a DOM borrow across an `.await`, native operation that may reenter the event loop, or GPU presentation.
 - Removing the owned presented-frame hit-test plan.
 - Replacing Tokio's bounded external tick with synchronous polling from window callbacks.
@@ -106,7 +106,7 @@ The persistent `LocalSet` owns the main QuickJS driver and other thread-affine f
 
 ### DOM ownership
 
-The smallest migration can retain a shared state compatible with the current `Plugin: Send` contract:
+Discarding `DualRuntime` allows the runtime and plugin APIs to become explicitly thread-local. `Plugin` no longer needs a global `Send` bound, and the QuickJS driver must be `!Send` and driven only through the persistent `LocalSet`. The live DOM state can therefore use `Rc<RefCell<_>>`:
 
 ```rust
 struct UiDomState {
@@ -115,12 +115,12 @@ struct UiDomState {
     last_reclaim: ReclaimReport,
 }
 
-type SharedUiDom = Arc<Mutex<UiDomState>>;
+type SharedUiDom = Rc<RefCell<UiDomState>>;
 ```
 
-This mutex is no longer a cross-thread synchronization mechanism. It is only a compatibility handle between the runtime plugin and `ApplicationHost`. No lock may be held across `.await`, native window operations, or presentation.
+`DomPlugin` and `ApplicationHost` each hold an `Rc` clone pointing to the same `UiDomState`; the DOM itself is not cloned. Access should use `try_borrow` and `try_borrow_mut` so accidental reentrancy becomes an explicit host or JavaScript error rather than a panic.
 
-A later runtime cleanup may introduce a non-`Send` `LocalPlugin` capability and replace this handle with `Rc<RefCell<UiDomState>>`. That should be a separate migration and should not block snapshot removal.
+No `RefCell` borrow may be held across `.await`, native window operations, presentation, JavaScript execution, or any operation that may enter a nested platform loop.
 
 ### Frame transaction
 
@@ -213,19 +213,26 @@ Remove `ComputedLayout::publication: Arc<PublishedDom>` and its `publication()` 
 
 Remove `LayoutError::PublicationRevisionMismatch` and update error messages that describe nodes as "committed" when they now refer to the live UI DOM.
 
-### Dual-runtime wiring from Burokku
+### Dual-runtime implementation
 
-Remove from Burokku's application path:
+Remove from `crates/runtime`:
 
-- `DualRuntimeBuilder`;
-- `DualRuntime`;
-- `DualRuntimeDriver`;
+- `src/dual_runtime.rs`;
+- `DualRuntime`, `DualRuntimeBuilder`, and `DualRuntimeDriver` exports;
+- dedicated background-thread creation, shutdown, and join logic;
+- main/background plugin collections and queue-capacity configuration;
+- dual-runtime-specific tests;
+- `src/bridge.rs` and its exports/tests;
+- the `RuntimeRole` mechanism and main/background role branches.
+
+Remove from Burokku:
+
+- `DualRuntimeBuilder`, `DualRuntime`, and `DualRuntimeDriver` imports and exports;
 - `shutdown_with_driver`;
 - `main_runtime_plugin`;
 - `runtime.background().eval(...)`;
+- duplicate Console, JSON, and Timers plugin installation;
 - the current `LocalSet::run_until` and `tokio::select!` composition.
-
-The generic dual-runtime implementation in `crates/runtime` may remain temporarily for other consumers. Burokku should stop using and prominently re-exporting it.
 
 ### Obsolete tests, examples, and documentation
 
@@ -262,12 +269,12 @@ Build the main JavaScript runtime inside a `LocalSet` task, spawn its `RuntimeDr
 
 Change `DomPlugin` so it:
 
-- requires `RuntimeRole::Main` rather than rejecting it;
+- installs only in the one local QuickJS runtime;
 - returns the shared live DOM handle needed by `ApplicationHost`;
 - no longer owns a publisher;
 - retains `Plugin::checkpoint` for detached-node reclamation and revision/dirty bookkeeping.
 
-The DOM-facing application script must be evaluated on the main runtime. A background runtime cannot expose the synchronous DOM facade without changing the JavaScript API into asynchronous RPC.
+The application script is evaluated on this same local runtime. Runtime roles and main/background installation branches are unnecessary once `DualRuntime` is removed.
 
 ### Startup and shutdown state
 
@@ -345,17 +352,20 @@ BuiltScene::build(
 
 `ComputedLayout` remains an owned cache keyed by DOM revision, viewport, and text-engine generation.
 
-### Optional background worker API
+### Explicitly local runtime API
 
-If two JavaScript isolates remain a product requirement, make the distinction explicit:
+With `DualRuntime` removed, `crates/runtime` should make thread affinity part of its type contract:
 
-- the main/UI script owns synchronous DOM APIs;
-- an optional worker script runs in the background isolate;
-- communication uses bounded channels and owned Rust messages;
-- background code never receives DOM references or raw QuickJS values from the main isolate;
-- queue overflow and shutdown behavior are explicit.
+- change `Plugin: Send + 'static` to `Plugin: 'static`;
+- store local plugin trait objects without a `Send` bound;
+- make `RuntimeDriver` explicitly `!Send`, for example with `PhantomData<Rc<()>>`;
+- drive it only with `tokio::task::spawn_local`;
+- remove or redesign `Runtime::build` if it automatically uses `tokio::spawn`;
+- prefer `RuntimeBuilder::build_driven` under the event loop's persistent `LocalSet`;
+- remove rquickjs's `parallel` feature so QuickJS's type-level contract matches local execution;
+- update runtime tests to enter a current-thread runtime and persistent `LocalSet`.
 
-Do not preserve the current ambiguous single `script` API while silently changing which isolate executes it. Prefer a single UI script by default; if workers are retained, use explicit names such as `ui_script` and `worker_script`.
+Asynchronous networking, timers, and synchronization continue to use Tokio. Blocking or CPU-intensive Rust work must be explicitly offloaded with `spawn_blocking`; no background JavaScript runtime is retained.
 
 ## 3. Simplification opportunities
 
@@ -375,7 +385,7 @@ runtime: RuntimeBuilder
 
 `runtime_plugin` then installs into the one UI runtime. Remove `main_runtime_plugin`. Console, JSON, and timers are installed once rather than in both isolates.
 
-The crate-level documentation and package description should no longer describe Burokku as a dual-runtime UI crate unless the background worker becomes an explicit optional feature.
+The crate-level documentation and package description should describe one thread-affine UI JavaScript runtime rather than a dual-runtime UI crate.
 
 ### DOM update path
 
@@ -472,86 +482,92 @@ Snapshots are removable; temporal identity is not.
 
 ## Migration sequence
 
-### Phase 1: Integrate the external event loop
+### Phase 1: Make `crates/runtime` local and remove `DualRuntime`
 
-1. Make `Burokku::run` synchronous.
-2. Build patched Tokio through `EventLoop::external_runtime_builder`.
-3. Supply one persistent `LocalSet` to `run_app_external`.
-4. Drive the existing main QuickJS runtime on that LocalSet.
-5. Keep publications temporarily to isolate runner/lifecycle changes.
+1. Delete `dual_runtime.rs` and its exports/tests.
+2. Delete `bridge.rs` and its exports/tests.
+3. Remove main/background runtime roles and builder branches.
+4. Change `Plugin: Send + 'static` to `Plugin: 'static`.
+5. Make `RuntimeDriver` explicitly `!Send`.
+6. Replace automatic `tokio::spawn` driving with explicit `build_driven` plus `spawn_local`.
+7. Remove the rquickjs `parallel` feature.
+8. Update runtime tests to use a current-thread runtime and `LocalSet`.
+
+Exit criteria:
+
+- no `DualRuntime`, background JavaScript thread, or runtime bridge symbols remain;
+- the compiler prevents moving `RuntimeDriver` to another thread;
+- QuickJS evaluation, timers, promises, plugin checkpoints, and Tokio I/O still pass on a `LocalSet`;
+- no runtime path calls `tokio::spawn(driver.run())`.
+
+### Phase 2: Integrate the external event loop and single runtime
+
+1. Change `BurokkuBuilder` from `DualRuntimeBuilder` to `RuntimeBuilder`.
+2. Make `Burokku::run` synchronous.
+3. Build patched Tokio through `EventLoop::external_runtime_builder`.
+4. Supply one persistent `LocalSet` to `run_app_external`.
+5. Build and drive the single QuickJS runtime on that LocalSet.
+6. Install Console, JSON, Timers, and `DomPlugin` once.
+7. Evaluate the application script on the single runtime.
+8. Add startup, fatal-error, and shutdown lifecycle reporting.
+9. Keep publications temporarily to isolate event-loop and runtime-lifecycle changes.
 
 Exit criteria:
 
 - Burokku compiles against the current winit API;
-- QuickJS timers and tasks progress while the window loop runs;
+- QuickJS timers and tasks progress while the native loop runs;
+- application JavaScript, DOM bindings, checkpoints, layout, and scene construction run on the process main thread;
 - startup and shutdown failures are surfaced;
-- main-runtime tasks remain on the process main thread.
+- Burokku creates no dedicated JavaScript background thread.
 
-### Phase 2: Move DOM-facing JavaScript to the main runtime
+### Phase 3: Replace publications with direct local DOM borrowing
 
-1. Permit and require main-role `DomPlugin` installation.
-2. Install the plugin with `main_plugin` while dual-runtime compatibility remains.
-3. Evaluate the UI application script on `runtime.main()`.
-4. Verify DOM mutation, layout, and scene construction thread identity.
-5. Decide whether a background worker is still required.
-
-Exit criteria:
-
-- the synchronous DOM facade runs on the UI thread;
-- background JavaScript, if retained, has no direct DOM access;
-- framework updates still complete within one runtime checkpoint.
-
-### Phase 3: Replace publications with direct DOM borrowing
-
-1. Give `ApplicationHost` the live DOM state handle.
-2. Convert window, layout, text, and scene APIs from publication types to `&Dom`.
-3. Build layout and scene under one immutable DOM borrow.
-4. Release the borrow before native/GPU work.
-5. Replace publication authority checks with live revision and window-identity checks.
+1. Change shared DOM state to `Rc<RefCell<UiDomState>>`.
+2. Give `DomPlugin` and `ApplicationHost` clones of the same local handle.
+3. Use `try_borrow` and `try_borrow_mut` to report reentrancy.
+4. Convert window, layout, text, and scene APIs from publication types to `&Dom`.
+5. Build layout and scene under one immutable DOM borrow.
+6. Release the borrow before native or GPU work.
+7. Replace publication authority checks with short live-DOM revision and window-identity checks.
 
 Exit criteria:
 
 - no production consumer loads `PublishedDom`;
 - a frame's layout, paint data, and hit-test data use one DOM revision;
-- retained frames contain no DOM references.
+- retained frames contain no DOM references;
+- no `RefCell` borrow survives an `.await`, native operation, presentation, or JavaScript invocation.
 
-### Phase 4: Delete snapshot machinery
+### Phase 4: Delete snapshot and copy-on-write machinery
 
 1. Delete `publication.rs`.
 2. Remove `arc-swap`.
 3. Remove `Dom: Clone` and `Arc<Node>` copy-on-write storage.
 4. Delete publication-specific tests and error variants.
 5. Convert remaining fixtures to direct DOM usage.
+6. Remove publication notification and reader code from `ApplicationHost`.
 
 Exit criteria:
 
 - no snapshot/publication symbols remain in `crates/burokku`;
-- DOM mutation tests, layout tests, scene tests, and host tests pass;
-- stable `NodeId` behavior is unchanged.
+- DOM mutation, layout, scene, and host tests pass;
+- stable `NodeId` behavior is unchanged;
+- frame and presentation revisions continue to detect stale work.
 
-### Phase 5: Simplify the public runtime API
+### Phase 5: Simplify public APIs, examples, and documentation
 
-1. Change `BurokkuBuilder` to a single `RuntimeBuilder`.
-2. Remove `main_runtime_plugin`.
-3. Stop re-exporting `DualRuntime` and `DualRuntimeBuilder` as Burokku's primary API.
-4. Remove duplicate default plugins.
-5. Update the example to a synchronous main function.
-6. Optionally add an explicit background worker API.
+1. Remove `main_runtime_plugin`; `runtime_plugin` targets the one local runtime.
+2. Stop exporting `DualRuntime` and `DualRuntimeBuilder`.
+3. Remove duplicate default plugins and dual-runtime shutdown helpers.
+4. Update the example to a synchronous main function.
+5. Remove the example's direct Tokio dependency if unused.
+6. Update crate descriptions and architecture documents to describe one local UI runtime.
+7. Remove dual-runtime and snapshot benchmarks; retain layout, scene, and responsiveness measurements.
 
 Exit criteria:
 
-- the default Burokku application creates no dedicated JavaScript background thread;
 - one script and one plugin surface have unambiguous UI-runtime ownership;
-- optional worker behavior, if present, is explicit.
-
-### Phase 6: Optional local-plugin cleanup
-
-1. Add a non-`Send` `LocalPlugin` path to `crates/runtime`.
-2. Restrict it to explicitly driven/local runtimes.
-3. Convert `SharedUiDom` from `Arc<Mutex<_>>` to `Rc<RefCell<_>>`.
-4. Remove mutex poisoning errors from DOM bindings.
-
-This phase is optional and should follow the functional migration rather than expanding its initial scope.
+- documentation contains no optional background JavaScript runtime path;
+- the layouts example starts, updates by timer, renders, and shuts down correctly.
 
 ## Verification plan
 
@@ -567,7 +583,7 @@ This phase is optional and should follow the functional migration rather than ex
 ### Runtime integration tests
 
 - Main QuickJS driver progresses under `run_app_external`.
-- DOM plugin installation fails outside the main runtime role.
+- DOM plugin and application script execute through the one local QuickJS runtime.
 - A macrotask plus its ready microtasks produces one observable DOM batch.
 - Several completed batches may coalesce before one redraw.
 - A timer can mount or remove a window after startup.
@@ -599,7 +615,7 @@ All must be the process main thread.
 
 ### Script-placement compatibility
 
-Applications may currently assume their script runs on the named background thread. Moving the script is an intentional API change and should be documented. Proxying the synchronous DOM facade back to the background isolate would be a larger semantic change and is not recommended.
+Applications currently run their script on the named background thread. Removing `DualRuntime` intentionally moves that script to the process/UI thread. This is a breaking thread-affinity change and must be documented; no compatibility bridge or background JavaScript mode is retained.
 
 ### Reentrancy
 
@@ -611,7 +627,7 @@ Patched Tokio's external tick budget limits task polls, not the duration of one 
 
 ### Shutdown ordering
 
-The native loop owns Tokio and the LocalSet. QuickJS and any worker runtime must stop before that execution environment is destroyed. A background worker, if retained, needs an explicit shutdown-and-join protocol before calling `ActiveEventLoop::exit`.
+The native loop owns Tokio, the LocalSet, and the one QuickJS runtime. QuickJS shutdown must complete while that execution environment still exists; `run_app_external` must not drop the LocalSet or Tokio runtime before the local driver has been asked to stop.
 
 ### Retained failure state
 
@@ -619,4 +635,4 @@ The current host can retain a previously presented frame after a recoverable can
 
 ## Final architectural rule
 
-The UI DOM has one owner and one execution thread. JavaScript mutation, checkpointing, native-window reconciliation, layout, scene materialization, and presentation are serialized by the native event loop and patched Tokio scheduler. Background workers communicate through owned messages only. A frame may borrow the live DOM while producing owned derived data, but no DOM borrow or reference survives that frame-building scope.
+The UI DOM and the single QuickJS runtime have one owner thread. JavaScript mutation, checkpointing, native-window reconciliation, layout, scene materialization, and presentation are serialized by the native event loop and patched Tokio scheduler. `DualRuntime`, its background JavaScript thread, and its bridge are not part of the target architecture. A frame may borrow the live DOM while producing owned derived data, but no DOM borrow or reference survives that frame-building scope.
