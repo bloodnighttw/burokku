@@ -14,7 +14,16 @@ use crate::{
 fn install_llrt_globals(context: &runtime::rquickjs::Ctx<'_>) -> runtime::Result<()> {
     BasePrimordials::init(context)?;
     let (_, _, globals) = llrt_modules::module_builder::ModuleBuilder::default().build();
-    globals.attach(context)
+    globals.attach(context)?;
+    context.eval::<(), _>(include_str!("ui/scripts/llrt_lifecycle.js"))
+}
+
+async fn prepare_llrt_shutdown(runtime: &runtime::Runtime) -> runtime::Result<()> {
+    runtime.eval::<()>("globalThis.__burokkuShutdown()").await?;
+    // LLRT timer callbacks are persistent QuickJS values. Give its notified
+    // timer task a chance to release them before the context is dropped.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,6 +100,7 @@ async fn bootstrap_runtime(
     let mut driver = tokio::task::spawn_local(driver.run());
 
     if let Err(error) = runtime.eval::<()>(script).await {
+        let _ = prepare_llrt_shutdown(&runtime).await;
         let _ = runtime.shutdown().await;
         let _ = driver.await;
         lifecycle.set_status(RuntimeStatus::Failed(format!(
@@ -102,6 +112,7 @@ async fn bootstrap_runtime(
 
     tokio::select! {
         _ = &mut shutdown => {
+            let cleanup_error = prepare_llrt_shutdown(&runtime).await.err();
             if let Err(error) = runtime.shutdown().await {
                 lifecycle.set_status(RuntimeStatus::Failed(format!(
                     "QuickJS shutdown failed: {error}"
@@ -114,7 +125,13 @@ async fn bootstrap_runtime(
                 )));
                 return;
             }
-            lifecycle.set_status(RuntimeStatus::Stopped);
+            if let Some(error) = cleanup_error {
+                lifecycle.set_status(RuntimeStatus::Failed(format!(
+                    "LLRT cleanup failed: {error}"
+                )));
+            } else {
+                lifecycle.set_status(RuntimeStatus::Stopped);
+            }
         }
         result = &mut driver => {
             let message = match result {
@@ -339,6 +356,7 @@ mod tests {
                         .iter()
                         .any(|item| matches!(item, PaintItem::Text { .. })));
                 }
+                prepare_llrt_shutdown(&runtime).await.unwrap();
                 runtime.shutdown().await.unwrap();
                 driver.await.unwrap();
             })
@@ -370,6 +388,48 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 assert!(WindowSpec::from_dom(&dom.borrow().dom).unwrap().is_some());
 
+                prepare_llrt_shutdown(&runtime).await.unwrap();
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn llrt_counter_example_updates_from_an_interval() {
+        LocalSet::new()
+            .run_until(async {
+                let (plugin, dom) = DomPlugin::new();
+                let (runtime, driver) = Runtime::builder()
+                    .plugin(install_llrt_globals)
+                    .plugin(plugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                let script = format!(
+                    "globalThis.__BUROKKU_COUNTER_INTERVAL_MS__ = 5;\n{}",
+                    include_str!("../../../example/counter/src/app.js")
+                );
+
+                runtime.eval::<()>(script).await.unwrap();
+                assert_eq!(
+                    WindowSpec::from_dom(&dom.borrow().dom)
+                        .unwrap()
+                        .unwrap()
+                        .title(),
+                    "LLRT counter — 0"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                assert_ne!(
+                    WindowSpec::from_dom(&dom.borrow().dom)
+                        .unwrap()
+                        .unwrap()
+                        .title(),
+                    "LLRT counter — 0"
+                );
+
+                prepare_llrt_shutdown(&runtime).await.unwrap();
                 runtime.shutdown().await.unwrap();
                 driver.await.unwrap();
             })

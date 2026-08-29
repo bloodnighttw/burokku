@@ -1,21 +1,32 @@
-# Layout example
+# Examples
 
-`example/layouts` is a Rust binary that embeds `dist/app.js`, installs the
-Burokku application host, registers the bundled Noto Sans fixture, and presents
-the resulting Window through Taffy, Parley, Vello Hybrid, and WGPU.
+## LLRT counter
 
-Run it from the workspace root:
+`example/counter` is a Rust binary that embeds a JavaScript application and uses
+LLRT's `setInterval` to update a live DOM text node once per second.
+
+```sh
+cargo run -p burokku-example-counter
+```
+
+For a bounded smoke run, remove the Window after the first counter tick:
+
+```sh
+BUROKKU_SMOKE=1 cargo run -p burokku-example-counter
+```
+
+## Layout showcase
+
+`example/layouts` embeds `src/app.js`, registers the bundled Noto Sans fixture,
+and presents flex layout, inherited text runs, backgrounds, and wrapped
+paragraphs through Taffy, Parley, Vello Hybrid, and WGPU.
 
 ```sh
 cargo run -p burokku-example-layouts
 ```
 
-For a bounded manual smoke check, set `BUROKKU_SMOKE`; the script removes its
-Window after a short interval and the host exits cleanly:
+A bounded smoke run is also available:
 
 ```sh
 BUROKKU_SMOKE=1 cargo run -p burokku-example-layouts
 ```
-
-The checked-in JavaScript bundle exercises flex layout, nested inherited text
-runs, backgrounds, and multiple wrapped paragraphs.

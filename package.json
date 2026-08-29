@@ -4,9 +4,9 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "build": "pnpm typecheck && pnpm --filter './example/*' build && cargo build --workspace",
-    "dev": "pnpm --filter @burokku/example-counter dev",
-    "example:counter": "pnpm --filter @burokku/example-counter dev",
-    "example:layouts": "pnpm --filter @burokku/example-layouts dev",
+    "dev": "cargo run -p burokku-example-counter",
+    "example:counter": "cargo run -p burokku-example-counter",
+    "example:layouts": "cargo run -p burokku-example-layouts",
     "typecheck": "pnpm --filter @burokku/runtime build && pnpm --filter './example/*' typecheck",
     "test": "pnpm typecheck && pnpm --filter './example/*' build && cargo test --workspace",
     "clean": "cargo clean && rm -rf example/counter/dist example/layouts/dist"
