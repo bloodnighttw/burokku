@@ -307,6 +307,13 @@ impl TextEngine {
         self.cache.retain(|source, _| sources.contains(source));
     }
 
+    pub(crate) fn remove_sources(&mut self, sources: &[NodeId]) {
+        if sources.is_empty() {
+            return;
+        }
+        self.cache.retain(|source, _| !sources.contains(source));
+    }
+
     #[cfg(test)]
     fn cached_variant_count(&self, source: NodeId) -> usize {
         self.cache

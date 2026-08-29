@@ -147,10 +147,7 @@ impl Burokku {
             .build()?;
         let local_set = tokio::task::LocalSet::new();
 
-        let (dom_plugin, dom_publication, publications) = DomPlugin::new({
-            let proxy = proxy.clone();
-            move |_| proxy.wake_up()
-        });
+        let (dom_plugin, dom) = DomPlugin::new();
         let (lifecycle, shutdown) = RuntimeLifecycle::new(proxy);
 
         let mut text = TextEngine::new();
@@ -159,7 +156,7 @@ impl Burokku {
                 .map_err(|error| BurokkuError::Host(error.to_string()))?;
         }
 
-        let host = ApplicationHost::new(dom_publication, publications, text, lifecycle.clone());
+        let host = ApplicationHost::new(dom, text, lifecycle.clone());
         local_set.spawn_local(bootstrap_runtime(
             self.runtime.plugin(dom_plugin),
             self.script,
@@ -297,11 +294,11 @@ mod tests {
     async fn app_script_commits_a_window_and_text_for_the_native_host() {
         LocalSet::new()
             .run_until(async {
-                let (dom, publication, publications) = DomPlugin::new(|_| {});
-                let initial_revision = publications.load().revision();
+                let (plugin, dom) = DomPlugin::new();
+                let initial_revision = dom.borrow().dom.revision();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(JsonPlugin)
-                    .plugin(dom)
+                    .plugin(plugin)
                     .build_driven()
                     .await
                     .unwrap();
@@ -319,15 +316,6 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                publication.publish().unwrap();
-                let published = publications.load();
-                assert!(published.revision() > initial_revision);
-                let spec = WindowSpec::from_publication(&published).unwrap().unwrap();
-                assert_eq!(spec.title(), "Script host");
-                assert_eq!(
-                    published.snapshot().children(spec.dom_id()).unwrap().len(),
-                    1
-                );
 
                 let mut text = TextEngine::without_system_fonts();
                 text.register_font_data(
@@ -335,20 +323,27 @@ mod tests {
                 )
                 .unwrap();
                 let mut layout = LayoutEngine::new(text);
-                let computed = layout
-                    .compute(
-                        published.clone(),
-                        LogicalViewport::new(800.0, 600.0).unwrap(),
+                {
+                    let state = dom.borrow();
+                    assert!(state.dom.revision() > initial_revision);
+                    let spec = WindowSpec::from_dom(&state.dom).unwrap().unwrap();
+                    assert_eq!(spec.title(), "Script host");
+                    assert_eq!(state.dom.children(spec.dom_id()).unwrap().len(), 1);
+                    let computed = layout
+                        .compute(&state.dom, LogicalViewport::new(800.0, 600.0).unwrap())
+                        .unwrap();
+                    let plan = ScenePlan::from_layout(
+                        &state.dom,
+                        computed,
+                        winit::PhysicalSize::new(800, 600),
+                        1.0,
                     )
                     .unwrap();
-                let plan =
-                    ScenePlan::from_layout(computed, winit::PhysicalSize::new(800, 600), 1.0)
-                        .unwrap();
-                assert!(plan
-                    .items()
-                    .iter()
-                    .any(|item| matches!(item, PaintItem::Text { .. })));
-
+                    assert!(plan
+                        .items()
+                        .iter()
+                        .any(|item| matches!(item, PaintItem::Text { .. })));
+                }
                 runtime.shutdown().await.unwrap();
                 driver.await.unwrap();
             })
@@ -359,10 +354,10 @@ mod tests {
     async fn detached_window_may_be_mounted_by_a_later_timer_batch() {
         LocalSet::new()
             .run_until(async {
-                let (dom, publication, publications) = DomPlugin::new(|_| {});
+                let (plugin, dom) = DomPlugin::new();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(TimersPlugin)
-                    .plugin(dom)
+                    .plugin(plugin)
                     .build_driven()
                     .await
                     .unwrap();
@@ -375,17 +370,10 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                publication.publish().unwrap();
-                assert_eq!(
-                    WindowSpec::from_publication(&publications.load()).unwrap(),
-                    None
-                );
+                assert_eq!(WindowSpec::from_dom(&dom.borrow().dom).unwrap(), None);
 
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                publication.publish().unwrap();
-                assert!(WindowSpec::from_publication(&publications.load())
-                    .unwrap()
-                    .is_some());
+                assert!(WindowSpec::from_dom(&dom.borrow().dom).unwrap().is_some());
 
                 runtime.shutdown().await.unwrap();
                 driver.await.unwrap();
