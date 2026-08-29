@@ -1,34 +1,11 @@
 //! Atomic transfer of immutable DOM revisions from BTS to MTS.
 //!
-//! # BTS integration
+//! # Producer integration
 //!
-//! The future native DOM plugin exclusively owns its mutable staging [`Dom`]
-//! and one [`DomPublisher`]. JavaScript facade methods mutate staging
-//! synchronously so JavaScript can read its own writes. After the runtime has
-//! completed one macrotask and drained all ready microtasks, the plugin's
-//! context-free `runtime::Plugin::checkpoint` callback delegates to the
-//! publisher:
-//!
-//! ```ignore
-//! struct DomPlugin {
-//!     staging: Dom,
-//!     publisher: DomPublisher,
-//! }
-//!
-//! impl runtime::Plugin for DomPlugin {
-//!     fn checkpoint(&mut self) -> runtime::Result<()> {
-//!         self.publisher.checkpoint(&self.staging);
-//!         Ok(())
-//!     }
-//! }
-//! ```
-//!
-//! A checkpoint does not execute JavaScript or schedule more microtasks. It
-//! publishes successfully applied staging mutations even when the preceding
-//! JavaScript macrotask ended with an exception. The staging DOM, publisher,
-//! and notifier remain crate-private capabilities and must not be exposed to
-//! application plugins.
-//!
+//! The DOM owner holds its mutable staging [`Dom`] and one [`DomPublisher`].
+//! Mutations are published only after their scheduling batch completes, so a
+//! consumer never observes a partially processed JavaScript task. The staging
+//! DOM, publisher, and notifier remain crate-private capabilities.
 //! # MTS frame integration
 //!
 //! MTS owns a cloneable [`PublishedDomReader`]. It calls
@@ -224,8 +201,8 @@ impl fmt::Debug for PublishedDomReader {
 
 /// The single-owner BTS side of immutable DOM publication.
 ///
-/// The future DOM plugin owns this writer alongside its mutable staging
-/// [`Dom`] and calls [`Self::checkpoint`] from `runtime::Plugin::checkpoint`.
+/// The DOM owner keeps this writer alongside its mutable staging [`Dom`] and
+/// publishes only at an explicit scheduler boundary.
 /// The writer is `Send` so it can move to BTS, but its single-owner notifier
 /// keeps it from being `Sync`; it also intentionally does not implement
 /// [`Clone`].

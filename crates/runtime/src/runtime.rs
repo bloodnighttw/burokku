@@ -1,33 +1,31 @@
 use crate::{
     event_loop::{self, RuntimeControl},
-    MacrotaskQueue, Result, RuntimeBuilder, RuntimeRole,
+    MacrotaskQueue, Result, RuntimeBuilder,
 };
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, FromJs, Promise, ThrowResultExt};
-use std::{future::Future, pin::Pin};
-use tokio::{sync::oneshot, task::JoinHandle};
+use std::{future::Future, marker::PhantomData, pin::Pin, rc::Rc};
+use tokio::sync::oneshot;
 
-/// A thread-safe handle to one isolated JavaScript runtime.
+/// A thread-safe handle to one thread-affine JavaScript runtime.
 ///
 /// All JavaScript entry points are submitted to the isolate's macrotask queue.
-/// Consequently, JavaScript executes wherever the associated
-/// [`RuntimeDriver`] is polled rather than on the caller's thread.
+/// JavaScript executes only where the associated [`RuntimeDriver`] is polled.
 pub struct Runtime {
-    role: RuntimeRole,
     macrotasks: MacrotaskQueue,
     control: RuntimeControl,
-    spawned_driver: Option<JoinHandle<()>>,
     shutdown_requested: bool,
 }
 
 /// Drives the futures, jobs, and macrotasks belonging to one QuickJS isolate.
 ///
-/// A driver should be polled on exactly one assigned thread for its entire
-/// lifetime. Dropping the owning [`Runtime`], or explicitly shutting it down,
-/// completes the driver.
+/// The driver is deliberately `!Send`. It must be spawned with
+/// [`tokio::task::spawn_local`] and remain on one persistent
+/// [`tokio::task::LocalSet`] for its whole lifetime.
 pub struct RuntimeDriver {
     context: Option<AsyncContext>,
-    quickjs: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    quickjs: Pin<Box<dyn Future<Output = ()> + 'static>>,
     stopped: oneshot::Receiver<()>,
+    _local: PhantomData<Rc<()>>,
 }
 
 impl RuntimeDriver {
@@ -45,35 +43,9 @@ impl RuntimeDriver {
 }
 
 impl Runtime {
-    /// Start configuring a standalone runtime without host plugins.
+    /// Start configuring a thread-affine runtime without host plugins.
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::new()
-    }
-
-    /// Create and automatically drive a standalone runtime without plugins.
-    ///
-    /// This must be called from inside a running Tokio runtime. Use
-    /// [`RuntimeBuilder::build_driven`] when the isolate must remain pinned to
-    /// a particular thread.
-    pub async fn new() -> Result<Self> {
-        Self::builder().build().await
-    }
-
-    /// Create an automatically driven runtime and install one small host.
-    pub async fn new_with_host<F>(installer: F) -> Result<Self>
-    where
-        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + Send + 'static,
-    {
-        Self::build(RuntimeBuilder::new(), installer).await
-    }
-
-    pub(crate) async fn build<F>(builder: RuntimeBuilder, installer: F) -> Result<Self>
-    where
-        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + Send + 'static,
-    {
-        let (mut runtime, driver) = Self::build_driven(builder, installer).await?;
-        runtime.spawned_driver = Some(tokio::spawn(driver.run()));
-        Ok(runtime)
     }
 
     pub(crate) async fn build_driven<F>(
@@ -81,11 +53,10 @@ impl Runtime {
         installer: F,
     ) -> Result<(Self, RuntimeDriver)>
     where
-        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + Send + 'static,
+        F: for<'js> FnOnce(&rquickjs::Ctx<'js>) -> Result<()> + 'static,
     {
         let quickjs = AsyncRuntime::new()?;
         let context = AsyncContext::full(&quickjs).await?;
-        let role = builder.role;
         let macrotask_capacity = builder.macrotask_capacity;
         let plugins = builder.plugins;
 
@@ -93,10 +64,7 @@ impl Runtime {
             .with(move |context| {
                 // Host globals are opt-in plugins. Keep QuickJS's underlying
                 // JSON support, but expose its public global through JsonPlugin.
-                context.globals().remove("JSON")?;
-                context
-                    .store_userdata(role)
-                    .map_err(|_| rquickjs::Error::Unknown)
+                context.globals().remove("JSON")
             })
             .await?;
 
@@ -108,21 +76,15 @@ impl Runtime {
             context: Some(context),
             quickjs: Box::pin(quickjs.drive()),
             stopped,
+            _local: PhantomData,
         };
         let runtime = Self {
-            role,
             macrotasks,
             control,
-            spawned_driver: None,
             shutdown_requested: false,
         };
 
         Ok((runtime, driver))
-    }
-
-    /// The responsibility assigned to this isolate.
-    pub fn role(&self) -> RuntimeRole {
-        self.role
     }
 
     /// Clone a handle that can enqueue native macrotasks in this runtime.
@@ -174,7 +136,6 @@ impl Runtime {
                         return Ok(());
                     }
                 };
-
                 context.spawn(async move {
                     let _ = sender.send(promise.into_future::<T>().await);
                 });
@@ -186,7 +147,7 @@ impl Runtime {
         receiver.await.map_err(|_| rquickjs::Error::Unknown)?
     }
 
-    /// Stop accepting tasks and wait for an automatically spawned driver.
+    /// Stop accepting tasks and wait until the local driver observes shutdown.
     pub async fn shutdown(mut self) -> Result<()> {
         self.shutdown_requested = true;
         let stopped = self
@@ -194,10 +155,6 @@ impl Runtime {
             .request_shutdown()
             .map_err(|_| rquickjs::Error::Unknown)?;
         stopped.await.map_err(|_| rquickjs::Error::Unknown)?;
-
-        if let Some(driver) = self.spawned_driver.take() {
-            driver.await.map_err(|_| rquickjs::Error::Unknown)?;
-        }
         Ok(())
     }
 }
@@ -212,10 +169,7 @@ impl Drop for Runtime {
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Runtime")
-            .field("role", &self.role)
-            .finish_non_exhaustive()
+        formatter.debug_struct("Runtime").finish_non_exhaustive()
     }
 }
 
@@ -230,210 +184,144 @@ impl std::fmt::Debug for RuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::Runtime;
-    use crate::{MacrotaskQueue, MacrotaskQueueError, Plugin, RuntimeRole};
+    use crate::{MacrotaskQueue, MacrotaskQueueError};
     use rquickjs::{prelude::Func, Ctx};
     use std::sync::{
-        atomic::{AtomicBool, AtomicI32, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        Arc,
     };
-
-    struct RecordingCheckpoint {
-        current_value: Arc<AtomicI32>,
-        values: Arc<Mutex<Vec<i32>>>,
-    }
-
-    impl Plugin for RecordingCheckpoint {
-        fn install<'js>(&self, context: &Ctx<'js>) -> crate::Result<()> {
-            let current_value = self.current_value.clone();
-            context.globals().set(
-                "setCheckpointValue",
-                Func::from(move |value| current_value.store(value, Ordering::Release)),
-            )
-        }
-
-        fn checkpoint(&mut self) -> crate::Result<()> {
-            let value = self.current_value.load(Ordering::Acquire);
-            self.values.lock().unwrap().push(value);
-            Ok(())
-        }
-    }
+    use tokio::task::LocalSet;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evaluates_javascript() {
-        let runtime = Runtime::new().await.unwrap();
-        let value: i32 = runtime.eval("20 + 22").await.unwrap();
+    async fn evaluates_javascript_and_promises() {
+        LocalSet::new()
+            .run_until(async {
+                let (runtime, driver) = Runtime::builder().build_driven().await.unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
 
-        assert_eq!(value, 42);
-    }
+                assert_eq!(runtime.eval::<i32>("20 + 22").await.unwrap(), 42);
+                assert_eq!(
+                    runtime
+                        .eval_promise::<String>("Promise.resolve('Burokku')")
+                        .await
+                        .unwrap(),
+                    "Burokku"
+                );
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn resolves_a_promise() {
-        let runtime = Runtime::new().await.unwrap();
-        let value: String = runtime
-            .eval_promise("Promise.resolve('Burokku')")
-            .await
-            .unwrap();
-
-        assert_eq!(value, "Burokku");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn installs_custom_plugins() {
-        fn install_answer(context: &Ctx<'_>) -> crate::Result<()> {
-            context.globals().set("answer", Func::from(|| 42))?;
-
-            let queue = MacrotaskQueue::from_context(context)?;
-            queue
-                .try_enqueue(|context| {
-                    context.eval::<(), _>(
-                        "globalThis.__order = ['macrotask-1']; \
-                     Promise.resolve().then(() => __order.push('microtask'))",
-                    )
-                })
-                .map_err(|_| rquickjs::Error::Unknown)?;
-            queue
-                .try_enqueue(|context| context.eval::<(), _>("__order.push('macrotask-2')"))
-                .map_err(|_| rquickjs::Error::Unknown)
-        }
-
-        let runtime = Runtime::builder()
-            .plugin(install_answer)
-            .build()
-            .await
-            .unwrap();
-
-        let value: i32 = runtime.eval("answer()").await.unwrap();
-        assert_eq!(value, 42);
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let order: Vec<String> = runtime.eval("__order").await.unwrap();
-        assert_eq!(order, ["macrotask-1", "microtask", "macrotask-2"]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn runtime_keeps_its_event_loop_but_has_no_implicit_plugins() {
-        let runtime = Runtime::new().await.unwrap();
-
-        let globals: Vec<bool> = runtime
-            .eval(
-                "[typeof console !== 'undefined', \
-                 typeof setTimeout !== 'undefined', \
-                 typeof JSON !== 'undefined']",
-            )
-            .await
-            .unwrap();
-        assert_eq!(globals, [false, false, false]);
-        let value: i32 = runtime
-            .eval_promise("Promise.resolve().then(() => 42)")
-            .await
-            .unwrap();
-
-        assert_eq!(value, 42);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugins_can_read_the_runtime_role() {
-        fn install_role(context: &Ctx<'_>) -> crate::Result<()> {
-            let role = RuntimeRole::from_context(context).unwrap();
-            context.globals().set("isMain", role == RuntimeRole::Main)
-        }
-
-        let runtime = Runtime::builder()
-            .role(RuntimeRole::Main)
-            .plugin(install_role)
-            .build()
-            .await
-            .unwrap();
-
-        assert!(runtime.eval::<bool>("isMain").await.unwrap());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugin_checkpoint_runs_after_microtasks_and_failed_macrotasks() {
-        let current_value = Arc::new(AtomicI32::new(0));
-        let values = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::builder()
-            .plugin(RecordingCheckpoint {
-                current_value,
-                values: values.clone(),
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
             })
-            .build()
-            .await
-            .unwrap();
-
-        runtime
-            .eval::<()>(
-                "setCheckpointValue(1); \
-                 Promise.resolve().then(() => setCheckpointValue(2))",
-            )
-            .await
-            .unwrap();
-        assert_eq!(*values.lock().unwrap(), [2]);
-
-        assert!(runtime
-            .eval::<()>("setCheckpointValue(7); throw new Error('failed')")
-            .await
-            .is_err());
-        assert_eq!(*values.lock().unwrap(), [2, 7]);
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn explicitly_driven_runtime_executes_queued_work() {
-        let (runtime, driver) = Runtime::builder().build_driven().await.unwrap();
-        let driver = tokio::spawn(driver.run());
+    async fn installs_local_plugins_and_preserves_task_order() {
+        LocalSet::new()
+            .run_until(async {
+                fn install_answer(context: &Ctx<'_>) -> crate::Result<()> {
+                    context.globals().set("answer", Func::from(|| 42))?;
+                    let queue = MacrotaskQueue::from_context(context)?;
+                    queue
+                        .try_enqueue(|context| {
+                            context.eval::<(), _>(
+                                "globalThis.__order = ['macrotask-1']; \
+                                 Promise.resolve().then(() => __order.push('microtask'))",
+                            )
+                        })
+                        .map_err(|_| rquickjs::Error::Unknown)?;
+                    queue
+                        .try_enqueue(|context| context.eval::<(), _>("__order.push('macrotask-2')"))
+                        .map_err(|_| rquickjs::Error::Unknown)
+                }
 
-        assert_eq!(runtime.eval::<i32>("6 * 7").await.unwrap(), 42);
-        runtime.shutdown().await.unwrap();
-        driver.await.unwrap();
+                let (runtime, driver) = Runtime::builder()
+                    .plugin(install_answer)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+
+                assert_eq!(runtime.eval::<i32>("answer()").await.unwrap(), 42);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let order: Vec<String> = runtime.eval("__order").await.unwrap();
+                assert_eq!(order, ["macrotask-1", "microtask", "macrotask-2"]);
+
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bounded_queue_reports_backpressure_to_synchronous_producers() {
-        let (runtime, driver) = Runtime::builder()
-            .macrotask_capacity(1)
-            .build_driven()
-            .await
-            .unwrap();
-        let queue = runtime.macrotask_queue();
+    async fn runtime_has_no_implicit_host_plugins() {
+        LocalSet::new()
+            .run_until(async {
+                let (runtime, driver) = Runtime::builder().build_driven().await.unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                let globals: Vec<bool> = runtime
+                    .eval(
+                        "[typeof console !== 'undefined', \
+                         typeof setTimeout !== 'undefined', \
+                         typeof JSON !== 'undefined']",
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(globals, [false, false, false]);
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+    }
 
-        assert_eq!(queue.max_capacity(), 1);
-        assert_eq!(queue.depth(), 0);
-        queue.try_enqueue(|_| Ok(())).unwrap();
-        assert_eq!(queue.capacity(), 0);
-        assert_eq!(queue.depth(), 1);
-        assert_eq!(
-            queue.try_enqueue(|_| Ok(())),
-            Err(MacrotaskQueueError::Full)
-        );
+    #[tokio::test(flavor = "current_thread")]
+    async fn bounded_queue_reports_backpressure() {
+        LocalSet::new()
+            .run_until(async {
+                let (runtime, driver) = Runtime::builder()
+                    .macrotask_capacity(1)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let queue = runtime.macrotask_queue();
+                assert_eq!(queue.max_capacity(), 1);
+                queue.try_enqueue(|_| Ok(())).unwrap();
+                assert_eq!(
+                    queue.try_enqueue(|_| Ok(())),
+                    Err(MacrotaskQueueError::Full)
+                );
 
-        let driver = tokio::spawn(driver.run());
-        runtime.shutdown().await.unwrap();
-        driver.await.unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_bypasses_queued_macrotasks() {
-        let (runtime, driver) = Runtime::builder()
-            .macrotask_capacity(1)
-            .build_driven()
-            .await
-            .unwrap();
-        let executed = Arc::new(AtomicBool::new(false));
-
-        runtime
-            .macrotask_queue()
-            .try_enqueue({
-                let executed = executed.clone();
-                move |_| {
-                    executed.store(true, Ordering::Release);
-                    Ok(())
-                }
+        LocalSet::new()
+            .run_until(async {
+                let (runtime, driver) = Runtime::builder()
+                    .macrotask_capacity(1)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let executed = Arc::new(AtomicBool::new(false));
+                runtime
+                    .macrotask_queue()
+                    .try_enqueue({
+                        let executed = Arc::clone(&executed);
+                        move |_| {
+                            executed.store(true, Ordering::Release);
+                            Ok(())
+                        }
+                    })
+                    .unwrap();
+                let acknowledged = runtime.control.request_shutdown().unwrap();
+                let ((), acknowledged) = tokio::join!(driver.run(), acknowledged);
+                acknowledged.unwrap();
+                assert!(!executed.load(Ordering::Acquire));
             })
-            .unwrap();
-        let acknowledged = runtime.control.request_shutdown().unwrap();
-
-        let ((), acknowledged) = tokio::join!(driver.run(), acknowledged);
-        acknowledged.unwrap();
-        assert!(!executed.load(Ordering::Acquire));
+            .await;
     }
 }

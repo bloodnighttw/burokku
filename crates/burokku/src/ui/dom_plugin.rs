@@ -5,10 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use runtime::{
-    rquickjs::{Ctx, Exception},
-    Plugin, RuntimeRole,
-};
+use runtime::{rquickjs::Ctx, Plugin};
 
 use super::elements::{
     CommitNotifier, Dom, DomPublisher, NodeId, PublishedDomReader, ReclaimReport,
@@ -50,6 +47,13 @@ impl DomPlugin {
     }
 
     #[cfg(test)]
+    fn publish_for_test(&mut self) -> runtime::Result<()> {
+        let mut state = self.state.lock().map_err(|_| runtime::Error::Unknown)?;
+        state.reclaim_detached()?;
+        self.publisher.checkpoint(&state.staging);
+        Ok(())
+    }
+    #[cfg(test)]
     fn state(&self) -> std::sync::MutexGuard<'_, DomPluginState> {
         self.state.lock().expect("DOM plugin state is not poisoned")
     }
@@ -61,20 +65,7 @@ impl Plugin for DomPlugin {
     }
 
     fn install<'js>(&self, context: &Ctx<'js>) -> runtime::Result<()> {
-        if RuntimeRole::from_context(context) == Some(RuntimeRole::Main) {
-            return Err(Exception::throw_type(
-                context,
-                "the DOM facade can only be installed in the background runtime",
-            ));
-        }
         bindings::install(context, self.state.clone())
-    }
-
-    fn checkpoint(&mut self) -> runtime::Result<()> {
-        let mut state = self.state.lock().map_err(|_| runtime::Error::Unknown)?;
-        state.reclaim_detached()?;
-        self.publisher.checkpoint(&state.staging);
-        Ok(())
     }
 }
 
@@ -189,7 +180,7 @@ mod tests {
         });
 
         assert_eq!(reader.load().revision(), 0);
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         let published = reader.load();
         let snapshot = published.snapshot();
         let window = snapshot.children(snapshot.root()).unwrap()[0];
@@ -209,7 +200,7 @@ mod tests {
         assert_eq!(snapshot.attribute(div, "role"), Some("status"));
         assert_eq!(notifications.load(Ordering::Acquire), 1);
 
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(notifications.load(Ordering::Acquire), 1);
     }
 
@@ -318,7 +309,7 @@ mod tests {
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 1);
 
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(plugin.state().staging.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 1);
         assert_eq!(reader.load().snapshot().iter().count(), 1);
@@ -353,7 +344,7 @@ mod tests {
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 2);
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(plugin.state().staging.node_count(), 4);
         assert!(plugin.state().last_reclaim.nodes.is_empty());
 
@@ -375,7 +366,7 @@ mod tests {
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 1);
 
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(plugin.state().staging.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 3);
     }
@@ -404,7 +395,7 @@ mod tests {
                 .unwrap());
         });
 
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         let snapshot = reader.load();
         let window = snapshot
             .snapshot()
@@ -445,7 +436,7 @@ mod tests {
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrappers.len(), 1);
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(plugin.state().staging.node_count(), 1);
         context.with(|context| {
             assert!(context
@@ -513,7 +504,7 @@ mod tests {
         assert_eq!(plugin.state().staging.node_count(), 101);
 
         collect_garbage(&runtime, &context);
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(plugin.state().live_wrappers.len(), 1);
         assert_eq!(plugin.state().staging.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 100);
@@ -583,7 +574,7 @@ mod tests {
                 .catch(&context)
                 .unwrap());
         });
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         let mounted = reader.load();
         let window = mounted
             .snapshot()
@@ -597,7 +588,7 @@ mod tests {
                 .eval::<bool, _>(format!("{prefix}UpdateFixture()"))
                 .unwrap());
         });
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         let updated = reader.load();
         let window = updated
             .snapshot()
@@ -615,7 +606,7 @@ mod tests {
                 .eval::<bool, _>(format!("{prefix}UnmountFixture()"))
                 .unwrap());
         });
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         let unmounted = reader.load();
         assert!(unmounted
             .snapshot()
@@ -629,7 +620,7 @@ mod tests {
                 .unwrap();
         });
         collect_garbage(&runtime, &context);
-        plugin.checkpoint().unwrap();
+        plugin.publish_for_test().unwrap();
         assert_eq!(plugin.state().staging.node_count(), 1);
         assert_eq!(notifications.load(Ordering::Acquire), 4);
     }
