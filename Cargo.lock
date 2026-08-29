@@ -216,7 +216,6 @@ name = "burokku-example-layouts"
 version = "0.1.0"
 dependencies = [
  "burokku",
- "tokio",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 name = "runtime"
 version = "0.1.0"
 edition = "2021"
-description = "An asynchronous JavaScript runtime built on rquickjs and Tokio"
+description = "A thread-affine asynchronous JavaScript runtime built on rquickjs and Tokio"
 license = "MIT"
 
 [dependencies]

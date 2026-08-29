@@ -169,7 +169,7 @@ impl SourceEntry {
     }
 }
 
-/// Reusable MTS text engine with persistent shaping and bounded width caches.
+/// Reusable UI-thread text engine with persistent shaping and bounded width caches.
 pub(crate) struct TextEngine {
     font_context: FontContext,
     layout_context: LayoutContext<TextBrush>,

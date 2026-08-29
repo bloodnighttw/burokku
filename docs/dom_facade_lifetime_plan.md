@@ -1,5 +1,7 @@
 # JavaScript DOM facade and detached-node lifetime implementation plan
 
+> Historical implementation plan. Its cross-thread publication details are superseded by [`dom_layout_colocation_plan.md`](dom_layout_colocation_plan.md).
+
 This plan addresses **Problem 4: The JavaScript node facade is missing** and
 **Problem 5: Detached-node reclamation is undefined** from
 `docs/dom_foundation_review.md` as one implementation workstream.

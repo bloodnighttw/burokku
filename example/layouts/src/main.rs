@@ -1,5 +1,4 @@
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), burokku::BurokkuError> {
+fn main() -> Result<(), burokku::BurokkuError> {
     let mut script = include_str!("./app.js").to_owned();
     if std::env::var_os("BUROKKU_SMOKE").is_some() {
         script.push_str(
@@ -16,5 +15,4 @@ async fn main() -> Result<(), burokku::BurokkuError> {
             "../../../crates/burokku/testdata/fonts/NotoSans-Regular.ttf"
         ))
         .run()
-        .await
 }

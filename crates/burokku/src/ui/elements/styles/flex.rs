@@ -10,7 +10,7 @@ use super::length::{parse_non_negative_length_percentage, LengthPercentage};
 /// Thread-safe properties used to lay out a flex container and its flex items.
 ///
 /// This is authoritative DOM data and contains no Taffy compact pointer values.
-/// MTS converts it to [`taffy::Style`] immediately before updating layout state.
+/// The UI thread converts it to [`taffy::Style`] before updating layout state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlexStyle {
     pub common: CommonStyle,

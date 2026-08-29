@@ -1,5 +1,7 @@
 # Problem 6 implementation plan: text collection, layout, and painting
 
+> Historical implementation plan. Its publication terminology is superseded by [`dom_layout_colocation_plan.md`](dom_layout_colocation_plan.md).
+
 ## Purpose
 
 This is an execution plan for problem 6 in
