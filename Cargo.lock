@@ -199,6 +199,8 @@ version = "0.1.0"
 dependencies = [
  "burokku-winit",
  "glifo",
+ "llrt_modules",
+ "llrt_utils",
  "parley",
  "runtime",
  "skrifa",

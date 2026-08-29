@@ -2,16 +2,20 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use llrt_utils::primordials::{BasePrimordials, Primordial};
 use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
-    runtime::{
-        plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
-        Plugin, RuntimeBuilder,
-    },
+    runtime::{Plugin, RuntimeBuilder},
     ui::{dom_plugin::DomPlugin, host::ApplicationHost, text::TextEngine},
 };
+
+fn install_llrt_globals(context: &runtime::rquickjs::Ctx<'_>) -> runtime::Result<()> {
+    BasePrimordials::init(context)?;
+    let (_, _, globals) = llrt_modules::module_builder::ModuleBuilder::default().build();
+    globals.attach(context)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeStatus {
@@ -184,10 +188,7 @@ pub struct BurokkuBuilder {
 
 impl BurokkuBuilder {
     pub fn new() -> Self {
-        let runtime = RuntimeBuilder::new()
-            .plugin(ConsolePlugin)
-            .plugin(JsonPlugin)
-            .plugin(TimersPlugin);
+        let runtime = RuntimeBuilder::new().plugin(install_llrt_globals);
         Self {
             runtime,
             script: Vec::new(),
@@ -265,7 +266,7 @@ pub enum BurokkuError {
 mod tests {
     use super::*;
     use crate::{
-        runtime::{plugins::TimersPlugin, Runtime},
+        runtime::Runtime,
         ui::{
             layout::{LayoutEngine, LogicalViewport},
             scene::{PaintItem, ScenePlan},
@@ -291,7 +292,7 @@ mod tests {
                 let (plugin, dom) = DomPlugin::new();
                 let initial_revision = dom.borrow().dom.revision();
                 let (runtime, driver) = Runtime::builder()
-                    .plugin(JsonPlugin)
+                    .plugin(install_llrt_globals)
                     .plugin(plugin)
                     .build_driven()
                     .await
@@ -350,7 +351,7 @@ mod tests {
             .run_until(async {
                 let (plugin, dom) = DomPlugin::new();
                 let (runtime, driver) = Runtime::builder()
-                    .plugin(TimersPlugin)
+                    .plugin(install_llrt_globals)
                     .plugin(plugin)
                     .build_driven()
                     .await

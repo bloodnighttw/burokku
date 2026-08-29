@@ -3,7 +3,7 @@
 //! Burokku's native UI host and high-level application API.
 //!
 //! [`Burokku::builder`] composes the native event loop with one configurable,
-//! thread-affine [`RuntimeBuilder`]. Plugins are installed with
+//! thread-affine LLRT runtime. Additional host plugins are installed with
 //! [`BurokkuBuilder::runtime_plugin`].
 
 mod app;
