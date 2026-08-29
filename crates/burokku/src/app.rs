@@ -1,20 +1,18 @@
 //! Public application builder and end-to-end host assembly.
 
-use std::{future::Future, pin::Pin};
-
 use thiserror::Error;
 
 use crate::{
     runtime::{
         plugins::{ConsolePlugin, JsonPlugin, TimersPlugin},
-        DualRuntime, DualRuntimeBuilder, Plugin,
+        Plugin, Runtime, RuntimeBuilder,
     },
     ui::{dom_plugin::DomPlugin, host::ApplicationHost, text::TextEngine},
 };
 
 /// A configured Burokku application.
 pub struct Burokku {
-    runtime: DualRuntimeBuilder,
+    runtime: RuntimeBuilder,
     script: Vec<u8>,
     fonts: Vec<Vec<u8>>,
 }
@@ -42,19 +40,18 @@ impl Burokku {
         let mut event_loop = winit::EventLoop::new()?;
         let proxy = event_loop.create_proxy();
         let (dom_plugin, publications) = DomPlugin::new(move |_| proxy.wake_up());
-        let (runtime, driver) = self.runtime.background_plugin(dom_plugin).build().await?;
-        let driver_future = driver.run();
-        tokio::pin!(driver_future);
+        let (runtime, driver) = self.runtime.plugin(dom_plugin).build_driven().await?;
+        let mut driver = tokio::task::spawn_local(driver.run());
 
-        if let Err(error) = runtime.background().eval::<()>(self.script).await {
-            let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
+        if let Err(error) = runtime.eval::<()>(self.script).await {
+            let _ = shutdown_with_driver(runtime, &mut driver).await;
             return Err(BurokkuError::JavaScript(error));
         }
 
         let mut text = TextEngine::new();
         for font in self.fonts {
             if let Err(error) = text.register_font_data(font) {
-                let _ = shutdown_with_driver(runtime, driver_future.as_mut()).await;
+                let _ = shutdown_with_driver(runtime, &mut driver).await;
                 return Err(BurokkuError::Host(error.to_string()));
             }
         }
@@ -62,32 +59,16 @@ impl Burokku {
         let host = ApplicationHost::new(publications, text);
         let event_future = event_loop.run_app(host);
         tokio::pin!(event_future);
-        let mut driver_finished = false;
         let event_result = tokio::select! {
-            result = &mut event_future => Some(result),
-            () = &mut driver_future => {
-                driver_finished = true;
-                None
-            }
-        };
-
-        let shutdown_result = if driver_finished {
-            runtime.shutdown().await
-        } else {
-            shutdown_with_driver(runtime, driver_future.as_mut()).await
-        };
-
-        let host = match event_result {
-            Some(Ok(host)) => host,
-            Some(Err(error)) => {
-                let _ = shutdown_result;
-                return Err(BurokkuError::Window(error));
-            }
-            None => {
-                shutdown_result?;
+            result = &mut event_future => result,
+            result = &mut driver => {
+                result.map_err(|_| BurokkuError::MainRuntimeStopped)?;
                 return Err(BurokkuError::MainRuntimeStopped);
             }
         };
+
+        let shutdown_result = shutdown_with_driver(runtime, &mut driver).await;
+        let host = event_result?;
         if let Some(error) = host.fatal_error() {
             let message = error.to_string();
             let _ = shutdown_result;
@@ -100,20 +81,17 @@ impl Burokku {
 
 /// Builder for JavaScript source, plugins, and embedded fonts.
 pub struct BurokkuBuilder {
-    runtime: DualRuntimeBuilder,
+    runtime: RuntimeBuilder,
     script: Vec<u8>,
     fonts: Vec<Vec<u8>>,
 }
 
 impl BurokkuBuilder {
     pub fn new() -> Self {
-        let runtime = DualRuntimeBuilder::new()
-            .main_plugin(ConsolePlugin)
-            .main_plugin(JsonPlugin)
-            .main_plugin(TimersPlugin)
-            .background_plugin(ConsolePlugin)
-            .background_plugin(JsonPlugin)
-            .background_plugin(TimersPlugin);
+        let runtime = RuntimeBuilder::new()
+            .plugin(ConsolePlugin)
+            .plugin(JsonPlugin)
+            .plugin(TimersPlugin);
         Self {
             runtime,
             script: Vec::new(),
@@ -127,15 +105,15 @@ impl BurokkuBuilder {
         self
     }
 
-    /// Install an application plugin in the background JavaScript isolate.
+    /// Install an application plugin in the JavaScript runtime.
     pub fn runtime_plugin<P: Plugin>(mut self, plugin: P) -> Self {
-        self.runtime = self.runtime.background_plugin(plugin);
+        self.runtime = self.runtime.plugin(plugin);
         self
     }
 
-    /// Install a latency-sensitive plugin in the main JavaScript isolate.
+    /// Install a plugin in the JavaScript runtime.
     pub fn main_runtime_plugin<P: Plugin>(mut self, plugin: P) -> Self {
-        self.runtime = self.runtime.main_plugin(plugin);
+        self.runtime = self.runtime.plugin(plugin);
         self
     }
 
@@ -175,14 +153,12 @@ impl std::fmt::Debug for BurokkuBuilder {
     }
 }
 
-async fn shutdown_with_driver<F>(
-    runtime: DualRuntime,
-    mut driver: Pin<&mut F>,
-) -> runtime::Result<()>
-where
-    F: Future<Output = ()>,
-{
-    let (result, ()) = tokio::join!(runtime.shutdown(), driver.as_mut());
+async fn shutdown_with_driver(
+    runtime: Runtime,
+    driver: &mut tokio::task::JoinHandle<()>,
+) -> runtime::Result<()> {
+    let result = runtime.shutdown().await;
+    let _ = driver.await;
     result
 }
 
@@ -209,7 +185,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::{plugins::TimersPlugin, Runtime, RuntimeRole},
+        runtime::{plugins::TimersPlugin, Runtime},
         ui::{
             elements::{PublishedDom, PublishedDomReader},
             layout::{LayoutEngine, LogicalViewport},
@@ -254,7 +230,6 @@ mod tests {
         let (dom, publications) = DomPlugin::new(move |_| notifier.notify_one());
         let initial_revision = publications.load().revision();
         let runtime = Runtime::builder()
-            .role(RuntimeRole::Background)
             .plugin(JsonPlugin)
             .plugin(dom)
             .build()
@@ -314,7 +289,6 @@ mod tests {
         let (dom, publications) = DomPlugin::new(move |_| notifier.notify_one());
         let initial_revision = publications.load().revision();
         let runtime = Runtime::builder()
-            .role(RuntimeRole::Background)
             .plugin(TimersPlugin)
             .plugin(dom)
             .build()
