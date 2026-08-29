@@ -8,7 +8,10 @@ use winit::{
     application::ApplicationHandler, ActiveEventLoop, PhysicalSize, WindowEvent, WindowId,
 };
 
+use crate::app::{RuntimeLifecycle, RuntimeStatus};
+
 use super::{
+    dom_plugin::DomPublication,
     elements::{NodeId, PublishedDom, PublishedDomReader},
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
@@ -175,6 +178,7 @@ struct PendingGraphicsInitialization {
 
 #[derive(Debug)]
 pub(crate) struct ApplicationHost {
+    dom_publication: DomPublication,
     publications: PublishedDomReader,
     latest_publication: Option<Arc<PublishedDom>>,
     graphics: Option<GraphicsContext>,
@@ -187,11 +191,19 @@ pub(crate) struct ApplicationHost {
     cursor_target: Option<NodeId>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
+    lifecycle: RuntimeLifecycle,
+    exit_requested: bool,
 }
 
 impl ApplicationHost {
-    pub(crate) fn new(publications: PublishedDomReader, text: TextEngine) -> Self {
+    pub(crate) fn new(
+        dom_publication: DomPublication,
+        publications: PublishedDomReader,
+        text: TextEngine,
+        lifecycle: RuntimeLifecycle,
+    ) -> Self {
         Self {
+            dom_publication,
             publications,
             // Force `resumed` to reconcile the newest publication, whether it
             // contains a Window already or represents a valid windowless app.
@@ -208,6 +220,8 @@ impl ApplicationHost {
             cursor_target: None,
             ever_had_window: false,
             fatal_error: None,
+            lifecycle,
+            exit_requested: false,
         }
     }
 
@@ -364,15 +378,19 @@ impl ApplicationHost {
             RedrawFailure::Fatal(error) => self.fail(event_loop, error),
         }
     }
+    fn request_exit(&mut self) {
+        self.exit_requested = true;
+        self.lifecycle.request_shutdown();
+    }
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: HostError) {
+    fn fail(&mut self, _event_loop: &ActiveEventLoop, error: HostError) {
         if self.fatal_error.is_none() {
             self.fatal_error = Some(error);
         }
         self.cancel_graphics_initialization();
         self.renderer = None;
         self.windows.close();
-        event_loop.exit();
+        self.request_exit();
     }
 
     fn sync_publication(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
@@ -483,7 +501,7 @@ impl ApplicationHost {
                 self.presented = None;
                 self.cursor_target = None;
                 if self.ever_had_window {
-                    event_loop.exit();
+                    self.request_exit();
                 }
             }
             WindowChange::Updated | WindowChange::Unchanged => {}
@@ -656,7 +674,7 @@ impl ApplicationHandler for ApplicationHost {
                 self.presented = None;
                 self.cursor_target = None;
                 self.windows.close();
-                event_loop.exit();
+                self.request_exit();
             }
             WindowEvent::Resized(size)
             | WindowEvent::ScaleFactorChanged {
@@ -765,12 +783,29 @@ impl ApplicationHandler for ApplicationHost {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.fatal_error.is_some() {
+        let runtime_status = self.lifecycle.status();
+        if matches!(runtime_status, RuntimeStatus::Failed(_)) {
             event_loop.exit();
             return;
         }
+
+        if self.fatal_error.is_some() {
+            self.request_exit();
+        }
+        if self.exit_requested {
+            if runtime_status == RuntimeStatus::Stopped {
+                event_loop.exit();
+            } else {
+                self.lifecycle.request_shutdown();
+            }
+            return;
+        }
+
         if let Err(error) = self
-            .sync_publication(event_loop)
+            .dom_publication
+            .publish()
+            .map_err(|error| HostError::DomPublication(error.to_string()))
+            .and_then(|()| self.sync_publication(event_loop))
             .and_then(|()| self.complete_graphics_initialization())
             .and_then(|()| self.sync_publication(event_loop))
         {
@@ -779,6 +814,7 @@ impl ApplicationHandler for ApplicationHost {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.lifecycle.request_shutdown();
         self.cancel_graphics_initialization();
         self.renderer = None;
         self.windows.close();
@@ -871,6 +907,9 @@ pub(crate) enum HostError {
     #[error("no committed DOM publication is available")]
     MissingPublication,
 
+    #[error("DOM publication failed: {0}")]
+    DomPublication(String),
+
     #[error("the committed Window has no native window")]
     MissingNativeWindow,
 
@@ -942,9 +981,14 @@ mod tests {
 
     #[test]
     fn windowless_host_does_not_initialize_graphics() {
-        let dom = Dom::new();
-        let (_publisher, publications) = DomPublisher::new(&dom, |_| {});
-        let host = ApplicationHost::new(publications, TextEngine::without_system_fonts());
+        let (_dom, dom_publication, publications) = crate::ui::dom_plugin::DomPlugin::new(|_| {});
+        let lifecycle = RuntimeLifecycle::for_test();
+        let host = ApplicationHost::new(
+            dom_publication,
+            publications,
+            TextEngine::without_system_fonts(),
+            lifecycle,
+        );
 
         assert!(host.graphics.is_none());
         assert!(host.pending_graphics.is_none());

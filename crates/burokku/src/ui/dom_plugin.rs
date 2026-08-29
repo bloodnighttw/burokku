@@ -1,7 +1,9 @@
 //! BTS ownership and QuickJS publication for the native DOM facade.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
@@ -29,12 +31,34 @@ pub(super) struct DomPluginState {
 /// The single BTS owner of staging DOM state and immutable publication.
 pub(crate) struct DomPlugin {
     state: SharedDomState,
-    publisher: DomPublisher,
+    publisher: Rc<RefCell<DomPublisher>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DomPublication {
+    state: SharedDomState,
+    publisher: Rc<RefCell<DomPublisher>>,
+}
+
+impl DomPublication {
+    pub(crate) fn publish(&self) -> runtime::Result<()> {
+        let mut state = self.state.lock().map_err(|_| runtime::Error::Unknown)?;
+        state.reclaim_detached()?;
+        self.publisher.borrow_mut().checkpoint(&state.staging);
+        Ok(())
+    }
+}
+impl std::fmt::Debug for DomPublication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DomPublication")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DomPlugin {
     /// Create a BTS DOM plugin and the corresponding MTS publication reader.
-    pub(crate) fn new(notifier: impl CommitNotifier) -> (Self, PublishedDomReader) {
+    pub(crate) fn new(notifier: impl CommitNotifier) -> (Self, DomPublication, PublishedDomReader) {
         let staging = Dom::new();
         let (publisher, reader) = DomPublisher::new(&staging, notifier);
         let state = Arc::new(Mutex::new(DomPluginState {
@@ -42,16 +66,22 @@ impl DomPlugin {
             live_wrappers: HashMap::new(),
             last_reclaim: ReclaimReport::default(),
         }));
+        let publisher = Rc::new(RefCell::new(publisher));
+        let publication = DomPublication {
+            state: Arc::clone(&state),
+            publisher: Rc::clone(&publisher),
+        };
 
-        (Self { state, publisher }, reader)
+        (Self { state, publisher }, publication, reader)
     }
 
     #[cfg(test)]
     fn publish_for_test(&mut self) -> runtime::Result<()> {
-        let mut state = self.state.lock().map_err(|_| runtime::Error::Unknown)?;
-        state.reclaim_detached()?;
-        self.publisher.checkpoint(&state.staging);
-        Ok(())
+        DomPublication {
+            state: Arc::clone(&self.state),
+            publisher: Rc::clone(&self.publisher),
+        }
+        .publish()
     }
     #[cfg(test)]
     fn state(&self) -> std::sync::MutexGuard<'_, DomPluginState> {
@@ -109,7 +139,7 @@ mod tests {
 
     #[test]
     fn installs_permanent_app_and_host_only_node_classes() {
-        let (plugin, _) = DomPlugin::new(|_| {});
+        let (plugin, _, _) = DomPlugin::new(|_| {});
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -136,7 +166,7 @@ mod tests {
     #[test]
     fn facade_mutates_staging_synchronously_and_publishes_at_checkpoint() {
         let notifications = Arc::new(AtomicUsize::new(0));
-        let (mut plugin, reader) = DomPlugin::new({
+        let (mut plugin, _, reader) = DomPlugin::new({
             let notifications = notifications.clone();
             move |_| {
                 notifications.fetch_add(1, Ordering::AcqRel);
@@ -206,7 +236,7 @@ mod tests {
 
     #[test]
     fn facade_enforces_text_only_raw_children_without_partial_mutation() {
-        let (plugin, _) = DomPlugin::new(|_| {});
+        let (plugin, _, _) = DomPlugin::new(|_| {});
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -289,7 +319,7 @@ mod tests {
 
     #[test]
     fn unreachable_detached_wrappers_release_and_reclaim_at_checkpoint() {
-        let (mut plugin, reader) = DomPlugin::new(|_| {});
+        let (mut plugin, _, reader) = DomPlugin::new(|_| {});
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -322,7 +352,7 @@ mod tests {
 
     #[test]
     fn a_live_descendant_wrapper_retains_its_complete_detached_component() {
-        let (mut plugin, _) = DomPlugin::new(|_| {});
+        let (mut plugin, _, _) = DomPlugin::new(|_| {});
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -373,7 +403,7 @@ mod tests {
 
     #[test]
     fn text_content_replacement_keeps_a_wrapped_old_child_valid_and_detached() {
-        let (mut plugin, reader) = DomPlugin::new(|_| {});
+        let (mut plugin, _, reader) = DomPlugin::new(|_| {});
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -416,7 +446,7 @@ mod tests {
 
     #[test]
     fn wrapper_listener_cycles_do_not_retain_detached_native_nodes() {
-        let (mut plugin, _) = DomPlugin::new(|_| {});
+        let (mut plugin, _, _) = DomPlugin::new(|_| {});
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -447,7 +477,7 @@ mod tests {
 
     #[test]
     fn a_collected_attached_wrapper_is_recreated_canonically() {
-        let (plugin, _) = DomPlugin::new(|_| {});
+        let (plugin, _, _) = DomPlugin::new(|_| {});
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -486,7 +516,7 @@ mod tests {
 
     #[test]
     fn repeated_detached_wrapper_cycles_return_the_arena_to_baseline() {
-        let (mut plugin, _) = DomPlugin::new(|_| {});
+        let (mut plugin, _, _) = DomPlugin::new(|_| {});
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -510,55 +540,9 @@ mod tests {
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 100);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn runtime_checkpoint_publishes_ready_microtasks_and_successes_before_errors() {
-        let notifications = Arc::new(AtomicUsize::new(0));
-        let (plugin, reader) = DomPlugin::new({
-            let notifications = notifications.clone();
-            move |_| {
-                notifications.fetch_add(1, Ordering::AcqRel);
-            }
-        });
-        let runtime = runtime::Runtime::builder()
-            .plugin(plugin)
-            .build()
-            .await
-            .unwrap();
-
-        runtime
-            .eval::<()>(
-                "globalThis.windowNode = app.createElement('window');\
-                 globalThis.paragraphNode = app.createElement('text');\
-                 globalThis.textNode = app.createTextNode('before');\
-                 paragraphNode.appendChild(textNode);\
-                 windowNode.appendChild(paragraphNode);\
-                 app.appendChild(windowNode);\
-                 Promise.resolve().then(() => { textNode.data = 'microtask' })",
-            )
-            .await
-            .unwrap();
-        let first = reader.load();
-        let window = first.snapshot().children(first.snapshot().root()).unwrap()[0];
-        let paragraph = first.snapshot().children(window).unwrap()[0];
-        let text = first.snapshot().children(paragraph).unwrap()[0];
-        assert_eq!(first.snapshot().text(text), Some("microtask"));
-        let first_revision = first.revision();
-
-        assert!(runtime
-            .eval::<()>("textNode.data = 'before-error'; throw new Error('expected')")
-            .await
-            .is_err());
-        let second = reader.load();
-        assert!(second.revision() > first_revision);
-        assert_eq!(second.snapshot().text(text), Some("before-error"));
-        assert_eq!(notifications.load(Ordering::Acquire), 2);
-
-        runtime.shutdown().await.unwrap();
-    }
-
     fn run_framework_fixture(prefix: &str, bundle: &str) {
         let notifications = Arc::new(AtomicUsize::new(0));
-        let (mut plugin, reader) = DomPlugin::new({
+        let (mut plugin, _, reader) = DomPlugin::new({
             let notifications = notifications.clone();
             move |_| {
                 notifications.fetch_add(1, Ordering::AcqRel);
@@ -627,7 +611,7 @@ mod tests {
 
     #[test]
     fn facade_reports_named_errors_without_partial_mutation() {
-        let (plugin, _) = DomPlugin::new(|_| {});
+        let (plugin, _, _) = DomPlugin::new(|_| {});
         let (_runtime, context) = context();
 
         context.with(|context| {
