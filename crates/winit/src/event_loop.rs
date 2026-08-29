@@ -111,6 +111,29 @@ fn dispatch_or_defer<A>(
     };
     dispatch(&mut application, window_id, event);
 }
+fn with_external_context<T>(
+    runtime: &RefCell<Option<Runtime>>,
+    local_set: &RefCell<Option<LocalSet>>,
+    callback: impl FnOnce() -> T,
+) -> T {
+    let runtime = runtime.borrow();
+    let _runtime_guard = runtime
+        .as_ref()
+        .expect("external runtime remains available during application callbacks")
+        .enter();
+    if let Ok(local_set) = local_set.try_borrow() {
+        let _local_guard = local_set
+            .as_ref()
+            .expect("external LocalSet remains available during application callbacks")
+            .enter();
+        callback()
+    } else {
+        // A native event may be emitted reentrantly while a Tokio tick is
+        // polling the LocalSet. That tick has already entered this exact local
+        // context, so borrowing the LocalSet again is unnecessary.
+        callback()
+    }
+}
 
 /// Clears an installed native event handler on every exit path, including
 /// application or runtime panics during [`EventLoop::run_app_external`].
@@ -307,20 +330,26 @@ impl EventLoop {
 
         let application = Rc::new(RefCell::new(application));
         let events = WindowEventQueue::default();
+        let runtime = Rc::new(RefCell::new(Some(runtime)));
+        let local_set = Rc::new(RefCell::new(Some(local_set)));
         self.platform.borrow().set_handler({
             let active = self.active.clone();
             let application = Rc::clone(&application);
             let deferred = events.clone();
+            let runtime = Rc::clone(&runtime);
+            let local_set = Rc::clone(&local_set);
             move |window_id, event| {
-                dispatch_or_defer(
-                    &application,
-                    &deferred,
-                    window_id,
-                    event,
-                    |application, window_id, event| {
-                        application.window_event(&active, window_id, event);
-                    },
-                );
+                with_external_context(&runtime, &local_set, || {
+                    dispatch_or_defer(
+                        &application,
+                        &deferred,
+                        window_id,
+                        event,
+                        |application, window_id, event| {
+                            application.window_event(&active, window_id, event);
+                        },
+                    );
+                });
             }
         });
         let mut handler_guard = EventHandlerGuard::new({
@@ -328,15 +357,14 @@ impl EventLoop {
             move || platform.borrow().clear_handler()
         });
 
-        application.borrow_mut().resumed(&self.active);
-        events.drain(|window_id, event| {
-            application
-                .borrow_mut()
-                .window_event(&self.active, window_id, event);
+        with_external_context(&runtime, &local_set, || {
+            application.borrow_mut().resumed(&self.active);
+            events.drain(|window_id, event| {
+                application
+                    .borrow_mut()
+                    .window_event(&self.active, window_id, event);
+            });
         });
-
-        let runtime = RefCell::new(Some(runtime));
-        let local_set = RefCell::new(Some(local_set));
         let run_result = self.platform.borrow().run_external(
             || {
                 if self.active.exiting() {
@@ -359,16 +387,18 @@ impl EventLoop {
                         )
                 };
 
-                events.drain(|window_id, event| {
-                    application
-                        .borrow_mut()
-                        .window_event(&self.active, window_id, event);
-                });
-                application.borrow_mut().about_to_wait(&self.active);
-                events.drain(|window_id, event| {
-                    application
-                        .borrow_mut()
-                        .window_event(&self.active, window_id, event);
+                with_external_context(&runtime, &local_set, || {
+                    events.drain(|window_id, event| {
+                        application
+                            .borrow_mut()
+                            .window_event(&self.active, window_id, event);
+                    });
+                    application.borrow_mut().about_to_wait(&self.active);
+                    events.drain(|window_id, event| {
+                        application
+                            .borrow_mut()
+                            .window_event(&self.active, window_id, event);
+                    });
                 });
 
                 let control_flow = self.active.control_flow();
@@ -383,6 +413,9 @@ impl EventLoop {
                 }
             },
             || {
+                with_external_context(&runtime, &local_set, || {
+                    application.borrow_mut().exiting(&self.active);
+                });
                 // Cancel local/LLRT work first, then stop and join Tokio's
                 // reactor while the native wake source is still retained.
                 drop(local_set.borrow_mut().take());
@@ -390,7 +423,6 @@ impl EventLoop {
             },
         );
 
-        application.borrow_mut().exiting(&self.active);
         handler_guard.clear();
         run_result?;
 
@@ -404,6 +436,23 @@ impl EventLoop {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    #[test]
+    fn external_context_allows_callback_spawn_local() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let local_set = LocalSet::new();
+        let runtime = RefCell::new(Some(runtime));
+        let local_set = RefCell::new(Some(local_set));
+
+        let task = with_external_context(&runtime, &local_set, || {
+            tokio::task::spawn_local(async { 42 })
+        });
+        let runtime = runtime.borrow_mut().take().unwrap();
+        let local_set = local_set.borrow_mut().take().unwrap();
+        let value = runtime.block_on(local_set.run_until(task)).unwrap();
+
+        assert_eq!(value, 42);
+    }
 
     use super::*;
 
