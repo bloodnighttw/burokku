@@ -1,9 +1,9 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use taffy::{geometry::Size, AvailableSpace};
 
 use crate::ui::{
-    elements::PublishedDom,
+    elements::Dom,
     text::{TextConstraint, TextEngine},
 };
 
@@ -15,7 +15,7 @@ use super::{
     LogicalViewport,
 };
 
-/// MTS owner of the last complete computed layout and the text measurement
+/// UI-thread owner of the last complete computed layout and text measurement
 /// implementation used by Taffy paragraph leaves.
 #[derive(Debug)]
 pub(crate) struct LayoutEngine<M> {
@@ -39,18 +39,18 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         &mut self.measurer
     }
 
-    /// Reconcile and compute one publication under an actual logical viewport.
+    /// Reconcile and compute one live-DOM revision under a logical viewport.
     ///
     /// The previous complete state is replaced only after lowering, Taffy
     /// computation, measurement, and computed-box validation all succeed.
     pub(crate) fn compute(
         &mut self,
-        publication: Arc<PublishedDom>,
+        dom: &Dom,
         viewport: LogicalViewport,
     ) -> Result<&ComputedLayout, LayoutError> {
         let text_generation = self.measurer.generation();
         if self.current.as_ref().is_some_and(|current| {
-            current.revision() == publication.revision()
+            current.revision() == dom.revision()
                 && current.viewport() == viewport
                 && current.text_generation() == text_generation
         }) {
@@ -60,7 +60,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
                 .expect("the matching current layout was checked above"));
         }
 
-        let mut scratch = reconcile_full(&publication, viewport)?;
+        let mut scratch = reconcile_full(dom, viewport)?;
         let final_paragraphs = compute_layout(&mut scratch, &mut self.measurer)?;
         let after_generation = self.measurer.generation();
         if after_generation != text_generation {
@@ -70,14 +70,25 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             });
         }
         let active_text_sources = final_paragraphs.keys().copied().collect::<HashSet<_>>();
-        let next =
-            ComputedLayout::from_scratch(publication, scratch, text_generation, final_paragraphs)?;
+        let next = ComputedLayout::from_scratch(scratch, text_generation, final_paragraphs)?;
         self.measurer.retain_sources(&active_text_sources);
         self.current = Some(next);
         Ok(self
             .current
             .as_ref()
             .expect("a successfully computed layout was just installed"))
+    }
+}
+impl LayoutEngine<TextEngine> {
+    pub(crate) fn remove_nodes(&mut self, nodes: &[crate::ui::elements::NodeId]) {
+        self.measurer.remove_sources(nodes);
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| nodes.iter().any(|node| current.box_for(*node).is_some()))
+        {
+            self.current = None;
+        }
     }
 }
 
@@ -120,13 +131,13 @@ impl TextMeasurer for TextEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::{rc::Rc, sync::Arc};
+    use std::rc::Rc;
 
     use taffy::{geometry::Size, AvailableSpace};
 
     use crate::ui::elements::{
         styles::grid::{GridStyle, GridTemplateComponent, TrackSizingFunction},
-        Dom, DomPublisher, Element, ElementTag, PublishedDom,
+        Dom, Element, ElementTag,
     };
 
     use super::*;
@@ -228,11 +239,6 @@ mod tests {
         }
     }
 
-    fn publication(dom: &Dom) -> Arc<PublishedDom> {
-        let (_publisher, reader) = DomPublisher::new(dom, |_| {});
-        reader.load()
-    }
-
     fn viewport(width: f32, height: f32) -> LogicalViewport {
         LogicalViewport::new(width, height).unwrap()
     }
@@ -253,9 +259,7 @@ mod tests {
         let dom = Dom::new();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(800.0, 600.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(800.0, 600.0)).unwrap();
 
         assert_eq!(computed.window(), None);
         assert!(computed.is_empty());
@@ -274,9 +278,7 @@ mod tests {
         dom.append_child(window, child).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(320.5, 240.25))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(320.5, 240.25)).unwrap();
 
         let root = computed.box_for(window).unwrap().layout();
         assert_close(root.size.width, 320.5);
@@ -328,9 +330,7 @@ mod tests {
         dom.append_child(grid, grid_second).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(400.0, 300.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(400.0, 300.0)).unwrap();
 
         assert_close(computed.box_for(first).unwrap().layout().location.x, 0.0);
         assert_close(computed.box_for(second).unwrap().layout().location.x, 40.0);
@@ -367,9 +367,7 @@ mod tests {
         dom.append_child(paragraph, text).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(400.0, 300.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(400.0, 300.0)).unwrap();
         let layout = computed.box_for(paragraph).unwrap().layout();
         let final_constraint = computed.final_paragraph(paragraph).unwrap().constraint();
 
@@ -413,9 +411,7 @@ mod tests {
         dom.append_child(paragraph, text).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(400.0, 300.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(400.0, 300.0)).unwrap();
         let layout = computed.box_for(paragraph).unwrap().layout();
         let final_constraint = computed.final_paragraph(paragraph).unwrap().constraint();
 
@@ -450,9 +446,7 @@ mod tests {
         };
         let mut engine = LayoutEngine::new(measurer);
 
-        let error = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap_err();
+        let error = engine.compute(&dom, viewport(300.0, 200.0)).unwrap_err();
 
         assert!(matches!(
             error,
@@ -476,9 +470,7 @@ mod tests {
         };
         let mut engine = LayoutEngine::new(measurer);
 
-        let error = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap_err();
+        let error = engine.compute(&dom, viewport(300.0, 200.0)).unwrap_err();
 
         assert!(matches!(
             error,
@@ -503,9 +495,7 @@ mod tests {
         dom.append_child(nested, second_text).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
 
         assert_eq!(computed.len(), 2);
         assert_eq!(computed.layout_children(paragraph), Some(Vec::new()));
@@ -557,9 +547,7 @@ mod tests {
         dom.append_child(high, high_text).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
 
         let low_baseline = computed.box_for(low).unwrap().content_origin().y + 6.0;
         let high_baseline = computed.box_for(high).unwrap().content_origin().y + 14.0;
@@ -577,12 +565,9 @@ mod tests {
         staging.append_child(window, first_parent).unwrap();
         staging.append_child(window, second_parent).unwrap();
         staging.append_child(first_parent, child).unwrap();
-        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        engine
-            .compute(reader.load(), viewport(300.0, 200.0))
-            .unwrap();
+        engine.compute(&staging, viewport(300.0, 200.0)).unwrap();
         assert_eq!(
             engine
                 .current()
@@ -595,10 +580,7 @@ mod tests {
 
         staging.append_child(second_parent, child).unwrap();
         staging.insert_child(window, 0, second_parent).unwrap();
-        publisher.checkpoint(&staging).unwrap();
-        let computed = engine
-            .compute(reader.load(), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&staging, viewport(300.0, 200.0)).unwrap();
 
         assert_eq!(
             computed.box_for(child).unwrap().layout_parent(),
@@ -618,61 +600,39 @@ mod tests {
         let div = element(&mut staging, ElementTag::Div);
         staging.append_child(staging.root(), window).unwrap();
         staging.append_child(window, div).unwrap();
-        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
         let mut engine = LayoutEngine::new(TestMeasurer::default());
-        engine
-            .compute(reader.load(), viewport(300.0, 200.0))
-            .unwrap();
-        let old_publication = Arc::clone(engine.current().unwrap().publication());
+        engine.compute(&staging, viewport(300.0, 200.0)).unwrap();
         let old_revision = engine.current().unwrap().revision();
-
         let paragraph = element(&mut staging, ElementTag::Text);
         let text = staging.create_text("fails");
         staging.append_child(window, paragraph).unwrap();
         staging.append_child(paragraph, text).unwrap();
-        publisher.checkpoint(&staging).unwrap();
         engine.measurer_mut().fail = true;
 
         let error = engine
-            .compute(reader.load(), viewport(300.0, 200.0))
+            .compute(&staging, viewport(300.0, 200.0))
             .unwrap_err();
 
         assert!(matches!(error, LayoutError::TextMeasurement { .. }));
         let current = engine.current().unwrap();
         assert_eq!(current.revision(), old_revision);
-        assert!(Arc::ptr_eq(current.publication(), &old_publication));
         assert!(current.box_for(paragraph).is_none());
     }
 
     #[test]
-    fn old_publication_is_retained_and_viewport_changes_recompute_the_root() {
-        let mut staging = Dom::new();
-        let window = element(&mut staging, ElementTag::Window);
-        staging.append_child(staging.root(), window).unwrap();
-        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
-        let first_publication = reader.load();
+    fn dom_mutation_and_viewport_changes_recompute_the_root() {
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        dom.append_child(dom.root(), window).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
-        engine
-            .compute(Arc::clone(&first_publication), viewport(100.0, 80.0))
-            .unwrap();
+        engine.compute(&dom, viewport(100.0, 80.0)).unwrap();
+        let first_revision = engine.current().unwrap().revision();
 
-        staging
-            .set_attribute(window, "title".into(), "new".into())
+        dom.set_attribute(window, "title".into(), "new".into())
             .unwrap();
-        publisher.checkpoint(&staging).unwrap();
-        let newer = reader.load();
-        assert!(newer.revision() > first_publication.revision());
-        assert!(first_publication
-            .snapshot()
-            .attribute(window, "title")
-            .is_none());
-
-        let computed = engine
-            .compute(Arc::clone(&first_publication), viewport(200.0, 150.0))
-            .unwrap();
-        assert_eq!(computed.revision(), first_publication.revision());
+        let computed = engine.compute(&dom, viewport(200.0, 150.0)).unwrap();
+        assert!(computed.revision() > first_revision);
         assert_close(computed.box_for(window).unwrap().layout().size.width, 200.0);
-        assert!(Arc::ptr_eq(computed.publication(), &first_publication));
     }
 
     #[test]
@@ -684,22 +644,15 @@ mod tests {
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, paragraph).unwrap();
         dom.append_child(paragraph, text).unwrap();
-        let published = publication(&dom);
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        engine
-            .compute(Arc::clone(&published), viewport(300.0, 200.0))
-            .unwrap();
+        engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
         let call_count = engine.measurer.calls.len();
-        engine
-            .compute(Arc::clone(&published), viewport(300.0, 200.0))
-            .unwrap();
+        engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
         assert_eq!(engine.measurer.calls.len(), call_count);
 
         engine.measurer_mut().generation += 1;
-        engine
-            .compute(Arc::clone(&published), viewport(300.0, 200.0))
-            .unwrap();
+        engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
         assert!(engine.measurer.calls.len() > call_count);
         assert_eq!(engine.current().unwrap().text_generation(), 1);
     }
@@ -724,9 +677,7 @@ mod tests {
         dom.append_child(paragraph, text).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
         let paragraph_box = computed.box_for(paragraph).unwrap();
         let layout = paragraph_box.layout();
 
@@ -772,9 +723,7 @@ mod tests {
         dom.append_child(content, text).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(800.0, 700.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(800.0, 700.0)).unwrap();
         let inner_box = computed.box_for(inner).unwrap();
         let layout = inner_box.layout();
 
@@ -820,9 +769,7 @@ mod tests {
         dom.append_child(grid, filler).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
         let layout = computed.box_for(paragraph).unwrap().layout();
 
         assert_close(layout.size.width, 50.0);
@@ -846,9 +793,7 @@ mod tests {
         dom.append_child(parent, child).unwrap();
         let mut engine = LayoutEngine::new(TestMeasurer::default());
 
-        let computed = engine
-            .compute(publication(&dom), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
         let parent_box = computed.box_for(parent).unwrap();
         let child_box = computed.box_for(child).unwrap();
 
@@ -897,9 +842,7 @@ mod tests {
         text.register_font_data(TEST_FONT.to_vec()).unwrap();
         let mut engine = LayoutEngine::new(text);
 
-        let computed = engine
-            .compute(publication(&dom), viewport(300.0, 300.0))
-            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 300.0)).unwrap();
         let paragraph_box = computed.box_for(paragraph).unwrap();
         let final_paragraph = computed.final_paragraph(paragraph).unwrap();
 
@@ -937,14 +880,11 @@ mod tests {
         staging.append_child(paragraph, first).unwrap();
         staging.append_child(paragraph, nested).unwrap();
         staging.append_child(nested, second).unwrap();
-        let (mut publisher, reader) = DomPublisher::new(&staging, |_| {});
         let mut text = TextEngine::without_system_fonts();
         text.register_font_data(TEST_FONT.to_vec()).unwrap();
         let mut engine = LayoutEngine::new(text);
 
-        let computed = engine
-            .compute(reader.load(), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&staging, viewport(300.0, 200.0)).unwrap();
         let first_paragraph = Rc::clone(computed.final_paragraph(paragraph).unwrap());
 
         assert_eq!(first_paragraph.constraint().definite_value(), Some(90.0));
@@ -969,10 +909,7 @@ mod tests {
         staging
             .set_style_property(nested, "font-size", "28px")
             .unwrap();
-        publisher.checkpoint(&staging).unwrap();
-        let computed = engine
-            .compute(reader.load(), viewport(300.0, 200.0))
-            .unwrap();
+        let computed = engine.compute(&staging, viewport(300.0, 200.0)).unwrap();
         let second_paragraph = computed.final_paragraph(paragraph).unwrap();
 
         assert_ne!(

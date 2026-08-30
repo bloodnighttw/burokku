@@ -1,4 +1,4 @@
-//! MTS-owned lowering of immutable DOM publications into Taffy layout.
+//! UI-thread lowering of the live DOM into owned Taffy layout state.
 
 #![allow(
     dead_code,

@@ -169,7 +169,7 @@ impl SourceEntry {
     }
 }
 
-/// Reusable MTS text engine with persistent shaping and bounded width caches.
+/// Reusable UI-thread text engine with persistent shaping and bounded width caches.
 pub(crate) struct TextEngine {
     font_context: FontContext,
     layout_context: LayoutContext<TextBrush>,
@@ -305,6 +305,13 @@ impl TextEngine {
 
     pub(crate) fn retain_sources(&mut self, sources: &HashSet<NodeId>) {
         self.cache.retain(|source, _| sources.contains(source));
+    }
+
+    pub(crate) fn remove_sources(&mut self, sources: &[NodeId]) {
+        if sources.is_empty() {
+            return;
+        }
+        self.cache.retain(|source, _| !sources.contains(source));
     }
 
     #[cfg(test)]

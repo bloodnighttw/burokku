@@ -9,7 +9,7 @@ use vello_hybrid::{Resources, Scene};
 use winit::PhysicalSize;
 
 use super::{
-    elements::{styles::color::RgbaColor, NodeId},
+    elements::{styles::color::RgbaColor, Dom, NodeId},
     layout::{ComputedLayout, LogicalViewport},
     text::{paint::paint_paragraph, TextError},
 };
@@ -65,6 +65,7 @@ pub(crate) struct ScenePlan {
 
 impl ScenePlan {
     pub(crate) fn from_layout(
+        dom: &Dom,
         computed: &ComputedLayout,
         physical_size: PhysicalSize<u32>,
         scale_factor: f64,
@@ -73,8 +74,7 @@ impl ScenePlan {
 
         let mut items = Vec::new();
         let mut hit_regions = Vec::new();
-        let snapshot = computed.publication().snapshot();
-        for (node, _) in snapshot.iter() {
+        for (node, _) in dom.iter() {
             let Some(computed_box) = computed.box_for(node) else {
                 continue;
             };
@@ -89,7 +89,7 @@ impl ScenePlan {
             validate_rect(node, rect)?;
             hit_regions.push(HitRegion { node, rect });
 
-            if let Some(color) = snapshot
+            if let Some(color) = dom
                 .element(node)
                 .and_then(|element| element.background_color())
             {
@@ -177,12 +177,13 @@ pub(crate) struct BuiltScene {
 
 impl BuiltScene {
     pub(crate) fn build(
+        dom: &Dom,
         computed: &ComputedLayout,
         physical_size: PhysicalSize<u32>,
         scale_factor: f64,
         resources: &mut Resources,
     ) -> Result<Self, SceneError> {
-        let plan = ScenePlan::from_layout(computed, physical_size, scale_factor)?;
+        let plan = ScenePlan::from_layout(dom, computed, physical_size, scale_factor)?;
         let width = u16::try_from(physical_size.width)
             .expect("scene target width was validated before Vello construction");
         let height = u16::try_from(physical_size.height)
@@ -312,7 +313,7 @@ pub(crate) enum SceneError {
 #[cfg(test)]
 mod tests {
     use crate::ui::{
-        elements::{Dom, DomPublisher, Element, ElementTag},
+        elements::{Dom, Element, ElementTag},
         layout::{LayoutEngine, LogicalViewport},
         text::TextEngine,
     };
@@ -321,7 +322,7 @@ mod tests {
 
     const TEST_FONT: &[u8] = include_bytes!("../../testdata/fonts/NotoSans-Regular.ttf");
 
-    fn computed_fixture() -> (LayoutEngine<TextEngine>, NodeId, NodeId, NodeId) {
+    fn computed_fixture() -> (Dom, LayoutEngine<TextEngine>, NodeId, NodeId, NodeId) {
         let mut dom = Dom::new();
         let window = dom.create_element(Element::from_tag(ElementTag::Window));
         let div = dom.create_element(Element::from_tag(ElementTag::Div));
@@ -339,22 +340,22 @@ mod tests {
         dom.append_child(window, div).unwrap();
         dom.append_child(div, text).unwrap();
         dom.append_child(text, raw).unwrap();
-        let (_publisher, reader) = DomPublisher::new(&dom, |_| {});
         let mut text_engine = TextEngine::without_system_fonts();
         text_engine.register_font_data(TEST_FONT.to_vec()).unwrap();
         let mut layout = LayoutEngine::new(text_engine);
         layout
-            .compute(reader.load(), LogicalViewport::new(200.0, 150.0).unwrap())
+            .compute(&dom, LogicalViewport::new(200.0, 150.0).unwrap())
             .unwrap();
-        (layout, window, div, text)
+        (dom, layout, window, div, text)
     }
 
     #[test]
     fn scene_plan_preserves_revision_and_parent_before_child_paint_order() {
-        let (layout, window, div, text) = computed_fixture();
+        let (dom, layout, window, div, text) = computed_fixture();
         let computed = layout.current().unwrap();
 
-        let plan = ScenePlan::from_layout(computed, PhysicalSize::new(400, 300), 2.0).unwrap();
+        let plan =
+            ScenePlan::from_layout(&dom, computed, PhysicalSize::new(400, 300), 2.0).unwrap();
 
         assert_eq!(plan.revision(), computed.revision());
         assert_eq!(plan.viewport(), computed.viewport());
@@ -372,10 +373,14 @@ mod tests {
 
     #[test]
     fn reverse_paint_order_hit_testing_prefers_the_deepest_box() {
-        let (layout, _window, div, text) = computed_fixture();
-        let plan =
-            ScenePlan::from_layout(layout.current().unwrap(), PhysicalSize::new(200, 150), 1.0)
-                .unwrap();
+        let (dom, layout, _window, div, text) = computed_fixture();
+        let plan = ScenePlan::from_layout(
+            &dom,
+            layout.current().unwrap(),
+            PhysicalSize::new(200, 150),
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(plan.hit_test(1.0, 1.0), Some(text));
         assert_eq!(plan.hit_test(99.0, 79.0), Some(div));
@@ -384,26 +389,26 @@ mod tests {
 
     #[test]
     fn rejects_empty_physical_targets_and_invalid_scale() {
-        let (layout, ..) = computed_fixture();
+        let (dom, layout, ..) = computed_fixture();
         let computed = layout.current().unwrap();
 
         assert!(matches!(
-            ScenePlan::from_layout(computed, PhysicalSize::new(0, 10), 1.0),
+            ScenePlan::from_layout(&dom, computed, PhysicalSize::new(0, 10), 1.0),
             Err(SceneError::EmptyTarget)
         ));
         assert!(matches!(
-            ScenePlan::from_layout(computed, PhysicalSize::new(10, 10), f64::NAN),
+            ScenePlan::from_layout(&dom, computed, PhysicalSize::new(10, 10), f64::NAN),
             Err(SceneError::InvalidScaleFactor(_))
         ));
     }
 
     #[test]
     fn oversized_physical_targets_return_an_error() {
-        let (layout, ..) = computed_fixture();
+        let (dom, layout, ..) = computed_fixture();
         let size = PhysicalSize::new(70_000, 10);
 
         assert!(matches!(
-            ScenePlan::from_layout(layout.current().unwrap(), size, 1.0),
+            ScenePlan::from_layout(&dom, layout.current().unwrap(), size, 1.0),
             Err(SceneError::TargetTooLarge {
                 size: rejected,
                 max_dimension: MAX_VELLO_SCENE_DIMENSION,

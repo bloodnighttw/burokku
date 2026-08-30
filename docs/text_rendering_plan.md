@@ -1,5 +1,7 @@
 # Text rendering implementation plan
 
+> Historical implementation plan updated to reference the current UI-thread ownership model; see [`dom_layout_colocation_plan.md`](dom_layout_colocation_plan.md).
+
 ## Status
 
 The initial MTS text pipeline is implemented. It includes inherited run

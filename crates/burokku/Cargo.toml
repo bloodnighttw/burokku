@@ -2,12 +2,25 @@
 name = "burokku"
 version = "0.1.0"
 edition = "2021"
-description = "A builder-based native UI crate with pluggable dual JavaScript runtimes"
+description = "A native UI crate with one thread-affine LLRT runtime and live DOM"
 license = "MIT"
 
 [dependencies]
-arc-swap = "1"
 glifo = { version = "0.3.0", default-features = false, features = ["std"] }
+llrt_modules = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", default-features = false, features = [
+    "abort",
+    "buffer",
+    "console",
+    "events",
+    "exceptions",
+    "fetch",
+    "path",
+    "stream-web",
+    "timers",
+    "tls-ring",
+    "url",
+] }
+llrt_utils = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", default-features = false }
 parley = "0.11.1"
 runtime = { path = "../runtime" }
 skrifa = "0.44"
@@ -21,7 +34,7 @@ taffy = { version = "0.11", default-features = false, features = [
     "parse",
 ] }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 vello_common = { version = "0.2", default-features = false, features = ["std"] }
 vello_hybrid = { version = "0.2", default-features = false, features = ["text", "wgpu"] }
 wgpu = { version = "29", features = ["std", "wgsl"] }

@@ -12,14 +12,6 @@ pub(crate) enum LayoutError {
     #[error("logical viewport must be finite and non-negative, got {width}x{height}")]
     InvalidViewport { width: f32, height: f32 },
 
-    #[error(
-        "publication revision mismatch: snapshot is {snapshot_revision}, change target is {target_revision}"
-    )]
-    PublicationRevisionMismatch {
-        snapshot_revision: u64,
-        target_revision: u64,
-    },
-
     #[error("the committed App root is missing or has the wrong node kind")]
     InvalidAppRoot,
 

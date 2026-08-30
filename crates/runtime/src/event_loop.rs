@@ -179,7 +179,6 @@ pub(crate) async fn install(
                     receiver,
                     shutdown_receiver,
                     stopped_sender,
-                    plugins,
                 ));
                 Ok(())
             }
@@ -194,7 +193,6 @@ async fn run<'js>(
     mut tasks: Receiver<MacrotaskMessage>,
     mut control: Receiver<ShutdownRequest>,
     stopped: oneshot::Sender<()>,
-    mut plugins: Vec<Box<dyn Plugin>>,
 ) {
     loop {
         let task = tokio::select! {
@@ -224,15 +222,6 @@ async fn run<'js>(
         // the JavaScript rule that all ready microtasks run before the next
         // macrotask.
         while context.execute_pending_job() {}
-
-        for plugin in &mut plugins {
-            if let Err(error) = plugin.checkpoint() {
-                eprintln!(
-                    "JavaScript checkpoint for {} failed: {error}",
-                    plugin.name()
-                );
-            }
-        }
     }
 
     let _ = stopped.send(());
