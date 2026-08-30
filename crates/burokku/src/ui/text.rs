@@ -1,8 +1,8 @@
-//! MTS-owned paragraph collection, shaping, caching, and glyph painting.
+//! UI-thread paragraph collection, shaping, caching, and glyph painting.
 //!
-//! Authoritative DOM snapshots contain only strings and Burokku styles. All
-//! values in this module are derived from one immutable snapshot and remain on
-//! the main thread.
+//! Authoritative DOM nodes contain only strings and Burokku styles. All values
+//! in this module are owned derivatives of one observed live-DOM revision and
+//! remain on the UI thread.
 
 #![allow(
     dead_code,

@@ -1,6 +1,6 @@
 //! Main-thread application handler that reconciles, lays out, paints, and presents.
 
-use std::{rc::Rc, sync::Arc};
+use std::rc::Rc;
 
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -8,8 +8,11 @@ use winit::{
     application::ApplicationHandler, ActiveEventLoop, PhysicalSize, WindowEvent, WindowId,
 };
 
+use crate::app::{RuntimeLifecycle, RuntimeStatus};
+
 use super::{
-    elements::{NodeId, PublishedDom, PublishedDomReader},
+    dom_plugin::SharedUiDom,
+    elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
     scene::{BuiltScene, SceneError, ScenePlan},
@@ -175,8 +178,8 @@ struct PendingGraphicsInitialization {
 
 #[derive(Debug)]
 pub(crate) struct ApplicationHost {
-    publications: PublishedDomReader,
-    latest_publication: Option<Arc<PublishedDom>>,
+    dom: SharedUiDom,
+    observed_revision: Option<u64>,
     graphics: Option<GraphicsContext>,
     pending_graphics: Option<PendingGraphicsInitialization>,
     windows: WindowManager,
@@ -187,15 +190,15 @@ pub(crate) struct ApplicationHost {
     cursor_target: Option<NodeId>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
+    lifecycle: RuntimeLifecycle,
+    exit_requested: bool,
 }
 
 impl ApplicationHost {
-    pub(crate) fn new(publications: PublishedDomReader, text: TextEngine) -> Self {
+    pub(crate) fn new(dom: SharedUiDom, text: TextEngine, lifecycle: RuntimeLifecycle) -> Self {
         Self {
-            publications,
-            // Force `resumed` to reconcile the newest publication, whether it
-            // contains a Window already or represents a valid windowless app.
-            latest_publication: None,
+            dom,
+            observed_revision: None,
             // GPU allocation is delayed until a native Window exists, so its
             // surface can constrain adapter selection.
             graphics: None,
@@ -208,6 +211,8 @@ impl ApplicationHost {
             cursor_target: None,
             ever_had_window: false,
             fatal_error: None,
+            lifecycle,
+            exit_requested: false,
         }
     }
 
@@ -285,14 +290,17 @@ impl ApplicationHost {
 
         let received = pending.result.try_recv();
 
-        // A publication can arrive after the event-loop turn began. Leave an
-        // obsolete request installed for `sync_publication` to cancel while it
-        // commits the corresponding native removal or replacement. Successes
-        // and failures use the same authority gate.
-        let authoritative = self.publications.load();
-        let desired_dom_id = WindowSpec::from_publication(&authoritative)?
-            .as_ref()
-            .map(WindowSpec::dom_id);
+        // Validate the asynchronous result against the current live DOM before
+        // installing it. The borrow ends before any renderer or native work.
+        let desired_dom_id = {
+            let state = self
+                .dom
+                .try_borrow()
+                .map_err(|_| HostError::DomBorrowConflict)?;
+            WindowSpec::from_dom(&state.dom)?
+                .as_ref()
+                .map(WindowSpec::dom_id)
+        };
         let status = pending_window_status(pending.dom_id, desired_dom_id);
         let initialized = match received {
             Ok(initialized) => initialized,
@@ -364,34 +372,37 @@ impl ApplicationHost {
             RedrawFailure::Fatal(error) => self.fail(event_loop, error),
         }
     }
+    fn request_exit(&mut self) {
+        self.exit_requested = true;
+        self.lifecycle.request_shutdown();
+    }
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: HostError) {
+    fn fail(&mut self, _event_loop: &ActiveEventLoop, error: HostError) {
         if self.fatal_error.is_none() {
             self.fatal_error = Some(error);
         }
         self.cancel_graphics_initialization();
         self.renderer = None;
         self.windows.close();
-        event_loop.exit();
+        self.request_exit();
     }
 
-    fn sync_publication(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
-        let publication = self.publications.load();
-        if self
-            .latest_publication
-            .as_ref()
-            .is_some_and(|current| current.revision() == publication.revision())
-        {
+    fn sync_dom(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
+        let (revision, desired) = {
+            let state = self
+                .dom
+                .try_borrow()
+                .map_err(|_| HostError::DomBorrowConflict)?;
+            (state.dom.revision(), WindowSpec::from_dom(&state.dom)?)
+        };
+        if self.observed_revision == Some(revision) {
             return Ok(());
         }
 
-        // Observation and native-window application are separate. Recording
-        // the publication first prevents a failed WindowSpec from being
-        // retried on every event-loop turn and keeps the latest DOM as the
-        // content target for the existing native viewport.
-        let revision = publication.revision();
-        self.latest_publication = Some(Arc::clone(&publication));
-        let change = match self.windows.reconcile(event_loop, &publication) {
+        // Record observation before native work so a rejected specification is
+        // not retried on every event-loop turn.
+        self.observed_revision = Some(revision);
+        let change = match self.windows.reconcile(event_loop, desired) {
             Ok(change) => change,
             Err(error) => {
                 return self.handle_window_sync_failure(revision, error.into());
@@ -483,7 +494,7 @@ impl ApplicationHost {
                 self.presented = None;
                 self.cursor_target = None;
                 if self.ever_had_window {
-                    event_loop.exit();
+                    self.request_exit();
                 }
             }
             WindowChange::Updated | WindowChange::Unchanged => {}
@@ -502,12 +513,6 @@ impl ApplicationHost {
     }
 
     fn redraw(&mut self) -> Result<PresentationOutcome, RedrawFailure> {
-        let publication = Arc::clone(
-            self.latest_publication
-                .as_ref()
-                .ok_or(RedrawFailure::Fatal(HostError::MissingPublication))?,
-        );
-        let revision = publication.revision();
         let native = self
             .windows
             .current()
@@ -547,6 +552,12 @@ impl ApplicationHost {
             self.presented = None;
             self.cursor_target = None;
         }
+        let mut revision = self
+            .dom
+            .try_borrow()
+            .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?
+            .dom
+            .revision();
         if let Err(error) = resize_result {
             return Err(classify_resize_failure(
                 revision,
@@ -561,10 +572,13 @@ impl ApplicationHost {
         let viewport = logical_viewport(physical_size, scale_factor).map_err(|error| {
             classify_fatal_failure(has_presented_frame, FailureKind::Invariant, error)
         })?;
-        let computed = self
-            .layout
-            .compute(publication, viewport)
-            .map_err(|error| {
+        let frame = {
+            let state = self
+                .dom
+                .try_borrow()
+                .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?;
+            revision = state.dom.revision();
+            let computed = self.layout.compute(&state.dom, viewport).map_err(|error| {
                 classify_candidate_failure(
                     revision,
                     has_presented_frame,
@@ -573,21 +587,25 @@ impl ApplicationHost {
                     error.into(),
                 )
             })?;
-        let frame = BuiltScene::build(
-            computed,
-            physical_size,
-            scale_factor,
-            renderer.resources_mut(),
-        )
-        .map_err(|error| {
-            classify_candidate_failure(
-                revision,
-                has_presented_frame,
-                FailureKind::Scene,
-                FrameStage::Scene,
-                error.into(),
+            let frame = BuiltScene::build(
+                &state.dom,
+                computed,
+                physical_size,
+                scale_factor,
+                renderer.resources_mut(),
             )
-        })?;
+            .map_err(|error| {
+                classify_candidate_failure(
+                    revision,
+                    has_presented_frame,
+                    FailureKind::Scene,
+                    FrameStage::Scene,
+                    error.into(),
+                )
+            })?;
+            debug_assert_eq!(state.dom.revision(), revision);
+            frame
+        };
         debug_assert!(frame.glyph_runs() <= frame.glyphs());
         let outcome = renderer.present(graphics, &frame).map_err(|error| {
             classify_fatal_failure(
@@ -621,7 +639,7 @@ impl ApplicationHost {
 
 impl ApplicationHandler for ApplicationHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(error) = self.sync_publication(event_loop) {
+        if let Err(error) = self.sync_dom(event_loop) {
             self.fail(event_loop, error);
             return;
         }
@@ -656,7 +674,7 @@ impl ApplicationHandler for ApplicationHost {
                 self.presented = None;
                 self.cursor_target = None;
                 self.windows.close();
-                event_loop.exit();
+                self.request_exit();
             }
             WindowEvent::Resized(size)
             | WindowEvent::ScaleFactorChanged {
@@ -666,11 +684,14 @@ impl ApplicationHandler for ApplicationHost {
                 if self.pending_graphics.is_some() {
                     return;
                 }
-                let Some(publication) = self.latest_publication.as_ref() else {
-                    self.fail(event_loop, HostError::MissingPublication);
-                    return;
+                let dom = Rc::clone(&self.dom);
+                let revision = match dom.try_borrow() {
+                    Ok(state) => state.dom.revision(),
+                    Err(_) => {
+                        self.fail(event_loop, HostError::DomBorrowConflict);
+                        return;
+                    }
                 };
-                let revision = publication.revision();
                 let Some(graphics) = self.graphics.as_ref() else {
                     self.fail(event_loop, HostError::MissingGraphicsContext);
                     return;
@@ -765,20 +786,53 @@ impl ApplicationHandler for ApplicationHost {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.fatal_error.is_some() {
+        let runtime_status = self.lifecycle.status();
+        if matches!(runtime_status, RuntimeStatus::Failed(_)) {
             event_loop.exit();
             return;
         }
+
+        if self.fatal_error.is_some() {
+            self.request_exit();
+        }
+        if self.exit_requested {
+            if runtime_status == RuntimeStatus::Stopped {
+                event_loop.exit();
+            } else {
+                self.lifecycle.request_shutdown();
+            }
+            return;
+        }
+
+        let dom = Rc::clone(&self.dom);
+        let reclaimed = {
+            let mut state = match dom.try_borrow_mut() {
+                Ok(state) => state,
+                Err(_) => {
+                    self.fail(event_loop, HostError::DomBorrowConflict);
+                    return;
+                }
+            };
+            if let Err(error) = state.reclaim_detached() {
+                drop(state);
+                self.fail(event_loop, HostError::DomMaintenance(error.to_string()));
+                return;
+            }
+            state.last_reclaim.nodes.clone()
+        };
+        self.layout.remove_nodes(&reclaimed);
+
         if let Err(error) = self
-            .sync_publication(event_loop)
+            .sync_dom(event_loop)
             .and_then(|()| self.complete_graphics_initialization())
-            .and_then(|()| self.sync_publication(event_loop))
+            .and_then(|()| self.sync_dom(event_loop))
         {
             self.fail(event_loop, error);
         }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.lifecycle.request_shutdown();
         self.cancel_graphics_initialization();
         self.renderer = None;
         self.windows.close();
@@ -868,10 +922,13 @@ enum RedrawFailure {
 
 #[derive(Debug, Error)]
 pub(crate) enum HostError {
-    #[error("no committed DOM publication is available")]
-    MissingPublication,
+    #[error("the live DOM is already borrowed by reentrant work")]
+    DomBorrowConflict,
 
-    #[error("the committed Window has no native window")]
+    #[error("live DOM maintenance failed: {0}")]
+    DomMaintenance(String),
+
+    #[error("the live DOM Window has no native window")]
     MissingNativeWindow,
 
     #[error("GPU initialization stopped before producing a renderer")]
@@ -907,17 +964,16 @@ pub(crate) enum HostError {
 
 #[cfg(test)]
 mod tests {
-    use crate::ui::elements::{Dom, DomPublisher, Element, ElementTag};
+    use crate::ui::elements::{Dom, Element, ElementTag};
 
     use super::*;
 
     fn scene_plan(dom: &Dom) -> ScenePlan {
-        let (_publisher, reader) = DomPublisher::new(dom, |_| {});
         let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
         let computed = layout
-            .compute(reader.load(), LogicalViewport::new(320.0, 240.0).unwrap())
+            .compute(dom, LogicalViewport::new(320.0, 240.0).unwrap())
             .unwrap();
-        ScenePlan::from_layout(computed, PhysicalSize::new(320, 240), 1.0).unwrap()
+        ScenePlan::from_layout(dom, computed, PhysicalSize::new(320, 240), 1.0).unwrap()
     }
 
     fn oversized_target() -> GraphicsError {
@@ -942,9 +998,9 @@ mod tests {
 
     #[test]
     fn windowless_host_does_not_initialize_graphics() {
-        let dom = Dom::new();
-        let (_publisher, publications) = DomPublisher::new(&dom, |_| {});
-        let host = ApplicationHost::new(publications, TextEngine::without_system_fonts());
+        let (_plugin, dom) = crate::ui::dom_plugin::DomPlugin::new();
+        let lifecycle = RuntimeLifecycle::for_test();
+        let host = ApplicationHost::new(dom, TextEngine::without_system_fonts(), lifecycle);
 
         assert!(host.graphics.is_none());
         assert!(host.pending_graphics.is_none());

@@ -1,5 +1,7 @@
 # DOM foundation: current problems
 
+> Historical review. Runtime ownership and snapshot findings are superseded by [`dom_layout_colocation_plan.md`](dom_layout_colocation_plan.md).
+
 ## Scope
 
 This review lists the current implementation problems in the working tree.

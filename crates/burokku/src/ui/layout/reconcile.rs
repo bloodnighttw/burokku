@@ -6,10 +6,7 @@ use std::{
 use taffy::{geometry::Size, Dimension, Display, Layout, Position, Style};
 
 use crate::ui::{
-    elements::{
-        traits::Styles, ChangeSet, DomSnapshot, Element, NodeId as DomNodeId, NodeKind,
-        NodeRevisions, PublishedDom,
-    },
+    elements::{traits::Styles, Dom, Element, NodeId as DomNodeId, NodeKind, NodeRevisions},
     text::{collect_paragraph, ParagraphInput},
 };
 
@@ -95,17 +92,15 @@ struct PendingNode {
 }
 
 pub(super) fn reconcile_full(
-    publication: &PublishedDom,
+    dom: &Dom,
     viewport: LogicalViewport,
 ) -> Result<ScratchLayout, LayoutError> {
-    validate_publication(publication)?;
-    let snapshot = publication.snapshot();
-    let app = snapshot.root();
-    if !matches!(snapshot.kind(app), Some(NodeKind::App)) {
+    let app = dom.root();
+    if !matches!(dom.kind(app), Some(NodeKind::App)) {
         return Err(LayoutError::InvalidAppRoot);
     }
 
-    let app_children = snapshot.children(app).ok_or(LayoutError::InvalidAppRoot)?;
+    let app_children = dom.children(app).ok_or(LayoutError::InvalidAppRoot)?;
     if app_children.len() > 1 {
         return Err(LayoutError::InvalidAppChildren {
             count: app_children.len(),
@@ -113,7 +108,7 @@ pub(super) fn reconcile_full(
     }
 
     let mut scratch = ScratchLayout {
-        revision: publication.revision(),
+        revision: dom.revision(),
         viewport,
         window: None,
         topology: LayoutTopology::default(),
@@ -125,13 +120,13 @@ pub(super) fn reconcile_full(
         scratch.topology.validate(&HashSet::new())?;
         return Ok(scratch);
     };
-    if snapshot.parent(window) != Some(app) {
+    if dom.parent(window) != Some(app) {
         return Err(LayoutError::InvalidDomRelationship {
             parent: app,
             child: window,
         });
     }
-    let Some(Element::Window { .. }) = snapshot.element(window) else {
+    let Some(Element::Window { .. }) = dom.element(window) else {
         return Err(LayoutError::ExpectedWindow(window));
     };
 
@@ -147,20 +142,20 @@ pub(super) fn reconcile_full(
         window_layout,
         window,
         LayoutRole::Container,
-        style_for(snapshot, window, viewport)?,
-        revisions(snapshot, window)?,
+        style_for(dom, window, viewport)?,
+        revisions(dom, window)?,
     );
     scratch.window = Some(window);
 
     let mut pending = Vec::new();
-    schedule_children(snapshot, window, window_layout, &mut pending)?;
+    schedule_children(dom, window, window_layout, &mut pending)?;
 
     while let Some(next) = pending.pop() {
         if !seen_dom.insert(next.dom_id) {
             return Err(LayoutError::DuplicateDomNode(next.dom_id));
         }
 
-        let node = snapshot
+        let node = dom
             .node(next.dom_id)
             .ok_or(LayoutError::MissingDomNode(next.dom_id))?;
         match node.kind() {
@@ -176,7 +171,7 @@ pub(super) fn reconcile_full(
                     next.layout_parent,
                     next.source_order,
                 )?;
-                let collected = collect_paragraph(snapshot, next.dom_id)?;
+                let collected = collect_paragraph(dom, next.dom_id)?;
                 let (input, descendants) = collected.into_parts();
                 scratch.text_owner.insert(next.dom_id, next.dom_id);
                 for descendant in descendants {
@@ -192,7 +187,7 @@ pub(super) fn reconcile_full(
                     LayoutRole::Paragraph {
                         input: Rc::new(input),
                     },
-                    style_for(snapshot, next.dom_id, viewport)?,
+                    style_for(dom, next.dom_id, viewport)?,
                     node.revisions(),
                 );
             }
@@ -210,10 +205,10 @@ pub(super) fn reconcile_full(
                     layout_id,
                     next.dom_id,
                     LayoutRole::Container,
-                    style_for(snapshot, next.dom_id, viewport)?,
+                    style_for(dom, next.dom_id, viewport)?,
                     node.revisions(),
                 );
-                schedule_children(snapshot, next.dom_id, layout_id, &mut pending)?;
+                schedule_children(dom, next.dom_id, layout_id, &mut pending)?;
             }
         }
     }
@@ -238,31 +233,17 @@ pub(super) fn reconcile_full(
     Ok(scratch)
 }
 
-fn validate_publication(publication: &PublishedDom) -> Result<(), LayoutError> {
-    let snapshot_revision = publication.snapshot().revision();
-    let target_revision = match publication.changes() {
-        ChangeSet::FullRebuild { to_revision, .. } => to_revision,
-    };
-    if snapshot_revision != target_revision {
-        return Err(LayoutError::PublicationRevisionMismatch {
-            snapshot_revision,
-            target_revision,
-        });
-    }
-    Ok(())
-}
-
 fn schedule_children(
-    snapshot: &DomSnapshot,
+    dom: &Dom,
     dom_parent: DomNodeId,
     layout_parent: LayoutId,
     pending: &mut Vec<PendingNode>,
 ) -> Result<(), LayoutError> {
-    let children = snapshot
+    let children = dom
         .children(dom_parent)
         .ok_or(LayoutError::MissingDomNode(dom_parent))?;
     for (source_order, &child) in children.iter().enumerate().rev() {
-        if snapshot.parent(child) != Some(dom_parent) {
+        if dom.parent(child) != Some(dom_parent) {
             return Err(LayoutError::InvalidDomRelationship {
                 parent: dom_parent,
                 child,
@@ -300,21 +281,18 @@ fn insert_state(
     debug_assert!(previous.is_none(), "layout IDs are unique after lowering");
 }
 
-fn revisions(snapshot: &DomSnapshot, id: DomNodeId) -> Result<NodeRevisions, LayoutError> {
-    snapshot
-        .node(id)
+fn revisions(dom: &Dom, id: DomNodeId) -> Result<NodeRevisions, LayoutError> {
+    dom.node(id)
         .map(|node| node.revisions())
         .ok_or(LayoutError::MissingDomNode(id))
 }
 
 fn style_for(
-    snapshot: &DomSnapshot,
+    dom: &Dom,
     id: DomNodeId,
     viewport: LogicalViewport,
 ) -> Result<Style<String>, LayoutError> {
-    let element = snapshot
-        .element(id)
-        .ok_or(LayoutError::MissingDomNode(id))?;
+    let element = dom.element(id).ok_or(LayoutError::MissingDomNode(id))?;
     let mut style = match element {
         Element::Window { style } => style.to_taffy_style(),
         Element::Div { style } => style.to_taffy_style(),

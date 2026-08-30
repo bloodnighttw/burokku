@@ -1,5 +1,7 @@
 # Problem 7 implementation plan: Taffy trait-based layout
 
+> Historical implementation plan. Its publication terminology is superseded by [`dom_layout_colocation_plan.md`](dom_layout_colocation_plan.md).
+
 ## Purpose
 
 This plan addresses **Problem 7: Taffy reconciliation is missing** in

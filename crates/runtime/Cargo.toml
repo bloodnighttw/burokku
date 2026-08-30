@@ -2,11 +2,11 @@
 name = "runtime"
 version = "0.1.0"
 edition = "2021"
-description = "An asynchronous JavaScript runtime built on rquickjs and Tokio"
+description = "A thread-affine asynchronous JavaScript runtime built on rquickjs and Tokio"
 license = "MIT"
 
 [dependencies]
-rquickjs = { version = "0.12", features = ["futures", "parallel"] }
+rquickjs = { version = "0.12", features = ["futures"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 

@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::ui::elements::{
     styles::{common::CommonStyle, text::TextElementStyle, window::WindowStyle},
@@ -13,16 +10,7 @@ use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
 mod iter;
-mod publication;
-
 pub use iter::DomIter;
-#[allow(
-    unused_imports,
-    reason = "consumed by the pending DOM plugin and MTS reconciliation host"
-)]
-pub(crate) use publication::{
-    ChangeSet, CommitNotifier, DomPublisher, DomSnapshot, PublishedDom, PublishedDomReader,
-};
 pub mod styles;
 pub mod traits;
 
@@ -30,9 +18,8 @@ new_key_type! {
     /// A stable, generation-checked handle to a node in a [`Dom`].
     ///
     /// The handle remains valid when the arena grows, when the node moves in
-    /// the tree, and in cloned DOM snapshots. Once its node is removed, the
-    /// generation prevents the handle from referring to a later allocation that
-    /// reuses the same slot.
+    /// the tree. Once its node is removed, the generation prevents the handle
+    /// from referring to a later allocation that reuses the same slot.
     pub struct NodeId;
 }
 
@@ -308,14 +295,10 @@ impl Node {
 /// the tree unchanged.
 ///
 /// Fresh DOM construction is crate-owned so an application cannot accidentally
-/// create independent arenas whose [`NodeId`] values overlap. Clones are
-/// intentionally allowed: they belong to the original DOM lineage and preserve
-/// its node handles for snapshot publication.
-#[derive(Clone, Debug)]
+/// create independent arenas whose [`NodeId`] values overlap.
+#[derive(Debug)]
 pub struct Dom {
-    // Cloning the arena for publication only clones these pointers. Node data
-    // is copied lazily by `node_mut` when a published node is changed.
-    nodes: SlotMap<NodeId, Arc<Node>>,
+    nodes: SlotMap<NodeId, Node>,
     root: NodeId,
     revision: u64,
 }
@@ -329,13 +312,13 @@ impl Dom {
     /// this is to ensure only one instance of the DOM exists.
     pub(crate) fn new() -> Self {
         let mut nodes = SlotMap::with_key();
-        let root = nodes.insert(Arc::new(Node {
+        let root = nodes.insert(Node {
             kind: NodeKind::App,
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
             revisions: NodeRevisions::default(),
-        }));
+        });
 
         Self {
             nodes,
@@ -362,7 +345,7 @@ impl Dom {
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(id).map(Arc::as_ref)
+        self.nodes.get(id)
     }
 
     pub fn kind(&self, id: NodeId) -> Option<&NodeKind> {
@@ -566,13 +549,13 @@ impl Dom {
     /// Internally creates a node of the given kind and returns its stable handle.
     /// Always prefers to use [`Self::create_element`] or [`Self::create_text`] instead.
     fn create_node(&mut self, kind: NodeKind) -> NodeId {
-        let id = self.nodes.insert(Arc::new(Node {
+        let id = self.nodes.insert(Node {
             kind,
             parent: None,
             children: Vec::new(),
             attributes: BTreeMap::new(),
             revisions: NodeRevisions::default(),
-        }));
+        });
         self.bump_revision();
         id
     }
@@ -676,7 +659,7 @@ impl Dom {
         }
 
         let old_children = node.children.clone();
-        let text_id = self.nodes.insert(Arc::new(Node {
+        let text_id = self.nodes.insert(Node {
             kind: NodeKind::Text(text),
             parent: Some(id),
             children: Vec::new(),
@@ -685,7 +668,7 @@ impl Dom {
                 structure: 1,
                 ..NodeRevisions::default()
             },
-        }));
+        });
 
         for child in old_children {
             let child = self.node_mut(child)?;
@@ -1034,8 +1017,7 @@ impl Dom {
     }
 
     fn node_mut(&mut self, id: NodeId) -> Result<&mut Node, DomError> {
-        let node = self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))?;
-        Ok(Arc::make_mut(node))
+        self.nodes.get_mut(id).ok_or(DomError::NodeNotFound(id))
     }
 
     fn sibling_at_offset(&self, id: NodeId, offset: isize) -> Result<Option<NodeId>, DomError> {
@@ -1152,7 +1134,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn handles_survive_moves_updates_and_snapshot_clones() {
+    fn handles_survive_moves_and_updates() {
         let mut dom = Dom::new();
         let window = dom.create_element(Element::Window {
             style: Box::default(),
@@ -1188,13 +1170,6 @@ mod tests {
 
         assert_eq!(dom.parent(child), Some(second_parent));
         assert!(matches!(dom.element(child), Some(Element::Text { .. })));
-
-        let snapshot = dom.clone();
-        assert!(matches!(
-            snapshot.element(child),
-            Some(Element::Text { .. })
-        ));
-        assert_eq!(snapshot.parent(child), Some(second_parent));
     }
 
     #[test]

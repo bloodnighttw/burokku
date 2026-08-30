@@ -675,7 +675,7 @@ mod tests {
     };
 
     use crate::ui::{
-        elements::{Dom, DomPublisher, Element, ElementTag},
+        elements::{Dom, Element, ElementTag},
         text::TextEngine,
     };
 
@@ -743,13 +743,8 @@ mod tests {
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, paragraph).unwrap();
         dom.append_child(paragraph, text).unwrap();
-        let (_publisher, reader) = DomPublisher::new(&dom, |_| {});
-        let publication = reader.load();
-        let mut scratch = reconcile_full(
-            publication.as_ref(),
-            LogicalViewport::new(300.0, 200.0).unwrap(),
-        )
-        .unwrap();
+        let mut scratch =
+            reconcile_full(&dom, LogicalViewport::new(300.0, 200.0).unwrap()).unwrap();
         let paragraph_id = scratch.topology.layout_id(paragraph).unwrap();
         let narrow_input = probe_input(80.0);
         let wide_input = probe_input(160.0);

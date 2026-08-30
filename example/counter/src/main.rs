@@ -5,7 +5,7 @@ fn main() -> Result<(), burokku::BurokkuError> {
             "\nsetTimeout(() => {\n\
              const window = app.firstChild;\n\
              if (window !== null) app.removeChild(window);\n\
-             }, 250);",
+             }, 1500);",
         );
     }
 

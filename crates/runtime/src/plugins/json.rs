@@ -110,31 +110,51 @@ fn stringify_json<'js>(
 mod tests {
     use super::JsonPlugin;
     use crate::Runtime;
+    use tokio::task::LocalSet;
 
     #[tokio::test(flavor = "current_thread")]
     async fn parses_and_stringifies_json() {
-        let runtime = Runtime::builder().plugin(JsonPlugin).build().await.unwrap();
-
-        let output: Vec<String> = runtime.eval(include_str!("scripts/json.js")).await.unwrap();
-
-        assert_eq!(
-            output,
-            [
-                "{\n  \"parsed\": {\n    \"count\": 3\n  }\n}",
-                "3:10:false:30",
-            ]
-        );
+        LocalSet::new()
+            .run_until(async {
+                let (runtime, driver) = Runtime::builder()
+                    .plugin(JsonPlugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                let output: Vec<String> =
+                    runtime.eval(include_str!("scripts/json.js")).await.unwrap();
+                assert_eq!(
+                    output,
+                    [
+                        "{\n  \"parsed\": {\n    \"count\": 3\n  }\n}",
+                        "3:10:false:30",
+                    ]
+                );
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn matches_json_edge_behavior() {
-        let runtime = Runtime::builder().plugin(JsonPlugin).build().await.unwrap();
-
-        let behavior: Vec<bool> = runtime
-            .eval(include_str!("scripts/json_edge_behavior.js"))
-            .await
-            .unwrap();
-
-        assert_eq!(behavior, [true, true, true, true]);
+        LocalSet::new()
+            .run_until(async {
+                let (runtime, driver) = Runtime::builder()
+                    .plugin(JsonPlugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                let behavior: Vec<bool> = runtime
+                    .eval(include_str!("scripts/json_edge_behavior.js"))
+                    .await
+                    .unwrap();
+                assert_eq!(behavior, [true, true, true, true]);
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 }

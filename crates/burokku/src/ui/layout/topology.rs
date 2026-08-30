@@ -45,7 +45,7 @@ pub(super) struct PositioningMeta {
 
 /// A validated, revision-scoped layout relationship graph.
 ///
-/// This is derived from a committed DOM snapshot. It is not observable DOM
+/// This is derived from one live-DOM revision. It is not observable DOM
 /// state and may later differ from DOM parentage for positioned boxes.
 #[derive(Clone, Debug, Default)]
 pub(super) struct LayoutTopology {

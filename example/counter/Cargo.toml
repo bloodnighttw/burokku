@@ -1,5 +1,5 @@
 [package]
-name = "burokku-example-layouts"
+name = "burokku-example-counter"
 version = "0.1.0"
 edition = "2021"
 publish = false

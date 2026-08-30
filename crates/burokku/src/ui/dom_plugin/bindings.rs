@@ -1,15 +1,15 @@
-use std::sync::MutexGuard;
+use std::cell::{Ref, RefMut};
 
 use runtime::rquickjs::{prelude::Func, Ctx, Function, Object, Result};
 
 use super::{
     errors,
     lifetime::{decode_node_id, encode_node_id},
-    DomPluginState, SharedDomState,
+    SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
-pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
+pub(super) fn install(context: &Ctx<'_>, state: SharedUiDom) -> Result<()> {
     let native = Object::new(context.clone())?;
 
     native.set(
@@ -17,8 +17,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
         Func::from({
             let state = state.clone();
             move |context: Ctx<'_>| -> Result<String> {
-                let state = lock(&context, &state)?;
-                Ok(encode_node_id(state.staging.root()))
+                let state = borrow(&context, &state)?;
+                Ok(encode_node_id(state.dom.root()))
             }
         }),
     )?;
@@ -29,9 +29,9 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<String> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
+                    let state = borrow(&context, &state)?;
                     state
-                        .staging
+                        .dom
                         .kind(id)
                         .map(|kind| match kind {
                             NodeKind::App => "app",
@@ -60,8 +60,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
                     Err(error) => return errors::invalid_tag(&context, error),
                 };
                 let id = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.create_element_tag(tag)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.create_element_tag(tag)
                 };
                 Ok(encode_node_id(id))
             }
@@ -73,8 +73,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             let state = state.clone();
             move |context: Ctx<'_>, text: String| -> Result<String> {
                 let id = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.create_text(text)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.create_text(text)
                 };
                 Ok(encode_node_id(id))
             }
@@ -88,8 +88,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<Option<String>> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    state.staging.parent_node(id)
+                    let state = borrow(&context, &state)?;
+                    state.dom.parent_node(id)
                 };
                 errors::map_dom(&context, "read parentNode", result)
                     .map(|parent| parent.map(encode_node_id))
@@ -103,9 +103,9 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<Vec<String>> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
+                    let state = borrow(&context, &state)?;
                     state
-                        .staging
+                        .dom
                         .children(id)
                         .map(|children| children.to_vec())
                         .ok_or(DomError::NodeNotFound(id))
@@ -170,8 +170,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    state.staging.is_connected(id)
+                    let state = borrow(&context, &state)?;
+                    state.dom.is_connected(id)
                 };
                 errors::map_dom(&context, "read isConnected", result)
             }
@@ -185,8 +185,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
                 let ancestor = decode(&context, &ancestor)?;
                 let descendant = decode(&context, &descendant)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    state.staging.contains_node(ancestor, descendant)
+                    let state = borrow(&context, &state)?;
+                    state.dom.contains_node(ancestor, descendant)
                 };
                 errors::map_dom(&context, "check node containment", result)
             }
@@ -225,8 +225,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
                     .map(|token| decode(&context, token))
                     .transpose()?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.insert_before(parent, child, reference)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.insert_before(parent, child, reference)
                 };
                 errors::map_dom(&context, "insertBefore", result)
             }
@@ -261,8 +261,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
                 let new_child = decode(&context, &new_child)?;
                 let old_child = decode(&context, &old_child)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.replace_child(parent, new_child, old_child)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.replace_child(parent, new_child, old_child)
                 };
                 errors::map_dom(&context, "replaceChild", result)
             }
@@ -276,8 +276,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<String> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    state.staging.text_content(id)
+                    let state = borrow(&context, &state)?;
+                    state.dom.text_content(id)
                 };
                 errors::map_dom(&context, "read textContent", result)
             }
@@ -290,8 +290,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, text: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.set_text_content(id, text)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.set_text_content(id, text)
                 };
                 errors::map_dom(&context, "set textContent", result)
             }
@@ -304,8 +304,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, text: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.set_text(id, text)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.set_text(id, text)
                 };
                 errors::map_dom(&context, "set text data", result)
             }
@@ -319,8 +319,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<String> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    state.staging.element_tag(id)
+                    let state = borrow(&context, &state)?;
+                    state.dom.element_tag(id)
                 };
                 errors::map_dom(&context, "read localName", result)
                     .map(|tag| tag.local_name().to_owned())
@@ -334,11 +334,11 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String| -> Result<Option<String>> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    match state.staging.node(id) {
+                    let state = borrow(&context, &state)?;
+                    match state.dom.node(id) {
                         None => Err(DomError::NodeNotFound(id)),
                         Some(node) if node.element().is_none() => Err(DomError::NodeNotElement(id)),
-                        Some(_) => Ok(state.staging.attribute(id, &name).map(str::to_owned)),
+                        Some(_) => Ok(state.dom.attribute(id, &name).map(str::to_owned)),
                     }
                 };
                 errors::map_dom(&context, "getAttribute", result)
@@ -352,11 +352,11 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    match state.staging.node(id) {
+                    let state = borrow(&context, &state)?;
+                    match state.dom.node(id) {
                         None => Err(DomError::NodeNotFound(id)),
                         Some(node) if node.element().is_none() => Err(DomError::NodeNotElement(id)),
-                        Some(_) => Ok(state.staging.attribute(id, &name).is_some()),
+                        Some(_) => Ok(state.dom.attribute(id, &name).is_some()),
                     }
                 };
                 errors::map_dom(&context, "hasAttribute", result)
@@ -370,8 +370,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String, value: String| -> Result<()> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.set_attribute(id, name, value)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.set_attribute(id, name, value)
                 };
                 errors::map_dom(&context, "setAttribute", result)
             }
@@ -384,8 +384,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String| -> Result<()> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.remove_attribute(id, &name).map(|_| ())
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.remove_attribute(id, &name).map(|_| ())
                 };
                 errors::map_dom(&context, "removeAttribute", result)
             }
@@ -399,8 +399,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let state = lock(&context, &state)?;
-                    state.staging.supports_style_property(id, &name)
+                    let state = borrow(&context, &state)?;
+                    state.dom.supports_style_property(id, &name)
                 };
                 errors::map_dom(&context, "check style property", result)
             }
@@ -413,8 +413,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String, value: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.set_style_property(id, &name, &value)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.set_style_property(id, &name, &value)
                 };
                 errors::map_style(&context, "set style property", result)
             }
@@ -427,8 +427,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String, name: String| -> Result<bool> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
-                    state.staging.remove_style_property(id, &name)
+                    let mut state = borrow_mut(&context, &state)?;
+                    state.dom.remove_style_property(id, &name)
                 };
                 errors::map_style(&context, "remove style property", result)
             }
@@ -442,7 +442,7 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             move |context: Ctx<'_>, token: String| -> Result<()> {
                 let id = decode(&context, &token)?;
                 let result = {
-                    let mut state = lock(&context, &state)?;
+                    let mut state = borrow_mut(&context, &state)?;
                     state.acquire_wrapper(id)
                 };
                 errors::map_dom(&context, "acquire node wrapper", result)
@@ -455,7 +455,7 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedDomState) -> Result<()> {
             let state = state.clone();
             move |context: Ctx<'_>, token: String| -> Result<()> {
                 let id = decode(&context, &token)?;
-                let mut state = lock(&context, &state)?;
+                let mut state = borrow_mut(&context, &state)?;
                 state.release_wrapper(id);
                 Ok(())
             }
@@ -473,19 +473,21 @@ fn decode(context: &Ctx<'_>, token: &str) -> Result<NodeId> {
     }
 }
 
-fn lock<'a>(
-    context: &Ctx<'_>,
-    state: &'a SharedDomState,
-) -> Result<MutexGuard<'a, DomPluginState>> {
-    match state.lock() {
-        Ok(state) => Ok(state),
-        Err(_) => errors::poisoned(context),
-    }
+fn borrow<'a>(context: &Ctx<'_>, state: &'a SharedUiDom) -> Result<Ref<'a, UiDomState>> {
+    state
+        .try_borrow()
+        .map_err(|_| errors::borrow_conflict(context))
+}
+
+fn borrow_mut<'a>(context: &Ctx<'_>, state: &'a SharedUiDom) -> Result<RefMut<'a, UiDomState>> {
+    state
+        .try_borrow_mut()
+        .map_err(|_| errors::borrow_conflict(context))
 }
 
 fn read_optional_node(
     context: &Ctx<'_>,
-    state: &SharedDomState,
+    state: &SharedUiDom,
     token: &str,
     operation: &str,
     read: impl FnOnce(
@@ -495,15 +497,15 @@ fn read_optional_node(
 ) -> Result<Option<String>> {
     let id = decode(context, token)?;
     let result = {
-        let state = lock(context, state)?;
-        read(&state.staging, id)
+        let state = borrow(context, state)?;
+        read(&state.dom, id)
     };
     errors::map_dom(context, operation, result).map(|id| id.map(encode_node_id))
 }
 
 fn mutate_two_nodes(
     context: &Ctx<'_>,
-    state: &SharedDomState,
+    state: &SharedUiDom,
     first: &str,
     second: &str,
     operation: &str,
@@ -516,8 +518,8 @@ fn mutate_two_nodes(
     let first = decode(context, first)?;
     let second = decode(context, second)?;
     let result = {
-        let mut state = lock(context, state)?;
-        mutate(&mut state.staging, first, second)
+        let mut state = borrow_mut(context, state)?;
+        mutate(&mut state.dom, first, second)
     };
     errors::map_dom(context, operation, result)
 }
