@@ -13,10 +13,7 @@ use std::{
 };
 
 use crate::{event_loop::EventLoopWaker, window::WindowState};
-use crate::{
-    ElementState, Error, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition,
-    PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId,
-};
+use crate::{Error, LogicalSize, PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId};
 use core_foundation_sys::{
     base::{kCFAllocatorDefault, CFRelease},
     date::CFAbsoluteTimeGetCurrent,
@@ -30,14 +27,13 @@ use objc2::{
     sel, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventTrackingRunLoopMode, NSEventType, NSView,
-    NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventTrackingRunLoopMode,
+    NSView, NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow,
+    NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString,
 };
 use objc2_quartz_core::{kCAGravityTopLeft, CALayer, CAMetalLayer};
 use raw_window_handle::{
@@ -47,11 +43,11 @@ use raw_window_handle::{
 
 use super::PlatformTick;
 
-const MAX_NATIVE_EVENTS_PER_TICK: usize = 256;
 const DORMANT_TIMER_INTERVAL: f64 = 86_400.0;
 
 struct PlatformWakeState {
     run_loop: usize,
+    // hold the pointer to the CFRunLoopSourceRef
     source: Mutex<usize>,
 }
 
@@ -829,149 +825,6 @@ impl PlatformEventLoop {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn pump(&self) {
-        for _ in 0..MAX_NATIVE_EVENTS_PER_TICK {
-            let Some(mapped) = autoreleasepool(|_| {
-                let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                    NSEventMask::Any,
-                    Some(&NSDate::distantPast()),
-                    // SAFETY: This AppKit-provided run-loop mode is initialized by
-                    // Foundation before the application event loop is available.
-                    unsafe { NSDefaultRunLoopMode },
-                    true,
-                )?;
-
-                let mapped = self.map_event(&event);
-                self.app.sendEvent(&event);
-                Some(mapped)
-            }) else {
-                break;
-            };
-
-            if let Some((window_id, event)) = mapped {
-                self.dispatcher.dispatch(NativeEvent { window_id, event });
-            }
-        }
-
-        autoreleasepool(|_| self.app.updateWindows());
-
-        let redraws = {
-            let mut redraws = Vec::new();
-            self.windows.borrow_mut().retain(|_, state| {
-                let Some(state) = state.upgrade() else {
-                    return false;
-                };
-                if state.redraw_requested.swap(false, Ordering::AcqRel) {
-                    redraws.push(NativeEvent {
-                        window_id: state.id,
-                        event: WindowEvent::RedrawRequested,
-                    });
-                }
-                true
-            });
-            redraws
-        };
-        for event in redraws {
-            self.dispatcher.dispatch(event);
-        }
-    }
-
-    fn map_event(&self, event: &NSEvent) -> Option<(WindowId, WindowEvent)> {
-        let state = self
-            .windows
-            .borrow()
-            .get(&event.windowNumber())?
-            .upgrade()?;
-        let event_type = event.r#type();
-        let modifiers = modifiers(event.modifierFlags());
-
-        let event = if event_type == NSEventType::KeyDown || event_type == NSEventType::KeyUp {
-            WindowEvent::KeyboardInput(KeyEvent {
-                key_code: event.keyCode(),
-                text: event.characters().map(|text| text.to_string()),
-                state: if event_type == NSEventType::KeyDown {
-                    ElementState::Pressed
-                } else {
-                    ElementState::Released
-                },
-                repeat: event.isARepeat(),
-                modifiers,
-            })
-        } else if event_type == NSEventType::FlagsChanged {
-            WindowEvent::ModifiersChanged(modifiers)
-        } else if matches!(
-            event_type,
-            NSEventType::MouseMoved
-                | NSEventType::LeftMouseDragged
-                | NSEventType::RightMouseDragged
-                | NSEventType::OtherMouseDragged
-        ) {
-            WindowEvent::CursorMoved {
-                position: cursor_position(event, &state),
-            }
-        } else if matches!(
-            event_type,
-            NSEventType::LeftMouseDown
-                | NSEventType::LeftMouseUp
-                | NSEventType::RightMouseDown
-                | NSEventType::RightMouseUp
-                | NSEventType::OtherMouseDown
-                | NSEventType::OtherMouseUp
-        ) {
-            WindowEvent::MouseInput {
-                state: if matches!(
-                    event_type,
-                    NSEventType::LeftMouseDown
-                        | NSEventType::RightMouseDown
-                        | NSEventType::OtherMouseDown
-                ) {
-                    ElementState::Pressed
-                } else {
-                    ElementState::Released
-                },
-                button: mouse_button(event.buttonNumber()),
-                position: cursor_position(event, &state),
-            }
-        } else if event_type == NSEventType::ScrollWheel {
-            WindowEvent::MouseWheel {
-                delta_x: event.scrollingDeltaX(),
-                delta_y: event.scrollingDeltaY(),
-                precise: event.hasPreciseScrollingDeltas(),
-                position: cursor_position(event, &state),
-            }
-        } else {
-            return None;
-        };
-
-        Some((state.id, event))
-    }
-}
-
-fn cursor_position(event: &NSEvent, state: &WindowState) -> PhysicalPosition<f64> {
-    let scale = state.scale_factor();
-    let location = event.locationInWindow();
-    let height = state.size().height as f64;
-    PhysicalPosition::new(location.x * scale, height - location.y * scale)
-}
-
-fn mouse_button(button: isize) -> MouseButton {
-    match button {
-        0 => MouseButton::Left,
-        1 => MouseButton::Right,
-        2 => MouseButton::Middle,
-        button => MouseButton::Other(button.clamp(0, u16::MAX as isize) as u16),
-    }
-}
-
-fn modifiers(flags: NSEventModifierFlags) -> Modifiers {
-    Modifiers {
-        shift: flags.contains(NSEventModifierFlags::Shift),
-        control: flags.contains(NSEventModifierFlags::Control),
-        alt: flags.contains(NSEventModifierFlags::Option),
-        command: flags.contains(NSEventModifierFlags::Command),
-        caps_lock: flags.contains(NSEventModifierFlags::CapsLock),
     }
 }
 

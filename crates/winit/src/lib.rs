@@ -1,13 +1,10 @@
 //! A deliberately small windowing crate for Burokku.
 //!
-//! The API follows the useful parts of winit's application-handler model, but
-//! [`EventLoop::run_app`] is asynchronous. Native events are drained in small
-//! batches and the driver yields to Tokio whenever the native queue is idle.
-//! [`EventLoop::run_app_external`] inverts ownership so a native main loop can
-//! drive a patched Tokio current-thread runtime and `LocalSet` through shared
-//! wake/timer hooks. macOS is currently implemented; other platform backends
-//! can be added behind the crate's internal boundary without changing either
-//! public API.
+//! The API follows the useful parts of winit's application-handler model.
+//! [`EventLoop::run_app_external`] lets the native main loop drive a patched Tokio
+//! current-thread runtime and `LocalSet` through shared wake/timer hooks. macOS is
+//! currently implemented; other platform backends can be added behind the crate's
+//! internal boundary without changing the public API.
 
 pub mod dpi;
 pub mod event;
