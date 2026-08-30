@@ -168,15 +168,29 @@ calls `ExternalWake`, causing the platform loop to tick and re-arm.
 
 ## AppKit proof of concept
 
-`crates/winit/examples/cf_run_loop_tokio.rs` creates an `NSApplication`, an
-`NSWindow`, a level-0 `CFRunLoopSource`, and a reusable `CFRunLoopTimer`.
-Both source and timer are installed in:
+`burokku-winit` exposes the platform-neutral `EventLoop::run_app_external`
+interface. `EventLoop::external_runtime_builder` returns a current-thread
+builder already connected through an `EventLoopProxy`, which implements Tokio's
+`ExternalWake`. Each platform backend supplies its native wake source, deadline
+timer, and owned main-loop implementation. The macOS backend currently implements that contract
+with a level-0 `CFRunLoopSource` and a reusable `CFRunLoopTimer`; unsupported
+backends can add their own implementation without changing application code.
+
+`crates/winit/examples/cf_run_loop_tokio.rs` uses only this shared interface and
+contains no AppKit or Core Foundation code. It installs selected LLRT 0.9
+modules into the repository's rquickjs runtime and runs
+`crates/winit/examples/cf_run_loop_tokio.js` on a persistent `LocalSet`. The
+script increments a counter every second and fetches `https://example.com`
+every three seconds. LLRT is pinned to a Git revision and shares rquickjs 0.12
+and this workspace's patched Tokio through Cargo dependency resolution.
+
+On macOS, both source and timer are installed in:
 
 - `kCFRunLoopCommonModes`; and
 - `NSEventTrackingRunLoopMode` explicitly.
 
-The explicit tracking-mode registration is what keeps Tokio progressing during
-AppKit's nested live-resize loop.
+The explicit tracking-mode registration is what keeps Tokio, rquickjs, and LLRT
+progressing during AppKit's nested live-resize loop.
 
 Build and run:
 
@@ -186,17 +200,16 @@ cargo run -p burokku-winit --example cf_run_loop_tokio
 
 Manual acceptance procedure:
 
-1. Confirm `timer tick` prints every approximately 250 ms.
-2. Confirm the HTTP status line is printed (or use a reachable host if
-   `example.com` is blocked by the environment).
+1. Confirm `[llrt] count = N` prints approximately once per second.
+2. Confirm `[llrt] fetched example.com: status=200, ...` prints approximately
+   once per three seconds. A sandbox without direct network access may instead
+   print the script's `[llrt] fetch failed: ...` diagnostic.
 3. Grab a window resize handle and continuously resize for at least five
-   seconds. The HTTP probe repeats every two seconds (with a five-second
-   timeout), so observe at least one `network progressed during AppKit loop`
-   line while the drag is still active. Override the endpoint with
-   `TOKIO_EXTERNAL_HTTP_HOST` when needed.
-4. Confirm the window remains responsive and timer output has no multi-second
+   seconds. Observe the counter and at least one fetch attempt while the drag is
+   still active.
+4. Confirm the window remains responsive and counter output has no multi-second
    gap ending only when resize stops.
-5. Confirm the task's main-thread assertion does not fail.
+5. Confirm the Rust main-thread assertions do not fail.
 
 Expected limitation test:
 
@@ -209,11 +222,13 @@ After three seconds, one Tokio task spins synchronously for two seconds. The
 window and timer intentionally stall for those two seconds, demonstrating that
 the patch moves only blocking readiness waiting—not application computation.
 
-The source callback has a reentrancy guard because AppKit can nest run loops.
-A nested notification is deferred by re-signalling the source. During teardown,
-the runtime and its producers are stopped and the Mio reactor is joined while
-the CF source is still retained; only then are source/timer callbacks invalidated
-and released.
+The macOS source callback has a reentrancy guard because AppKit can nest run
+loops. A nested notification sets one pending-retick flag, which is signalled
+only after the outer callback returns to avoid spinning inside the nested loop.
+During teardown, callbacks are unpublished and invalidated first, their CF
+objects remain retained while the runtime and Mio reactor stop, and only then
+are the source and timer released. Callback and shutdown panics are caught long
+enough to complete that cleanup before unwinding resumes on the Rust side.
 
 ## Automated coverage
 

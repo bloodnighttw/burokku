@@ -32,3 +32,5 @@ profile-layouts:
 
 run *args:
     cargo run -p burokku -- {{args}}
+
+mod example

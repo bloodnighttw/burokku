@@ -6,9 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::Notify;
+use tokio::{
+    runtime::{Builder, Runtime, RuntimeFlavor},
+    sync::Notify,
+    task::LocalSet,
+};
 
-use crate::{Window, WindowAttributes, WindowEvent, WindowId};
+use crate::{platform::PlatformTick, Window, WindowAttributes, WindowEvent, WindowId};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(4);
 
@@ -18,6 +22,18 @@ pub enum ControlFlow {
     #[default]
     Wait,
     WaitUntil(Instant),
+}
+
+fn external_deadline(
+    control_flow: ControlFlow,
+    tokio_deadline: Option<Instant>,
+) -> Option<Instant> {
+    match control_flow {
+        ControlFlow::Poll | ControlFlow::Wait => tokio_deadline,
+        ControlFlow::WaitUntil(deadline) => {
+            Some(tokio_deadline.map_or(deadline, |tokio_deadline| tokio_deadline.min(deadline)))
+        }
+    }
 }
 
 /// Receives native application and window events.
@@ -37,14 +53,23 @@ pub trait ApplicationHandler {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {}
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct EventLoopWaker {
     notified: Arc<Notify>,
+    platform: crate::platform::PlatformWake,
 }
 
 impl EventLoopWaker {
+    fn new(platform: crate::platform::PlatformWake) -> Self {
+        Self {
+            notified: Arc::new(Notify::new()),
+            platform,
+        }
+    }
+
     pub(crate) fn wake_up(&self) {
         self.notified.notify_one();
+        self.platform.wake_up();
     }
 }
 
@@ -135,6 +160,12 @@ impl EventLoopProxy {
     }
 }
 
+impl tokio::runtime::ExternalWake for EventLoopProxy {
+    fn wake(&self) {
+        self.wake_up();
+    }
+}
+
 struct ActiveEventLoopState {
     control_flow: Cell<ControlFlow>,
     exiting: Cell<bool>,
@@ -177,6 +208,7 @@ impl ActiveEventLoop {
 
     pub fn set_control_flow(&self, control_flow: ControlFlow) {
         self.state.control_flow.set(control_flow);
+        self.waker.wake_up();
     }
 
     pub fn control_flow(&self) -> ControlFlow {
@@ -185,6 +217,7 @@ impl ActiveEventLoop {
 
     pub fn exit(&self) {
         self.state.exiting.set(true);
+        self.waker.wake_up();
     }
 
     pub fn exiting(&self) -> bool {
@@ -202,7 +235,7 @@ pub struct EventLoop {
 impl EventLoop {
     pub fn new() -> crate::Result<Self> {
         let platform = Rc::new(RefCell::new(crate::platform::PlatformEventLoop::new()?));
-        let waker = EventLoopWaker::default();
+        let waker = EventLoopWaker::new(platform.borrow().waker());
 
         Ok(Self {
             active: ActiveEventLoop {
@@ -237,6 +270,17 @@ impl EventLoop {
     /// Return a thread-safe handle that wakes this event loop from `Wait`.
     pub fn create_proxy(&self) -> EventLoopProxy {
         self.active.create_proxy()
+    }
+
+    /// Create a patched Tokio current-thread builder wired to this event loop.
+    ///
+    /// Callers may enable drivers and tune the external tick budget before
+    /// building, then pass the resulting runtime to
+    /// [`run_app_external`](Self::run_app_external).
+    pub fn external_runtime_builder(&self) -> Builder {
+        let mut builder = Builder::new_current_thread();
+        builder.external_event_loop(Arc::new(self.create_proxy()));
+        builder
     }
 
     /// Drive the native event queue as part of the current Tokio runtime.
@@ -340,6 +384,131 @@ impl EventLoop {
             Err(_) => unreachable!("the platform event handler retains the application"),
         }
     }
+
+    /// Let the native main loop drive a patched Tokio current-thread runtime.
+    ///
+    /// This is the inverse of [`run_app`](Self::run_app): the platform owns the
+    /// outer wait while native callbacks perform bounded nonblocking Tokio
+    /// ticks. This keeps nested native loops responsive (for example, AppKit's
+    /// live-resize loop) while local Tokio, QuickJS, or LLRT tasks continue to
+    /// run on the event-loop thread.
+    ///
+    /// Prefer [`external_runtime_builder`](Self::external_runtime_builder),
+    /// which creates a current-thread builder already connected to this event
+    /// loop. `local_set` is retained and supplied to every tick until the native
+    /// loop exits.
+    ///
+    /// The macOS backend is implemented today. Other platform backends can
+    /// implement the same native wake, timer, and main-loop hooks without
+    /// changing this API.
+    pub fn run_app_external<A: ApplicationHandler + 'static>(
+        &mut self,
+        application: A,
+        runtime: Runtime,
+        local_set: LocalSet,
+    ) -> crate::Result<A> {
+        if self.has_run {
+            return Err(crate::Error::AlreadyRun);
+        }
+        if runtime.handle().runtime_flavor() != RuntimeFlavor::CurrentThread {
+            return Err(crate::Error::InvalidExternalRuntime);
+        }
+        self.has_run = true;
+
+        let application = Rc::new(RefCell::new(application));
+        let events = WindowEventQueue::default();
+        self.platform.borrow().set_handler({
+            let active = self.active.clone();
+            let application = Rc::clone(&application);
+            let deferred = events.clone();
+            move |window_id, event| {
+                dispatch_or_defer(
+                    &application,
+                    &deferred,
+                    window_id,
+                    event,
+                    |application, window_id, event| {
+                        application.window_event(&active, window_id, event);
+                    },
+                );
+            }
+        });
+        let mut handler_guard = EventHandlerGuard::new({
+            let platform = Rc::clone(&self.platform);
+            move || platform.borrow().clear_handler()
+        });
+
+        application.borrow_mut().resumed(&self.active);
+        events.drain(|window_id, event| {
+            application
+                .borrow_mut()
+                .window_event(&self.active, window_id, event);
+        });
+
+        let runtime = RefCell::new(Some(runtime));
+        let local_set = RefCell::new(Some(local_set));
+        let run_result = self.platform.borrow().run_external(
+            || {
+                if self.active.exiting() {
+                    return PlatformTick {
+                        next_deadline: None,
+                        exit: true,
+                    };
+                }
+
+                let tick = {
+                    let runtime = runtime.borrow();
+                    let mut local_set = local_set.borrow_mut();
+                    runtime
+                        .as_ref()
+                        .expect("external runtime remains available while ticking")
+                        .tick_nonblocking_with_local_set(
+                            local_set
+                                .as_mut()
+                                .expect("external LocalSet remains available while ticking"),
+                        )
+                };
+
+                events.drain(|window_id, event| {
+                    application
+                        .borrow_mut()
+                        .window_event(&self.active, window_id, event);
+                });
+                application.borrow_mut().about_to_wait(&self.active);
+                events.drain(|window_id, event| {
+                    application
+                        .borrow_mut()
+                        .window_event(&self.active, window_id, event);
+                });
+
+                let control_flow = self.active.control_flow();
+                if control_flow == ControlFlow::Poll {
+                    self.waker.wake_up();
+                }
+                let next_deadline = external_deadline(control_flow, tick.next_deadline);
+
+                PlatformTick {
+                    next_deadline,
+                    exit: self.active.exiting(),
+                }
+            },
+            || {
+                // Cancel local/LLRT work first, then stop and join Tokio's
+                // reactor while the native wake source is still retained.
+                drop(local_set.borrow_mut().take());
+                drop(runtime.borrow_mut().take());
+            },
+        );
+
+        application.borrow_mut().exiting(&self.active);
+        handler_guard.clear();
+        run_result?;
+
+        match Rc::try_unwrap(application) {
+            Ok(application) => Ok(application.into_inner()),
+            Err(_) => unreachable!("the platform event handler retains the application"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +519,35 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn external_deadline_uses_the_earliest_application_or_tokio_timer() {
+        let now = Instant::now();
+        let application = now + Duration::from_secs(2);
+        let tokio = now + Duration::from_secs(1);
+
+        assert_eq!(
+            external_deadline(ControlFlow::WaitUntil(application), Some(tokio)),
+            Some(tokio)
+        );
+        assert_eq!(
+            external_deadline(ControlFlow::WaitUntil(application), None),
+            Some(application)
+        );
+        assert_eq!(
+            external_deadline(ControlFlow::Wait, Some(tokio)),
+            Some(tokio)
+        );
+    }
+
+    #[test]
+    fn event_loop_proxy_is_a_thread_safe_external_wake() {
+        static_assertions::assert_impl_all!(
+            EventLoopProxy: Send,
+            Sync,
+            tokio::runtime::ExternalWake
+        );
+    }
 
     #[test]
     fn cancelling_a_guarded_future_runs_handler_cleanup() {
