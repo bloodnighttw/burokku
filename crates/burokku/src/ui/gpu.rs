@@ -285,16 +285,6 @@ impl WindowRenderer {
         self.config.width = size.width;
         self.config.height = size.height;
         self.configure_surface_transition(graphics);
-        let (renderer, resources) = Renderer::new(
-            &graphics.device,
-            &RenderTargetConfig {
-                format: self.config.format,
-                width: size.width,
-                height: size.height,
-            },
-        );
-        self.renderer = renderer;
-        self.resources = resources;
         Ok(())
     }
 
