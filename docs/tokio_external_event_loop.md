@@ -169,9 +169,9 @@ calls `ExternalWake`, causing the platform loop to tick and re-arm.
 ## AppKit proof of concept
 
 `burokku-winit` exposes the platform-neutral `EventLoop::run_app_external`
-interface. `EventLoop::external_runtime_builder` returns a current-thread
-builder already connected through an `EventLoopProxy`, which implements Tokio's
-`ExternalWake`. Each platform backend supplies its native wake source, deadline
+interface. It builds and owns a current-thread runtime connected through an
+`EventLoopProxy`, which implements Tokio's `ExternalWake`; callers cannot pass
+an unwired runtime. Each platform backend supplies its native wake source, deadline
 timer, and owned main-loop implementation. The macOS backend currently implements that contract
 with a level-0 `CFRunLoopSource` and a reusable `CFRunLoopTimer`; unsupported
 backends can add their own implementation without changing application code.

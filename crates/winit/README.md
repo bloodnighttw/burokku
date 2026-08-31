@@ -83,9 +83,8 @@ Adjust the paths when `burokku-winit` is consumed from another repository.
 
 ## Minimal application
 
-Create the event loop on the macOS process main thread, build the runtime from
-`external_runtime_builder`, and pass one persistent `LocalSet` to
-`run_app_external`:
+Create the event loop and one persistent `LocalSet` on the macOS process main
+thread, then pass the `LocalSet` to `run_app_external`:
 
 ```rust
 use burokku_winit::{
@@ -145,11 +144,6 @@ impl ApplicationHandler for App {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop = EventLoop::new()?;
-    let runtime = event_loop
-        .external_runtime_builder()
-        .enable_all()
-        .external_tick_budget(64)
-        .build()?;
     let local_set = LocalSet::new();
 
     // Spawn thread-affine work before entering the native loop if needed.
@@ -157,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // QuickJS/LLRT or other !Send work can live here.
     });
 
-    let _app = event_loop.run_app_external(App::default(), runtime, local_set)?;
+    let _app = event_loop.run_app_external(App::default(), local_set)?;
     Ok(())
 }
 ```
@@ -268,10 +262,9 @@ coordinates and sizes reported by events are physical pixels.
 
 ## Runtime behavior and constraints
 
-The external runtime must be built with Tokio's **current-thread** scheduler.
-Passing a multi-thread runtime returns `Error::InvalidExternalRuntime`. Prefer
-`EventLoop::external_runtime_builder()` because it creates the correct builder
-and wires Tokio's external wake callback to the native loop.
+`run_app_external` builds and owns a Tokio **current-thread** runtime and wires
+its external wake callback to the native loop. Callers cannot supply an unwired
+runtime.
 
 Each native callback performs nonblocking reactor work, advances timers, polls
 the persistent `LocalSet`, and polls at most the configured number of regular
@@ -290,8 +283,7 @@ Additional constraints:
 - An `EventLoop` can be run only once; a second call returns `Error::AlreadyRun`.
 - On macOS, event-loop creation and driving must happen on the process main
   thread or `Error::NotMainThread` is returned.
-- Keep one persistent `LocalSet`; do not alternate different local sets or mix
-  external ticks with another driver for the same runtime.
+- Keep one persistent `LocalSet`; do not alternate different local sets.
 - Tokio paused/virtual time is not supported by native deadline driving.
 - `ControlFlow::Poll` can increase CPU and battery use.
 - Linux, Windows, Wayland, X11, and WASI native backends are not implemented.

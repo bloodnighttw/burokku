@@ -161,11 +161,6 @@ impl Burokku {
     pub fn run(self) -> Result<(), BurokkuError> {
         let mut event_loop = winit::EventLoop::new()?;
         let proxy = event_loop.create_proxy();
-        let runtime = event_loop
-            .external_runtime_builder()
-            .enable_all()
-            .external_tick_budget(64)
-            .build()?;
         let local_set = tokio::task::LocalSet::new();
 
         let (dom_plugin, dom) = DomPlugin::new();
@@ -185,7 +180,7 @@ impl Burokku {
             shutdown,
         ));
 
-        let host = event_loop.run_app_external(host, runtime, local_set)?;
+        let host = event_loop.run_app_external(host, local_set)?;
         if let Some(error) = host.fatal_error() {
             return Err(BurokkuError::Host(error.to_string()));
         }

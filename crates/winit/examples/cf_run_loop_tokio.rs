@@ -78,11 +78,6 @@ impl ApplicationHandler for App {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop = EventLoop::new()?;
     let failure_proxy = event_loop.create_proxy();
-    let runtime = event_loop
-        .external_runtime_builder()
-        .enable_all()
-        .external_tick_budget(64)
-        .build()?;
     let main_thread = std::thread::current().id();
     let local_set = LocalSet::new();
     let failure = Rc::new(RefCell::new(None));
@@ -127,7 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Opt in to the expected limitation:
     // TOKIO_EXTERNAL_CPU_BLOCK=1 cargo run -p burokku-winit --example cf_run_loop_tokio
     if std::env::var_os("TOKIO_EXTERNAL_CPU_BLOCK").is_some() {
-        runtime.spawn(async {
+        local_set.spawn_local(async {
             tokio::time::sleep(Duration::from_secs(3)).await;
             println!("starting expected two-second main-thread blockage");
             let end = Instant::now() + Duration::from_secs(2);
@@ -138,7 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let app = event_loop.run_app_external(App::new(Rc::clone(&failure)), runtime, local_set)?;
+    let app = event_loop.run_app_external(App::new(Rc::clone(&failure)), local_set)?;
     if let Some(error) = app.failure.borrow_mut().take() {
         return Err(std::io::Error::other(error).into());
     }

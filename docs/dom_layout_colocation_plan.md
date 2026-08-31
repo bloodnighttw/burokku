@@ -87,17 +87,12 @@ LayoutEngine::compute
 ```rust
 pub fn run(self) -> Result<(), BurokkuError> {
     let mut event_loop = winit::EventLoop::new()?;
-    let runtime = event_loop
-        .external_runtime_builder()
-        .enable_all()
-        .external_tick_budget(64)
-        .build()?;
     let local_set = tokio::task::LocalSet::new();
 
     // Spawn main QuickJS bootstrap and its driven runtime on `local_set`.
 
     let host = ApplicationHost::new(shared_dom, text, lifecycle);
-    let host = event_loop.run_app_external(host, runtime, local_set)?;
+    let host = event_loop.run_app_external(host, local_set)?;
     host.result()
 }
 ```
@@ -279,10 +274,8 @@ Replace the obsolete two-thread snapshot architecture in `crates/burokku/plan.md
 
 Add application assembly using:
 
-- `EventLoop::external_runtime_builder`;
-- `Builder::external_tick_budget`;
 - one persistent `LocalSet`;
-- `EventLoop::run_app_external`.
+- `EventLoop::run_app_external`, which builds and owns the wired Tokio runtime.
 
 Build the main JavaScript runtime inside a `LocalSet` task, spawn its `RuntimeDriver` with `spawn_local`, evaluate the application script on that runtime, and report initialization failures to the host.
 
@@ -526,13 +519,12 @@ Exit criteria:
 
 1. Change `BurokkuBuilder` from `DualRuntimeBuilder` to `RuntimeBuilder`.
 2. Make `Burokku::run` synchronous.
-3. Build patched Tokio through `EventLoop::external_runtime_builder`.
-4. Supply one persistent `LocalSet` to `run_app_external`.
-5. Build and drive the single QuickJS runtime on that LocalSet.
-6. Install Console, JSON, Timers, and `DomPlugin` once.
-7. Evaluate the application script on the single runtime.
-8. Add startup, fatal-error, and shutdown lifecycle reporting.
-9. Keep publications temporarily to isolate event-loop and runtime-lifecycle changes.
+3. Supply one persistent `LocalSet` to `run_app_external`; it builds and owns patched Tokio.
+4. Build and drive the single QuickJS runtime on that LocalSet.
+5. Install Console, JSON, Timers, and `DomPlugin` once.
+6. Evaluate the application script on the single runtime.
+7. Add startup, fatal-error, and shutdown lifecycle reporting.
+8. Keep publications temporarily to isolate event-loop and runtime-lifecycle changes.
 
 Exit criteria:
 
