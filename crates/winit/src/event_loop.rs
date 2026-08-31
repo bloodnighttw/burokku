@@ -7,7 +7,7 @@ use std::{
 };
 
 use tokio::{
-    runtime::{Builder, Runtime, RuntimeFlavor},
+    runtime::{Builder, Runtime},
     task::LocalSet,
 };
 
@@ -287,29 +287,16 @@ impl EventLoop {
         self.active.create_proxy()
     }
 
-    /// Create a patched Tokio current-thread builder wired to this event loop.
-    ///
-    /// Callers may enable drivers and tune the external tick budget before
-    /// building, then pass the resulting runtime to
-    /// [`run_app_external`](Self::run_app_external).
-    pub fn external_runtime_builder(&self) -> Builder {
-        let mut builder = Builder::new_current_thread();
-        builder.external_event_loop(Arc::new(self.create_proxy()));
-        builder
-    }
-
-    /// Let the native main loop drive a patched Tokio current-thread runtime.
+    /// Let the native main loop drive an internally owned Tokio runtime.
     ///
     /// The platform owns the outer wait while native callbacks perform bounded
     /// nonblocking Tokio ticks. This keeps nested native loops responsive
-    /// (for example, AppKit's
-    /// live-resize loop) while local Tokio, QuickJS, or LLRT tasks continue to
-    /// run on the event-loop thread.
+    /// (for example, AppKit's live-resize loop) while local Tokio, QuickJS, or
+    /// LLRT tasks continue to run on the event-loop thread.
     ///
-    /// Prefer [`external_runtime_builder`](Self::external_runtime_builder),
-    /// which creates a current-thread builder already connected to this event
-    /// loop. `local_set` is retained and supplied to every tick until the native
-    /// loop exits.
+    /// The runtime is always a current-thread runtime wired to this event loop's
+    /// native wake source. `local_set` is retained and supplied to every tick
+    /// until the native loop exits.
     ///
     /// The macOS backend is implemented today. Other platform backends can
     /// implement the same native wake, timer, and main-loop hooks without
@@ -317,15 +304,16 @@ impl EventLoop {
     pub fn run_app_external<A: ApplicationHandler + 'static>(
         &mut self,
         application: A,
-        runtime: Runtime,
         local_set: LocalSet,
     ) -> crate::Result<A> {
         if self.has_run {
             return Err(crate::Error::AlreadyRun);
         }
-        if runtime.handle().runtime_flavor() != RuntimeFlavor::CurrentThread {
-            return Err(crate::Error::InvalidExternalRuntime);
-        }
+
+        let mut builder = Builder::new_current_thread();
+        builder.enable_all();
+        builder.external_event_loop(Arc::new(self.create_proxy()));
+        let runtime = builder.build().map_err(crate::Error::ExternalRuntime)?;
         self.has_run = true;
 
         let application = Rc::new(RefCell::new(application));

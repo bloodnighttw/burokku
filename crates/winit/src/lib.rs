@@ -30,8 +30,8 @@ pub enum Error {
     NotMainThread,
     #[error("the event loop has already been run")]
     AlreadyRun,
-    #[error("the external event loop requires a Tokio current-thread runtime")]
-    InvalidExternalRuntime,
+    #[error("failed to build the external Tokio runtime: {0}")]
+    ExternalRuntime(#[source] std::io::Error),
     #[error("the active event loop is no longer available")]
     EventLoopUnavailable,
     #[error("window creation failed: {0}")]
