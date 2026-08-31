@@ -148,13 +148,17 @@ pub(super) fn compute_layout<M: TextMeasurer>(
         return Ok(HashMap::new());
     };
     let depth = layout_container_depth(scratch, root);
+    
     if depth > LAYOUT_TREE_DEPTH_WARNING {
         eprintln!(
             "Burokku warning: layout container depth {depth} exceeds {LAYOUT_TREE_DEPTH_WARNING}",
         );
     }
     if depth > LAYOUT_TREE_DEPTH_LIMIT {
-        panic!("layout container depth {depth} exceeds hard limit {LAYOUT_TREE_DEPTH_LIMIT}");
+        return Err(LayoutError::TreeTooDeep {
+            depth,
+            limit: LAYOUT_TREE_DEPTH_LIMIT,
+        });
     }
     let available_space = Size {
         width: AvailableSpace::Definite(scratch.viewport.width()),
@@ -856,9 +860,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "layout container depth 257 exceeds hard limit 256")]
-    fn container_depth_above_limit_panics_before_taffy() {
+    fn container_depth_above_limit_returns_error_before_taffy() {
         let mut scratch = nested_container_layout(LAYOUT_TREE_DEPTH_LIMIT + 1);
-        compute_layout(&mut scratch, &mut TextEngine::without_system_fonts()).unwrap();
+        let error =
+            compute_layout(&mut scratch, &mut TextEngine::without_system_fonts()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LayoutError::TreeTooDeep {
+                depth: 257,
+                limit: 256
+            }
+        ));
     }
 }
