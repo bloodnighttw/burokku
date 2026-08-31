@@ -21,6 +21,9 @@ use super::{
     topology::{LayoutId, LayoutTopology},
 };
 
+const LAYOUT_TREE_DEPTH_WARNING: usize = 128;
+const LAYOUT_TREE_DEPTH_LIMIT: usize = 256;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TextMeasureRequest<'a> {
     paragraph: &'a ParagraphInput,
@@ -114,6 +117,29 @@ pub(crate) trait TextMeasurer {
     fn retain_sources(&mut self, _sources: &std::collections::HashSet<DomNodeId>) {}
 }
 
+fn layout_container_depth(scratch: &ScratchLayout, root: LayoutId) -> usize {
+    let mut deepest = 0;
+    let mut pending = vec![(root, 0)];
+    while let Some((id, parent_depth)) = pending.pop() {
+        let state = scratch
+            .nodes
+            .get(&id)
+            .expect("prevalidated layout IDs have sidecars");
+        let depth = parent_depth + usize::from(matches!(state.role, LayoutRole::Container));
+        deepest = deepest.max(depth);
+        pending.extend(
+            scratch
+                .topology
+                .children(id)
+                .expect("prevalidated layout IDs have child lists")
+                .iter()
+                .rev()
+                .map(|&child| (child, depth)),
+        );
+    }
+    deepest
+}
+
 pub(super) fn compute_layout<M: TextMeasurer>(
     scratch: &mut ScratchLayout,
     measurer: &mut M,
@@ -122,7 +148,7 @@ pub(super) fn compute_layout<M: TextMeasurer>(
         return Ok(HashMap::new());
     };
     let depth = layout_container_depth(scratch, root);
-    
+
     if depth > LAYOUT_TREE_DEPTH_WARNING {
         eprintln!(
             "Burokku warning: layout container depth {depth} exceeds {LAYOUT_TREE_DEPTH_WARNING}",
