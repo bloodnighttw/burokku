@@ -267,21 +267,6 @@ impl EventLoop {
         })
     }
 
-    /// Create and show a native window.
-    ///
-    /// This must be called on the platform event-loop thread, before or during
-    /// [`run_app_external`](Self::run_app_external). On macOS, that is the process main thread.
-    pub fn create_window(&mut self, attributes: WindowAttributes) -> crate::Result<Window> {
-        self.active.create_window(attributes)
-    }
-
-    /// Flush pending native window ordering before the external event loop
-    /// starts. This is useful when renderer initialization happens after the
-    /// first Window is created.
-    pub fn flush_windows(&self) {
-        self.platform.borrow().flush_windows();
-    }
-
     /// Return a thread-safe handle that wakes this event loop from `Wait`.
     pub fn create_proxy(&self) -> EventLoopProxy {
         self.active.create_proxy()
