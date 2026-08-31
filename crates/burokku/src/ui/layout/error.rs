@@ -54,6 +54,9 @@ pub(crate) enum LayoutError {
     #[error("layout node {0:?} has no computed sidecar")]
     MissingLayoutSidecar(LayoutId),
 
+    #[error("layout container depth {depth} exceeds hard limit {limit}")]
+    TreeTooDeep { depth: usize, limit: usize },
+
     #[error("paragraph {paragraph:?} measurement failed: {message}")]
     TextMeasurement { paragraph: NodeId, message: String },
 
