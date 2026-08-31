@@ -121,6 +121,19 @@ pub(super) fn compute_layout<M: TextMeasurer>(
     let Some(root) = scratch.topology.root() else {
         return Ok(HashMap::new());
     };
+    let depth = layout_container_depth(scratch, root);
+    
+    if depth > LAYOUT_TREE_DEPTH_WARNING {
+        eprintln!(
+            "Burokku warning: layout container depth {depth} exceeds {LAYOUT_TREE_DEPTH_WARNING}",
+        );
+    }
+    if depth > LAYOUT_TREE_DEPTH_LIMIT {
+        return Err(LayoutError::TreeTooDeep {
+            depth,
+            limit: LAYOUT_TREE_DEPTH_LIMIT,
+        });
+    }
     let available_space = Size {
         width: AvailableSpace::Definite(scratch.viewport.width()),
         height: AvailableSpace::Definite(scratch.viewport.height()),
@@ -793,5 +806,45 @@ mod tests {
                 .definite_value(),
             Some(80.0)
         );
+    }
+
+    fn nested_container_layout(depth: usize) -> ScratchLayout {
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        dom.append_child(dom.root(), window).unwrap();
+        let mut parent = window;
+        for _ in 1..depth {
+            let child = dom.create_element(Element::from_tag(ElementTag::Div));
+            dom.append_child(parent, child).unwrap();
+            parent = child;
+        }
+        reconcile_full(&dom, LogicalViewport::new(300.0, 200.0).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn container_depth_limit_computes_without_overflow() {
+        let mut scratch = nested_container_layout(LAYOUT_TREE_DEPTH_LIMIT);
+        let root = scratch.topology.root().unwrap();
+        assert_eq!(
+            layout_container_depth(&scratch, root),
+            LAYOUT_TREE_DEPTH_LIMIT
+        );
+
+        compute_layout(&mut scratch, &mut TextEngine::without_system_fonts()).unwrap();
+    }
+
+    #[test]
+    fn container_depth_above_limit_returns_error_before_taffy() {
+        let mut scratch = nested_container_layout(LAYOUT_TREE_DEPTH_LIMIT + 1);
+        let error =
+            compute_layout(&mut scratch, &mut TextEngine::without_system_fonts()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LayoutError::TreeTooDeep {
+                depth: 257,
+                limit: 256
+            }
+        ));
     }
 }
