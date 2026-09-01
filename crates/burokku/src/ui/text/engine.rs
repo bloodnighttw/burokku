@@ -315,6 +315,11 @@ impl TextEngine {
     }
 
     #[cfg(test)]
+    pub(crate) fn cached_source_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    #[cfg(test)]
     fn cached_variant_count(&self, source: NodeId) -> usize {
         self.cache
             .get(&source)

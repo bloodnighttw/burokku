@@ -60,17 +60,33 @@ impl<M: TextMeasurer> LayoutEngine<M> {
                 .expect("the matching current layout was checked above"));
         }
 
-        let mut scratch = reconcile_full(dom, viewport)?;
-        let final_paragraphs = compute_layout(&mut scratch, &mut self.measurer)?;
-        let after_generation = self.measurer.generation();
-        if after_generation != text_generation {
-            return Err(LayoutError::TextGenerationChanged {
-                before: text_generation,
-                after: after_generation,
-            });
-        }
-        let active_text_sources = final_paragraphs.keys().copied().collect::<HashSet<_>>();
-        let next = ComputedLayout::from_scratch(scratch, text_generation, final_paragraphs)?;
+        let candidate = (|| {
+            let mut scratch = reconcile_full(dom, viewport)?;
+            let final_paragraphs = compute_layout(&mut scratch, &mut self.measurer)?;
+            let after_generation = self.measurer.generation();
+            if after_generation != text_generation {
+                return Err(LayoutError::TextGenerationChanged {
+                    before: text_generation,
+                    after: after_generation,
+                });
+            }
+            let active_text_sources = final_paragraphs.keys().copied().collect::<HashSet<_>>();
+            let next = ComputedLayout::from_scratch(scratch, text_generation, final_paragraphs)?;
+            Ok::<_, LayoutError>((next, active_text_sources))
+        })();
+
+        let (next, active_text_sources) = match candidate {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                let current_text_sources = self
+                    .current
+                    .as_ref()
+                    .map(|current| current.text_sources().collect::<HashSet<_>>())
+                    .unwrap_or_default();
+                self.measurer.retain_sources(&current_text_sources);
+                return Err(error);
+            }
+        };
         self.measurer.retain_sources(&active_text_sources);
         self.current = Some(next);
         Ok(self
@@ -236,6 +252,10 @@ mod tests {
             } else {
                 Ok(TextMeasurement::new(size, Some(baseline)))
             }
+        }
+
+        fn retain_sources(&mut self, sources: &HashSet<crate::ui::elements::NodeId>) {
+            self.text.retain_sources(sources);
         }
     }
 
@@ -617,6 +637,45 @@ mod tests {
         let current = engine.current().unwrap();
         assert_eq!(current.revision(), old_revision);
         assert!(current.box_for(paragraph).is_none());
+    }
+
+    #[test]
+    fn failed_candidates_retain_only_the_current_frame_text_sources() {
+        let mut staging = Dom::new();
+        let window = element(&mut staging, ElementTag::Window);
+        let parking = element(&mut staging, ElementTag::Div);
+        let initial_paragraph = element(&mut staging, ElementTag::Text);
+        let initial_text = staging.create_text("current");
+        staging.append_child(staging.root(), window).unwrap();
+        staging.append_child(window, initial_paragraph).unwrap();
+        staging
+            .append_child(initial_paragraph, initial_text)
+            .unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+        engine.compute(&staging, viewport(300.0, 200.0)).unwrap();
+        let current_revision = engine.current().unwrap().revision();
+        assert_eq!(engine.measurer.text.cached_source_count(), 1);
+
+        engine.measurer.final_width_delta = 1.0;
+        let mut candidate_paragraph = initial_paragraph;
+        for attempt in 0..3 {
+            staging.append_child(parking, candidate_paragraph).unwrap();
+            candidate_paragraph = element(&mut staging, ElementTag::Text);
+            let text = staging.create_text(format!("candidate {attempt}"));
+            staging.append_child(window, candidate_paragraph).unwrap();
+            staging.append_child(candidate_paragraph, text).unwrap();
+
+            let error = engine
+                .compute(&staging, viewport(300.0, 200.0))
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                LayoutError::InvalidFinalParagraph(source) if source == candidate_paragraph
+            ));
+            assert_eq!(engine.current().unwrap().revision(), current_revision);
+            assert_eq!(engine.measurer.text.cached_source_count(), 1);
+        }
     }
 
     #[test]
