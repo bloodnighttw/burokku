@@ -113,6 +113,10 @@ impl ComputedLayout {
         self.final_paragraphs.get(&source)
     }
 
+    pub(crate) fn text_sources(&self) -> impl Iterator<Item = DomNodeId> + '_ {
+        self.final_paragraphs.keys().copied()
+    }
+
     pub(crate) fn layout_children(&self, id: DomNodeId) -> Option<Vec<DomNodeId>> {
         let layout_id = self.topology.layout_id(id)?;
         Some(
