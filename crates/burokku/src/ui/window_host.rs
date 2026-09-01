@@ -184,6 +184,10 @@ impl PreparedWindow {
         }
     }
 
+    pub(crate) fn spec(&self) -> &WindowSpec {
+        &self.replacement.candidate().spec
+    }
+
     pub(crate) fn window(&self) -> &Rc<Window> {
         self.replacement.candidate().window()
     }

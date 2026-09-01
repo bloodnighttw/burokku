@@ -17,7 +17,7 @@ use super::{
     layout::{LayoutEngine, LayoutError, LogicalViewport},
     scene::{BuiltScene, SceneError, ScenePlan},
     text::TextEngine,
-    window_host::{WindowChange, WindowHostError, WindowManager, WindowSpec},
+    window_host::{PreparedWindow, WindowChange, WindowHostError, WindowManager, WindowSpec},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +90,22 @@ fn graphics_initialization_stop_is_fatal(status: PendingWindowStatus) -> bool {
     status == PendingWindowStatus::Current
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ReplacementRenderer<R> {
+    Reuse(R),
+    SelectCompatibleAdapter,
+}
+
+fn classify_replacement_renderer<R>(
+    result: Result<R, GraphicsError>,
+) -> Result<ReplacementRenderer<R>, GraphicsError> {
+    match result {
+        Ok(renderer) => Ok(ReplacementRenderer::Reuse(renderer)),
+        Err(GraphicsError::UnsupportedSurface) => Ok(ReplacementRenderer::SelectCompatibleAdapter),
+        Err(error) => Err(error),
+    }
+}
+
 fn failure_policy(has_presented_frame: bool, kind: FailureKind) -> FailurePolicy {
     match kind {
         FailureKind::WindowSync
@@ -159,12 +175,35 @@ fn presented_frame_is_usable<W: Eq>(
 type GraphicsInitialization = Result<(GraphicsContext, WindowRenderer), GraphicsError>;
 
 #[derive(Debug)]
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn new(task: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(task))
+    }
+
+    fn take(&mut self) -> tokio::task::JoinHandle<()> {
+        self.0.take().expect("abort-on-drop task remains installed")
+    }
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = self.0.as_ref() {
+            task.abort();
+        }
     }
+}
+
+async fn cancel_graphics_task<T, W>(
+    task: tokio::task::JoinHandle<()>,
+    result: oneshot::Receiver<T>,
+    window: W,
+) {
+    task.abort();
+    let _ = task.await;
+    drop(result);
+    drop(window);
 }
 
 #[derive(Debug)]
@@ -177,13 +216,23 @@ struct PendingGraphicsInitialization {
 }
 
 #[derive(Debug)]
+struct PendingGraphicsReplacement {
+    revision: u64,
+    // Drop any queued renderer before closing its candidate Window.
+    result: oneshot::Receiver<GraphicsInitialization>,
+    _task: AbortOnDrop,
+    prepared: PreparedWindow,
+}
+
+#[derive(Debug)]
 pub(crate) struct ApplicationHost {
     dom: SharedUiDom,
     observed_revision: Option<u64>,
     graphics: Option<GraphicsContext>,
     pending_graphics: Option<PendingGraphicsInitialization>,
-    windows: WindowManager,
+    pending_graphics_replacement: Option<PendingGraphicsReplacement>,
     renderer: Option<WindowRenderer>,
+    windows: WindowManager,
     layout: LayoutEngine<TextEngine>,
     presented: Option<PresentedFrame>,
     last_frame_failure: Option<FrameFailure>,
@@ -203,8 +252,9 @@ impl ApplicationHost {
             // surface can constrain adapter selection.
             graphics: None,
             pending_graphics: None,
-            windows: WindowManager::default(),
+            pending_graphics_replacement: None,
             renderer: None,
+            windows: WindowManager::default(),
             layout: LayoutEngine::new(text),
             presented: None,
             last_frame_failure: None,
@@ -279,7 +329,34 @@ impl ApplicationHost {
             dom_id,
             window_id,
             result,
-            _task: AbortOnDrop(task),
+            _task: AbortOnDrop::new(task),
+        });
+    }
+
+    fn begin_graphics_replacement(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        revision: u64,
+        prepared: PreparedWindow,
+    ) {
+        debug_assert!(self.graphics.is_some());
+        debug_assert!(self.renderer.is_some());
+        debug_assert!(self.pending_graphics.is_none());
+        debug_assert!(self.pending_graphics_replacement.is_none());
+
+        let window = Rc::clone(prepared.window());
+        let proxy = event_loop.create_proxy();
+        let (sender, result) = oneshot::channel();
+        let task = tokio::task::spawn_local(async move {
+            let initialized = GraphicsContext::for_window(window).await;
+            let _ = sender.send(initialized);
+            proxy.wake_up();
+        });
+        self.pending_graphics_replacement = Some(PendingGraphicsReplacement {
+            revision,
+            prepared,
+            result,
+            _task: AbortOnDrop::new(task),
         });
     }
 
@@ -343,8 +420,83 @@ impl ApplicationHost {
         }
     }
 
+    fn complete_graphics_replacement(&mut self) -> Result<(), HostError> {
+        let Some(pending) = self.pending_graphics_replacement.as_mut() else {
+            return Ok(());
+        };
+
+        let received = pending.result.try_recv();
+        if matches!(received, Err(oneshot::error::TryRecvError::Empty)) {
+            return Ok(());
+        }
+
+        let is_current = {
+            let state = self
+                .dom
+                .try_borrow()
+                .map_err(|_| HostError::DomBorrowConflict)?;
+            WindowSpec::from_dom(&state.dom)?.as_ref() == Some(pending.prepared.spec())
+        };
+        let pending = self
+            .pending_graphics_replacement
+            .take()
+            .expect("completed graphics replacement remains installed");
+        if !is_current {
+            drop(received);
+            drop(pending);
+            return Ok(());
+        }
+
+        let initialized = match received {
+            Ok(initialized) => initialized,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return self.handle_window_sync_failure(
+                    pending.revision,
+                    HostError::GraphicsInitializationStopped,
+                );
+            }
+            Err(oneshot::error::TryRecvError::Empty) => unreachable!(),
+        };
+        match initialized {
+            Ok((graphics, renderer)) => {
+                let previous_graphics = self.graphics.replace(graphics);
+                let (previous_window, previous_renderer) =
+                    pending
+                        .prepared
+                        .commit_with(&mut self.windows, &mut self.renderer, renderer);
+                self.discard_stale_presented_frame();
+                drop(previous_renderer);
+                drop(previous_graphics);
+                if let Some(previous_window) = previous_window {
+                    previous_window.close();
+                }
+                self.ever_had_window = true;
+                if let Some(window) = self.windows.current() {
+                    window.window().request_redraw();
+                }
+                Ok(())
+            }
+            Err(error) => self.handle_window_sync_failure(pending.revision, error.into()),
+        }
+    }
+
     fn cancel_graphics_initialization(&mut self) {
         drop(self.pending_graphics.take());
+        self.cancel_graphics_replacement();
+    }
+
+    fn cancel_graphics_replacement(&mut self) {
+        let Some(pending) = self.pending_graphics_replacement.take() else {
+            return;
+        };
+        let PendingGraphicsReplacement {
+            result,
+            _task: mut task_guard,
+            prepared,
+            ..
+        } = pending;
+        let task = task_guard.take();
+        tokio::task::spawn_local(cancel_graphics_task(task, result, prepared));
     }
 
     fn handle_window_sync_failure(
@@ -398,6 +550,19 @@ impl ApplicationHost {
         if self.observed_revision == Some(revision) {
             return Ok(());
         }
+        if self
+            .pending_graphics_replacement
+            .as_ref()
+            .is_some_and(|pending| desired.as_ref() == Some(pending.prepared.spec()))
+        {
+            self.pending_graphics_replacement
+                .as_mut()
+                .expect("matching graphics replacement remains installed")
+                .revision = revision;
+            self.observed_revision = Some(revision);
+            return Ok(());
+        }
+        self.cancel_graphics_replacement();
 
         // Record observation before native work so a rejected specification is
         // not retried on every event-loop turn.
@@ -458,16 +623,21 @@ impl ApplicationHost {
                         .graphics
                         .as_ref()
                         .ok_or(HostError::MissingGraphicsContext)?;
-                    let candidate_renderer =
-                        match WindowRenderer::new(graphics, Rc::clone(prepared.window())) {
-                            Ok(renderer) => renderer,
-                            Err(error) => {
-                                // `prepared` closes only the candidate on return. The
-                                // active Window, renderer, and presented plan remain
-                                // installed when this is recoverable.
-                                return self.handle_window_sync_failure(revision, error.into());
-                            }
-                        };
+                    let candidate_renderer = match classify_replacement_renderer(
+                        WindowRenderer::new(graphics, Rc::clone(prepared.window())),
+                    ) {
+                        Ok(ReplacementRenderer::Reuse(renderer)) => renderer,
+                        Ok(ReplacementRenderer::SelectCompatibleAdapter) => {
+                            self.begin_graphics_replacement(event_loop, revision, prepared);
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            // `prepared` closes only the candidate on return. The
+                            // active Window, renderer, and presented plan remain
+                            // installed when this is recoverable.
+                            return self.handle_window_sync_failure(revision, error.into());
+                        }
+                    };
 
                     // No fallible work remains: install the already-created
                     // renderer with its candidate Window before releasing the old
@@ -732,27 +902,41 @@ impl ApplicationHandler for ApplicationHost {
                     }
                 }
             }
-            WindowEvent::RedrawRequested if self.pending_graphics.is_some() => {}
-            WindowEvent::RedrawRequested => match self.redraw() {
-                Ok(PresentationOutcome::Reconfigure) => {
-                    self.discard_stale_presented_frame();
-                    if let Some(window) = self.windows.current() {
-                        window.window().request_redraw();
+            WindowEvent::RedrawRequested => {
+                if let Err(error) = self.sync_dom(event_loop) {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                if self.pending_graphics.is_some()
+                    || self.pending_graphics_replacement.is_some()
+                    || self
+                        .windows
+                        .current()
+                        .is_none_or(|window| window.id() != window_id)
+                {
+                    return;
+                }
+                match self.redraw() {
+                    Ok(PresentationOutcome::Reconfigure) => {
+                        self.discard_stale_presented_frame();
+                        if let Some(window) = self.windows.current() {
+                            window.window().request_redraw();
+                        }
+                    }
+                    Ok(PresentationOutcome::Timeout) => {
+                        if let Some(window) = self.windows.current() {
+                            window.window().request_redraw();
+                        }
+                    }
+                    Ok(PresentationOutcome::Presented { .. } | PresentationOutcome::Occluded) => {}
+                    Err(failure) => {
+                        // Recoverable candidate failures retain the Window,
+                        // renderer, and presented hit-test plan. Do not request an
+                        // immediate retry for the unchanged revision/viewport.
+                        self.handle_redraw_failure(event_loop, failure);
                     }
                 }
-                Ok(PresentationOutcome::Timeout) => {
-                    if let Some(window) = self.windows.current() {
-                        window.window().request_redraw();
-                    }
-                }
-                Ok(PresentationOutcome::Presented { .. } | PresentationOutcome::Occluded) => {}
-                Err(failure) => {
-                    // Recoverable candidate failures retain the Window,
-                    // renderer, and presented hit-test plan. Do not request an
-                    // immediate retry for the unchanged revision/viewport.
-                    self.handle_redraw_failure(event_loop, failure);
-                }
-            },
+            }
             WindowEvent::CursorMoved { position } => {
                 self.discard_stale_presented_frame();
                 self.cursor_target = self
@@ -825,6 +1009,7 @@ impl ApplicationHandler for ApplicationHost {
         if let Err(error) = self
             .sync_dom(event_loop)
             .and_then(|()| self.complete_graphics_initialization())
+            .and_then(|()| self.complete_graphics_replacement())
             .and_then(|()| self.sync_dom(event_loop))
         {
             self.fail(event_loop, error);
@@ -964,10 +1149,30 @@ pub(crate) enum HostError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use crate::ui::elements::{Dom, Element, ElementTag};
 
     use super::*;
 
+    #[derive(Debug)]
+    struct DropProbe {
+        name: &'static str,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push(self.name);
+        }
+    }
+
+    fn drop_probe(name: &'static str, events: &Arc<Mutex<Vec<&'static str>>>) -> DropProbe {
+        DropProbe {
+            name,
+            events: Arc::clone(events),
+        }
+    }
     fn scene_plan(dom: &Dom) -> ScenePlan {
         let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
         let computed = layout
@@ -1058,17 +1263,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn incompatible_replacement_surface_selects_another_adapter() {
+        let adapter_a = 1_u8;
+        let adapter_b = 2_u8;
+
+        assert!(matches!(
+            classify_replacement_renderer(Ok::<_, GraphicsError>(adapter_a)),
+            Ok(ReplacementRenderer::Reuse(selected)) if selected == adapter_a
+        ));
+        let selected_for_surface_b =
+            match classify_replacement_renderer(Err::<u8, _>(GraphicsError::UnsupportedSurface)) {
+                Ok(ReplacementRenderer::SelectCompatibleAdapter) => adapter_b,
+                other => panic!("surface B should reselect its adapter, got {other:?}"),
+            };
+
+        assert_eq!(selected_for_surface_b, adapter_b);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cancelling_stalled_graphics_initialization_aborts_its_task() {
         let task = tokio::spawn(std::future::pending());
         let abort = task.abort_handle();
-        let task = AbortOnDrop(task);
+        let task = AbortOnDrop::new(task);
 
         tokio::task::yield_now().await;
         drop(task);
         tokio::task::yield_now().await;
 
         assert!(abort.is_finished());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_graphics_drops_surface_before_candidate_window() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (sender, receiver) = oneshot::channel::<DropProbe>();
+        let task_events = Arc::clone(&events);
+        let task = tokio::spawn(async move {
+            let _surface = drop_probe("surface", &task_events);
+            let _sender = sender;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        cancel_graphics_task(task, receiver, drop_probe("window", &events)).await;
+        assert_eq!(*events.lock().unwrap(), ["surface", "window"]);
+
+        events.lock().unwrap().clear();
+        let (sender, receiver) = oneshot::channel();
+        let (ready_sender, ready_receiver) = oneshot::channel();
+        let task_events = Arc::clone(&events);
+        let task = tokio::spawn(async move {
+            let _ = sender.send(drop_probe("surface", &task_events));
+            let _ = ready_sender.send(());
+            std::future::pending::<()>().await;
+        });
+        ready_receiver.await.unwrap();
+
+        cancel_graphics_task(task, receiver, drop_probe("window", &events)).await;
+        assert_eq!(*events.lock().unwrap(), ["surface", "window"]);
     }
 
     #[test]
