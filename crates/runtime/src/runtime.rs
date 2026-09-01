@@ -1,6 +1,6 @@
 use crate::{
     event_loop::{self, RuntimeControl},
-    MacrotaskQueue, Result, RuntimeBuilder,
+    JsTaskQueue, Result, RuntimeBuilder,
 };
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, FromJs, Promise, ThrowResultExt};
 use std::{future::Future, marker::PhantomData, pin::Pin, rc::Rc};
@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 /// All JavaScript entry points are submitted to the isolate's macrotask queue.
 /// JavaScript executes only where the associated [`RuntimeDriver`] is polled.
 pub struct Runtime {
-    macrotasks: MacrotaskQueue,
+    macrotasks: JsTaskQueue,
     control: RuntimeControl,
     shutdown_requested: bool,
 }
@@ -88,7 +88,7 @@ impl Runtime {
     }
 
     /// Clone a handle that can enqueue native macrotasks in this runtime.
-    pub fn macrotask_queue(&self) -> MacrotaskQueue {
+    pub fn macrotask_queue(&self) -> JsTaskQueue {
         self.macrotasks.clone()
     }
 
@@ -184,7 +184,7 @@ impl std::fmt::Debug for RuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::Runtime;
-    use crate::{MacrotaskQueue, MacrotaskQueueError};
+    use crate::{JsTaskQueue, JsTaskQueueError};
     use rquickjs::{prelude::Func, Ctx};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -220,7 +220,7 @@ mod tests {
             .run_until(async {
                 fn install_answer(context: &Ctx<'_>) -> crate::Result<()> {
                     context.globals().set("answer", Func::from(|| 42))?;
-                    let queue = MacrotaskQueue::from_context(context)?;
+                    let queue = JsTaskQueue::from_context(context)?;
                     queue
                         .try_enqueue(|context| {
                             context.eval::<(), _>(
@@ -285,10 +285,7 @@ mod tests {
                 let queue = runtime.macrotask_queue();
                 assert_eq!(queue.max_capacity(), 1);
                 queue.try_enqueue(|_| Ok(())).unwrap();
-                assert_eq!(
-                    queue.try_enqueue(|_| Ok(())),
-                    Err(MacrotaskQueueError::Full)
-                );
+                assert_eq!(queue.try_enqueue(|_| Ok(())), Err(JsTaskQueueError::Full));
 
                 let driver = tokio::task::spawn_local(driver.run());
                 runtime.shutdown().await.unwrap();

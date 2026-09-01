@@ -35,14 +35,14 @@ struct ShutdownRequest {
 
 /// Failure to submit a macrotask to an isolate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MacrotaskQueueError {
+pub enum JsTaskQueueError {
     /// The bounded queue has no remaining capacity.
     Full,
     /// The runtime has stopped accepting tasks.
     Closed,
 }
 
-impl std::fmt::Display for MacrotaskQueueError {
+impl std::fmt::Display for JsTaskQueueError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Full => formatter.write_str("the JavaScript macrotask queue is full"),
@@ -51,7 +51,7 @@ impl std::fmt::Display for MacrotaskQueueError {
     }
 }
 
-impl std::error::Error for MacrotaskQueueError {}
+impl std::error::Error for JsTaskQueueError {}
 
 #[derive(Debug)]
 pub(crate) struct RuntimeControl {
@@ -61,7 +61,7 @@ pub(crate) struct RuntimeControl {
 impl RuntimeControl {
     pub(crate) fn request_shutdown(
         &self,
-    ) -> std::result::Result<oneshot::Receiver<()>, MacrotaskQueueError> {
+    ) -> std::result::Result<oneshot::Receiver<()>, JsTaskQueueError> {
         let (sender, receiver) = oneshot::channel();
         self.shutdown
             .try_send(ShutdownRequest {
@@ -85,16 +85,16 @@ impl RuntimeControl {
 /// runtime's QuickJS context, followed by a native QuickJS microtask
 /// checkpoint.
 #[derive(Clone, Debug)]
-pub struct MacrotaskQueue {
+pub struct JsTaskQueue {
     sender: Sender<MacrotaskMessage>,
 }
 
 // The queue contains no JavaScript values and does not depend on `'js`.
-unsafe impl<'js> JsLifetime<'js> for MacrotaskQueue {
-    type Changed<'to> = MacrotaskQueue;
+unsafe impl<'js> JsLifetime<'js> for JsTaskQueue {
+    type Changed<'to> = JsTaskQueue;
 }
 
-impl MacrotaskQueue {
+impl JsTaskQueue {
     /// Retrieve the queue installed in a runtime context.
     pub fn from_context(context: &Ctx<'_>) -> Result<Self> {
         context
@@ -108,18 +108,18 @@ impl MacrotaskQueue {
     /// Use this from asynchronous producers. Synchronous JavaScript host
     /// callbacks should use [`Self::try_enqueue`] so the isolate cannot
     /// deadlock waiting for itself to consume the queue.
-    pub async fn enqueue<F>(&self, task: F) -> std::result::Result<(), MacrotaskQueueError>
+    pub async fn enqueue<F>(&self, task: F) -> std::result::Result<(), JsTaskQueueError>
     where
         F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
     {
         self.sender
             .send(Box::new(task))
             .await
-            .map_err(|_| MacrotaskQueueError::Closed)
+            .map_err(|_| JsTaskQueueError::Closed)
     }
 
     /// Attempt to enqueue from a synchronous callback without waiting.
-    pub fn try_enqueue<F>(&self, task: F) -> std::result::Result<(), MacrotaskQueueError>
+    pub fn try_enqueue<F>(&self, task: F) -> std::result::Result<(), JsTaskQueueError>
     where
         F: for<'js> FnOnce(&Ctx<'js>) -> Result<()> + Send + 'static,
     {
@@ -144,10 +144,10 @@ impl MacrotaskQueue {
     }
 }
 
-fn map_try_send_error<T>(error: mpsc::error::TrySendError<T>) -> MacrotaskQueueError {
+fn map_try_send_error<T>(error: mpsc::error::TrySendError<T>) -> JsTaskQueueError {
     match error {
-        mpsc::error::TrySendError::Full(_) => MacrotaskQueueError::Full,
-        mpsc::error::TrySendError::Closed(_) => MacrotaskQueueError::Closed,
+        mpsc::error::TrySendError::Full(_) => JsTaskQueueError::Full,
+        mpsc::error::TrySendError::Closed(_) => JsTaskQueueError::Closed,
     }
 }
 
@@ -155,11 +155,11 @@ pub(crate) async fn install(
     context: &AsyncContext,
     capacity: usize,
     plugins: Vec<Box<dyn Plugin>>,
-) -> Result<(MacrotaskQueue, RuntimeControl, oneshot::Receiver<()>)> {
+) -> Result<(JsTaskQueue, RuntimeControl, oneshot::Receiver<()>)> {
     let (sender, receiver) = mpsc::channel(capacity);
     let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
     let (stopped_sender, stopped_receiver) = oneshot::channel();
-    let queue = MacrotaskQueue { sender };
+    let queue = JsTaskQueue { sender };
     let control = RuntimeControl {
         shutdown: shutdown_sender,
     };
