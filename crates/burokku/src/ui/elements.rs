@@ -1336,7 +1336,7 @@ mod tests {
             style.item.grid_row,
             taffy::Line {
                 start: styles::item::GridPlacement::Line(2),
-                end: styles::item::GridPlacement::Span(3),
+                end: styles::item::GridPlacement::Span(std::num::NonZeroU16::new(3).unwrap()),
             }
         );
         assert_eq!(style.item.justify_self, Some(taffy::AlignItems::CENTER));
@@ -1367,7 +1367,7 @@ mod tests {
         let revision = dom.revision();
 
         for property in ["grid-row", "grid-column"] {
-            for value in ["span -1", "span 0", "span 65536", "32768"] {
+            for value in ["span", "span -1", "span 0", "span 65536", "32768"] {
                 assert_eq!(
                     dom.set_style_property(div, property, value),
                     Err(StyleError::InvalidValue {

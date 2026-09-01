@@ -1,5 +1,7 @@
 //! Layout properties that describe an element's relationship to its parent.
 
+use std::num::NonZeroU16;
+
 use taffy::{geometry::Line, AlignSelf, GridPlacement as TaffyGridPlacement, JustifySelf};
 
 use crate::ui::elements::traits::IntoTaffyStyle;
@@ -14,8 +16,8 @@ pub enum GridPlacement {
     Auto,
     Line(i16),
     NamedLine(String, i16),
-    Span(u16),
-    NamedSpan(String, u16),
+    Span(NonZeroU16),
+    NamedSpan(String, NonZeroU16),
 }
 
 impl IntoTaffyStyle for GridPlacement {
@@ -26,8 +28,10 @@ impl IntoTaffyStyle for GridPlacement {
             Self::Auto => TaffyGridPlacement::Auto,
             Self::Line(index) => TaffyGridPlacement::Line(index.into()),
             Self::NamedLine(name, index) => TaffyGridPlacement::NamedLine(name, index),
-            Self::Span(tracks) => TaffyGridPlacement::Span(tracks),
-            Self::NamedSpan(name, occurrence) => TaffyGridPlacement::NamedSpan(name, occurrence),
+            Self::Span(tracks) => TaffyGridPlacement::Span(tracks.get()),
+            Self::NamedSpan(name, occurrence) => {
+                TaffyGridPlacement::NamedSpan(name, occurrence.get())
+            }
         }
     }
 }
@@ -63,17 +67,21 @@ impl TryFrom<&str> for GridPlacement {
         }
 
         match (parsed, span, number, has_ident) {
-            (TaffyGridPlacement::Span(_), true, None, false) => Ok(GridPlacement::Span(0)),
+            (TaffyGridPlacement::Span(_), true, None, false) => Err(GridPlacementParseError),
             (TaffyGridPlacement::Span(_), true, Some(number), false) => u16::try_from(number)
+                .ok()
+                .and_then(NonZeroU16::new)
                 .map(GridPlacement::Span)
-                .map_err(|_| GridPlacementParseError),
+                .ok_or(GridPlacementParseError),
             (TaffyGridPlacement::NamedSpan(name, _), true, None, true) => {
-                Ok(GridPlacement::NamedSpan(name, 0))
+                Ok(GridPlacement::NamedSpan(name, NonZeroU16::MIN))
             }
             (TaffyGridPlacement::NamedSpan(name, _), true, Some(number), true) => {
                 u16::try_from(number)
+                    .ok()
+                    .and_then(NonZeroU16::new)
                     .map(|number| GridPlacement::NamedSpan(name, number))
-                    .map_err(|_| GridPlacementParseError)
+                    .ok_or(GridPlacementParseError)
             }
             (TaffyGridPlacement::Line(_), false, Some(number), false) => i16::try_from(number)
                 .map(GridPlacement::Line)
@@ -281,14 +289,14 @@ mod tests {
             style.grid_row,
             Line {
                 start: GridPlacement::Line(2),
-                end: GridPlacement::Span(3),
+                end: GridPlacement::Span(NonZeroU16::new(3).unwrap()),
             }
         );
         assert_eq!(
             style.grid_column,
             Line {
                 start: GridPlacement::NamedLine("content".into(), 2),
-                end: GridPlacement::NamedSpan("sidebar".into(), 0),
+                end: GridPlacement::NamedSpan("sidebar".into(), NonZeroU16::MIN),
             }
         );
     }
@@ -300,6 +308,7 @@ mod tests {
         let original = style.grid_row.clone();
 
         for value in [
+            "span",
             "span -1",
             "span 0",
             "span 65536",
@@ -317,7 +326,7 @@ mod tests {
             style.grid_row,
             Line {
                 start: GridPlacement::Line(-32768),
-                end: GridPlacement::Span(65535),
+                end: GridPlacement::Span(NonZeroU16::new(65535).unwrap()),
             }
         );
     }
