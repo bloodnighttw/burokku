@@ -1,4 +1,4 @@
-use crate::{MacrotaskQueue, Plugin, Result};
+use crate::{JsTaskQueue, Plugin, Result};
 use rquickjs::{prelude::Func, Ctx, Function, JsLifetime, Object};
 use std::{
     collections::HashSet,
@@ -91,7 +91,7 @@ fn schedule_timer<'js>(
     repeats: bool,
 ) -> Result<u32> {
     let state = state(&context)?;
-    let queue = MacrotaskQueue::from_context(&context)?;
+    let queue = JsTaskQueue::from_context(&context)?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let timers: Object = context.globals().get(TIMER_REGISTRY)?;
     timers.set(id, callback)?;

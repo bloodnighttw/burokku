@@ -6,7 +6,7 @@ use rquickjs::Ctx;
 /// A host integration installed into a runtime context.
 ///
 /// Plugins register globals, functions, or runtime userdata. Async integrations
-/// can use [`crate::MacrotaskQueue`] to schedule JavaScript work. Plugins are
+/// can use [`crate::JsTaskQueue`] to schedule JavaScript work. Plugins are
 /// thread-local and are installed on the thread that drives QuickJS.
 ///
 /// A function is itself a plugin, so small integrations need no wrapper type.

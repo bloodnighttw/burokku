@@ -8,7 +8,7 @@ pub mod plugins;
 mod runtime;
 pub mod serializer;
 
-pub use event_loop::{MacrotaskQueue, MacrotaskQueueError, DEFAULT_MACROTASK_CAPACITY};
+pub use event_loop::{JsTaskQueue, JsTaskQueueError, DEFAULT_MACROTASK_CAPACITY};
 pub use js_options::JsOptions;
 pub use plugin::{Plugin, RuntimeBuilder};
 pub use rquickjs;
