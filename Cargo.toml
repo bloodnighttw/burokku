@@ -3,7 +3,6 @@ members = [
     "crates/*",
     "example/*",
 ]
-exclude = ["crates/tokio"]
 resolver = "2"
 
 # Performance counters are debug-only, including in optimized benchmarks.
