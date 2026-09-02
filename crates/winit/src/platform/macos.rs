@@ -27,9 +27,10 @@ use objc2::{
     sel, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventTrackingRunLoopMode,
-    NSView, NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow,
-    NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
+    NSEventModifierFlags, NSEventSubtype, NSEventTrackingRunLoopMode, NSEventType, NSView,
+    NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint,
@@ -155,7 +156,22 @@ impl<F: FnMut() -> PlatformTick> ExternalLoopState<F> {
         }
 
         if result.exit {
+            // AppKit applies `stop` after processing another application event.
             self.app.stop(None);
+            let event =
+                NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                    NSEventType::ApplicationDefined,
+                    NSPoint::new(0.0, 0.0),
+                    NSEventModifierFlags(0),
+                    0.0,
+                    0,
+                    None,
+                    NSEventSubtype::WindowExposed.0,
+                    0,
+                    0,
+                )
+            .expect("failed to create AppKit stop event");
+            self.app.postEvent_atStart(&event, true);
         } else if self.retick_pending.replace(false) {
             self.wake.wake_up();
         }
