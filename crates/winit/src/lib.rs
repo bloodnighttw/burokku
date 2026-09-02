@@ -19,7 +19,7 @@ pub mod application {
 
 pub use dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 pub use event::{ElementState, KeyEvent, Modifiers, MouseButton, WindowEvent};
-pub use event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+pub use event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 pub use raw_window_handle;
 pub use window::{Window, WindowAttributes, WindowId};
 

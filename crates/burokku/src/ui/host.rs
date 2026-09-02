@@ -317,12 +317,12 @@ impl ApplicationHost {
         debug_assert!(self.pending_graphics.is_none());
 
         let window_id = window.id();
-        let proxy = event_loop.create_proxy();
+        let waker = event_loop.loop_waker();
         let (sender, result) = oneshot::channel();
         let task = tokio::task::spawn_local(async move {
             let initialized = GraphicsContext::for_window(window).await;
             let _ = sender.send(initialized);
-            proxy.wake_up();
+            waker.wake_up();
         });
         self.pending_graphics = Some(PendingGraphicsInitialization {
             revision,
@@ -345,12 +345,12 @@ impl ApplicationHost {
         debug_assert!(self.pending_graphics_replacement.is_none());
 
         let window = Rc::clone(prepared.window());
-        let proxy = event_loop.create_proxy();
+        let waker = event_loop.loop_waker();
         let (sender, result) = oneshot::channel();
         let task = tokio::task::spawn_local(async move {
             let initialized = GraphicsContext::for_window(window).await;
             let _ = sender.send(initialized);
-            proxy.wake_up();
+            waker.wake_up();
         });
         self.pending_graphics_replacement = Some(PendingGraphicsReplacement {
             revision,

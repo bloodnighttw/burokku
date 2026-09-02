@@ -48,7 +48,7 @@ pub trait ApplicationHandler {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct EventLoopWaker {
+pub struct EventLoopWaker {
     platform: crate::platform::PlatformWake,
 }
 
@@ -57,7 +57,7 @@ impl EventLoopWaker {
         Self { platform }
     }
 
-    pub(crate) fn wake_up(&self) {
+    pub fn wake_up(&self) {
         self.platform.wake_up();
     }
 }
@@ -156,23 +156,7 @@ impl<F: FnOnce()> Drop for EventHandlerGuard<F> {
     }
 }
 
-/// A thread-safe handle for promptly waking an idle native event loop.
-///
-/// Waking does not itself dispatch an application event. It requests a LocalSet
-/// poll and then invokes `about_to_wait`, where cross-thread state can be consumed
-/// without busy polling.
-#[derive(Clone, Debug)]
-pub struct EventLoopProxy {
-    waker: EventLoopWaker,
-}
-
-impl EventLoopProxy {
-    pub fn wake_up(&self) {
-        self.waker.wake_up();
-    }
-}
-
-impl Wake for EventLoopProxy {
+impl Wake for EventLoopWaker {
     fn wake(self: Arc<Self>) {
         self.wake_up();
     }
@@ -216,10 +200,8 @@ impl ActiveEventLoop {
     }
 
     /// Return a thread-safe handle that wakes this event loop from `Wait`.
-    pub fn create_proxy(&self) -> EventLoopProxy {
-        EventLoopProxy {
-            waker: self.waker.clone(),
-        }
+    pub fn loop_waker(&self) -> EventLoopWaker {
+        self.waker.clone()
     }
 
     pub fn set_control_flow(&self, control_flow: ControlFlow) {
@@ -269,8 +251,8 @@ impl EventLoop {
     }
 
     /// Return a thread-safe handle that wakes this event loop from `Wait`.
-    pub fn create_proxy(&self) -> EventLoopProxy {
-        self.active.create_proxy()
+    pub fn loop_waker(&self) -> EventLoopWaker {
+        self.active.loop_waker()
     }
 
     /// Let the native main loop drive an internally owned Tokio runtime.
@@ -296,7 +278,7 @@ impl EventLoop {
             .enable_all()
             .build()
             .map_err(crate::Error::ExternalRuntime)?;
-        let local_waker = Waker::from(Arc::new(self.create_proxy()));
+        let local_waker = Waker::from(Arc::new(self.loop_waker()));
         self.has_run = true;
 
         let application = Rc::new(RefCell::new(application));
@@ -446,7 +428,7 @@ mod tests {
 
     #[test]
     fn event_loop_proxy_is_a_thread_safe_waker() {
-        static_assertions::assert_impl_all!(EventLoopProxy: Send, Sync, Wake);
+        static_assertions::assert_impl_all!(EventLoopWaker: Send, Sync, Wake);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use llrt_utils::primordials::{BasePrimordials, Primordial};
 use thiserror::Error;
 use tokio::sync::oneshot;
+use winit::event_loop::EventLoopWaker;
 
 use crate::{
     runtime::{Plugin, RuntimeBuilder},
@@ -38,17 +39,17 @@ pub(crate) enum RuntimeStatus {
 pub(crate) struct RuntimeLifecycle {
     status: Rc<RefCell<RuntimeStatus>>,
     shutdown: Rc<RefCell<Option<oneshot::Sender<()>>>>,
-    proxy: Option<winit::EventLoopProxy>,
+    waker: Option<EventLoopWaker>,
 }
 
 impl RuntimeLifecycle {
-    pub(crate) fn new(proxy: winit::EventLoopProxy) -> (Self, oneshot::Receiver<()>) {
+    pub(crate) fn new(waker: EventLoopWaker) -> (Self, oneshot::Receiver<()>) {
         let (shutdown, requested) = oneshot::channel();
         (
             Self {
                 status: Rc::new(RefCell::new(RuntimeStatus::Starting)),
                 shutdown: Rc::new(RefCell::new(Some(shutdown))),
-                proxy: Some(proxy),
+                waker: Some(waker),
             },
             requested,
         )
@@ -60,8 +61,8 @@ impl RuntimeLifecycle {
 
     fn set_status(&self, status: RuntimeStatus) {
         *self.status.borrow_mut() = status;
-        if let Some(proxy) = &self.proxy {
-            proxy.wake_up();
+        if let Some(waker) = &self.waker {
+            waker.wake_up();
         }
     }
 
@@ -71,7 +72,7 @@ impl RuntimeLifecycle {
         Self {
             status: Rc::new(RefCell::new(RuntimeStatus::Starting)),
             shutdown: Rc::new(RefCell::new(Some(shutdown))),
-            proxy: None,
+            waker: None,
         }
     }
 
@@ -160,11 +161,11 @@ impl Burokku {
     /// This synchronous entry point must be called on the process main thread.
     pub fn run(self) -> Result<(), BurokkuError> {
         let mut event_loop = winit::EventLoop::new()?;
-        let proxy = event_loop.create_proxy();
+        let waker = event_loop.loop_waker();
         let local_set = tokio::task::LocalSet::new();
 
         let (dom_plugin, dom) = DomPlugin::new();
-        let (lifecycle, shutdown) = RuntimeLifecycle::new(proxy);
+        let (lifecycle, shutdown) = RuntimeLifecycle::new(waker);
 
         let mut text = TextEngine::new();
         for font in self.fonts {

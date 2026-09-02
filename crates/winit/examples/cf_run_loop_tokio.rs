@@ -77,7 +77,7 @@ impl ApplicationHandler for App {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop = EventLoop::new()?;
-    let failure_proxy = event_loop.create_proxy();
+    let failure_proxy = event_loop.loop_waker();
     let main_thread = std::thread::current().id();
     let local_set = LocalSet::new();
     let failure = Rc::new(RefCell::new(None));
