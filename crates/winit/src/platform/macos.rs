@@ -116,9 +116,28 @@ struct ExternalLoopState<F> {
 }
 
 impl<F: FnMut() -> PlatformTick> ExternalLoopState<F> {
+    fn stop(&self) {
+        // AppKit applies `stop` after processing another application event.
+        self.app.stop(None);
+        let event =
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::ApplicationDefined,
+                NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags(0),
+                0.0,
+                0,
+                None,
+                NSEventSubtype::WindowExposed.0,
+                0,
+                0,
+            )
+            .expect("failed to create AppKit stop event");
+        self.app.postEvent_atStart(&event, true);
+    }
+
     fn tick(&self) {
         if self.panic.borrow().is_some() {
-            self.app.stop(None);
+            self.stop();
             return;
         }
 
@@ -136,7 +155,7 @@ impl<F: FnMut() -> PlatformTick> ExternalLoopState<F> {
             Ok(result) => result,
             Err(panic) => {
                 *self.panic.borrow_mut() = Some(panic);
-                self.app.stop(None);
+                self.stop();
                 return;
             }
         };
@@ -156,22 +175,7 @@ impl<F: FnMut() -> PlatformTick> ExternalLoopState<F> {
         }
 
         if result.exit {
-            // AppKit applies `stop` after processing another application event.
-            self.app.stop(None);
-            let event =
-                NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-                    NSEventType::ApplicationDefined,
-                    NSPoint::new(0.0, 0.0),
-                    NSEventModifierFlags(0),
-                    0.0,
-                    0,
-                    None,
-                    NSEventSubtype::WindowExposed.0,
-                    0,
-                    0,
-                )
-            .expect("failed to create AppKit stop event");
-            self.app.postEvent_atStart(&event, true);
+            self.stop();
         } else if self.retick_pending.replace(false) {
             self.wake.wake_up();
         }
