@@ -1,9 +1,9 @@
 //! A deliberately small windowing crate for Burokku.
 //!
 //! The API follows the useful parts of winit's application-handler model.
-//! [`EventLoop::run_app_external`] lets the native main loop drive a patched Tokio
-//! current-thread runtime and `LocalSet` through shared wake/timer hooks. macOS is
-//! currently implemented; other platform backends can be added behind the crate's
+//! [`EventLoop::run_app_external`] keeps the native loop on the main thread while
+//! upstream Tokio drives worker tasks and one persistent main-thread `LocalSet`.
+//! macOS is currently implemented; other platform backends can be added behind the crate's
 //! internal boundary without changing the public API.
 
 pub mod dpi;

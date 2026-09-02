@@ -3,8 +3,7 @@
     "rust-analyzer": {
       "initialization_options": {
         "linkedProjects": [
-          "./Cargo.toml",
-          "./crates/tokio/Cargo.toml"
+          "./Cargo.toml"
         ]
       }
     }

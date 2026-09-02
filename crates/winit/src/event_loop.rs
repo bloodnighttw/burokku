@@ -1,8 +1,10 @@
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    future::{pending, Future},
     rc::{Rc, Weak},
     sync::Arc,
+    task::{Context, Wake, Waker},
     time::Instant,
 };
 
@@ -21,15 +23,10 @@ pub enum ControlFlow {
     WaitUntil(Instant),
 }
 
-fn external_deadline(
-    control_flow: ControlFlow,
-    tokio_deadline: Option<Instant>,
-) -> Option<Instant> {
+fn external_deadline(control_flow: ControlFlow) -> Option<Instant> {
     match control_flow {
-        ControlFlow::Poll | ControlFlow::Wait => tokio_deadline,
-        ControlFlow::WaitUntil(deadline) => {
-            Some(tokio_deadline.map_or(deadline, |tokio_deadline| tokio_deadline.min(deadline)))
-        }
+        ControlFlow::WaitUntil(deadline) => Some(deadline),
+        ControlFlow::Poll | ControlFlow::Wait => None,
     }
 }
 
@@ -128,8 +125,8 @@ fn with_external_context<T>(
             .enter();
         callback()
     } else {
-        // A native event may be emitted reentrantly while a Tokio tick is
-        // polling the LocalSet. That tick has already entered this exact local
+        // A native event may be emitted reentrantly while a native tick is
+        // polling the LocalSet. That poll already entered this exact local
         // context, so borrowing the LocalSet again is unnecessary.
         callback()
     }
@@ -161,8 +158,8 @@ impl<F: FnOnce()> Drop for EventHandlerGuard<F> {
 
 /// A thread-safe handle for promptly waking an idle native event loop.
 ///
-/// Waking does not itself dispatch an application event. It schedules a bounded
-/// Tokio tick and invokes `about_to_wait`, where cross-thread state can be consumed
+/// Waking does not itself dispatch an application event. It requests a LocalSet
+/// poll and then invokes `about_to_wait`, where cross-thread state can be consumed
 /// without busy polling.
 #[derive(Clone, Debug)]
 pub struct EventLoopProxy {
@@ -175,8 +172,12 @@ impl EventLoopProxy {
     }
 }
 
-impl tokio::runtime::ExternalWake for EventLoopProxy {
-    fn wake(&self) {
+impl Wake for EventLoopProxy {
+    fn wake(self: Arc<Self>) {
+        self.wake_up();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
         self.wake_up();
     }
 }
@@ -274,14 +275,9 @@ impl EventLoop {
 
     /// Let the native main loop drive an internally owned Tokio runtime.
     ///
-    /// The platform owns the outer wait while native callbacks perform bounded
-    /// nonblocking Tokio ticks. This keeps nested native loops responsive
-    /// (for example, AppKit's live-resize loop) while local Tokio, QuickJS, or
-    /// LLRT tasks continue to run on the event-loop thread.
-    ///
-    /// The runtime is always a current-thread runtime wired to this event loop's
-    /// native wake source. `local_set` is retained and supplied to every tick
-    /// until the native loop exits.
+    /// The platform owns the outer wait while native callbacks poll the persistent
+    /// main-thread [`LocalSet`]. A one-worker Tokio runtime drives timers, I/O, and
+    /// `Send` tasks, waking the native loop when local work becomes runnable.
     ///
     /// The macOS backend is implemented today. Other platform backends can
     /// implement the same native wake, timer, and main-loop hooks without
@@ -295,10 +291,12 @@ impl EventLoop {
             return Err(crate::Error::AlreadyRun);
         }
 
-        let mut builder = Builder::new_current_thread();
-        builder.enable_all();
-        builder.external_event_loop(Arc::new(self.create_proxy()));
-        let runtime = builder.build().map_err(crate::Error::ExternalRuntime)?;
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(crate::Error::ExternalRuntime)?;
+        let local_waker = Waker::from(Arc::new(self.create_proxy()));
         self.has_run = true;
 
         let application = Rc::new(RefCell::new(application));
@@ -347,19 +345,20 @@ impl EventLoop {
                     };
                 }
 
-                let tick = {
+                {
                     let runtime = runtime.borrow();
                     let mut local_set = local_set.borrow_mut();
-                    runtime
+                    let _runtime_guard = runtime
                         .as_ref()
                         .expect("external runtime remains available while ticking")
-                        .tick_nonblocking_with_local_set(
-                            local_set
-                                .as_mut()
-                                .expect("external LocalSet remains available while ticking"),
-                        )
-                };
-
+                        .enter();
+                    let mut local_future = std::pin::pin!(local_set
+                        .as_mut()
+                        .expect("external LocalSet remains available while ticking")
+                        .run_until(pending::<()>()));
+                    let mut context = Context::from_waker(&local_waker);
+                    assert!(local_future.as_mut().poll(&mut context).is_pending());
+                }
                 with_external_context(&runtime, &local_set, || {
                     events.drain(|window_id, event| {
                         application
@@ -378,7 +377,7 @@ impl EventLoop {
                 if control_flow == ControlFlow::Poll {
                     self.waker.wake_up();
                 }
-                let next_deadline = external_deadline(control_flow, tick.next_deadline);
+                let next_deadline = external_deadline(control_flow);
 
                 PlatformTick {
                     next_deadline,
@@ -389,8 +388,8 @@ impl EventLoop {
                 with_external_context(&runtime, &local_set, || {
                     application.borrow_mut().exiting(&self.active);
                 });
-                // Cancel local/LLRT work first, then stop and join Tokio's
-                // reactor while the native wake source is still retained.
+                // Cancel local/LLRT work before joining the Tokio worker while the
+                // native wake source is still retained.
                 drop(local_set.borrow_mut().take());
                 drop(runtime.borrow_mut().take());
             },
@@ -412,7 +411,11 @@ mod tests {
 
     #[test]
     fn external_context_allows_callback_spawn_local() {
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
         let local_set = LocalSet::new();
         let runtime = RefCell::new(Some(runtime));
         let local_set = RefCell::new(Some(local_set));
@@ -430,32 +433,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn external_deadline_uses_the_earliest_application_or_tokio_timer() {
-        let now = Instant::now();
-        let application = now + Duration::from_secs(2);
-        let tokio = now + Duration::from_secs(1);
+    fn external_deadline_uses_only_the_application_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(2);
 
         assert_eq!(
-            external_deadline(ControlFlow::WaitUntil(application), Some(tokio)),
-            Some(tokio)
+            external_deadline(ControlFlow::WaitUntil(deadline)),
+            Some(deadline)
         );
-        assert_eq!(
-            external_deadline(ControlFlow::WaitUntil(application), None),
-            Some(application)
-        );
-        assert_eq!(
-            external_deadline(ControlFlow::Wait, Some(tokio)),
-            Some(tokio)
-        );
+        assert_eq!(external_deadline(ControlFlow::Wait), None);
+        assert_eq!(external_deadline(ControlFlow::Poll), None);
     }
 
     #[test]
-    fn event_loop_proxy_is_a_thread_safe_external_wake() {
-        static_assertions::assert_impl_all!(
-            EventLoopProxy: Send,
-            Sync,
-            tokio::runtime::ExternalWake
-        );
+    fn event_loop_proxy_is_a_thread_safe_waker() {
+        static_assertions::assert_impl_all!(EventLoopProxy: Send, Sync, Wake);
     }
 
     #[test]

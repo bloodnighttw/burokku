@@ -1,347 +1,155 @@
-# Platform-driven Tokio current-thread prototype
+# Upstream Tokio external-loop bridge
 
-This repository imports the full-history Tokio 1.53.1 repository as a
-non-squashed Git subtree in `crates/tokio`. The patched Tokio crate lives at
-`crates/tokio/tokio` and is selected through the workspace's
-`[patch.crates-io]` entry. The subtree is excluded as a parent-workspace member;
-run Tokio's own tests through its nested workspace manifest.
+`burokku-winit` keeps AppKit and `CFRunLoop` in control of the process main
+thread while using unmodified Tokio 1.53.1 from crates.io. No Cargo patch,
+vendored Tokio source, custom Mio reactor, or fork-only runtime API is required.
 
-The patch is a proof of concept. It preserves Tokio networking, Mio, the normal
-readiness types, the timer wheel, and current-thread task scheduling. It changes
-who owns the outer wait:
+## Ownership model
 
 ```text
-platform main loop                 tokio-mio-reactor
-------------------                 -----------------
-Runtime::tick_nonblocking()        mio::Poll::poll(..., None)
-Tokio scheduler tasks              ScheduledIo::set_readiness
-LocalSet / !Send futures           ScheduledIo::wake
-Tokio timer-wheel expiration       ExternalWake::wake
-UI / QuickJS / LLRT                (never polls application tasks)
+Tokio worker thread                    AppKit main thread
+-------------------                    ------------------
+I/O and timer drivers                  CFRunLoopSource callback
+ordinary `tokio::spawn` tasks  wake    poll persistent LocalSet once
+`spawn_blocking` work          ----->  QuickJS / LLRT callbacks
+                                       DOM / layout / rendering
 ```
 
-## Why upstream `current_thread` cannot be embedded this way
+`EventLoop::run_app_external(application, local_set)` builds and owns a
+multi-thread Tokio runtime with exactly one worker and all drivers enabled. The
+caller supplies one persistent `LocalSet`, which remains on the main thread for
+the native loop's lifetime.
 
-The upstream scheduler stores its entire `Core` in an `AtomicCell`. A
-`Runtime::block_on` caller steals that core and enters an unbounded loop. When
-no task is ready, `Context::park` moves the composite runtime driver out of the
-core and blocks in it. The traditional time driver computes its next wheel
-expiration and delegates the wait through signal/process layers to the Tokio
-I/O driver, whose `Driver::turn` calls `mio::Poll::poll`.
+The thread contract is explicit:
 
-Consequently, scheduler execution, timer expiration, readiness polling, and the
-outer blocking wait are coupled to the thread running `block_on`. Tokio has a
-useful internal `park_yield` operation, but no public operation that acquires the
-core, performs a bounded number of scheduler polls, and returns a deadline.
-Repeated `block_on(yield_now())` would still use root-future machinery, would
-not provide a reliable work/deadline contract, and would duplicate scheduler
-policy in the embedding layer.
+- `tokio::task::spawn_local`, QuickJS, DOM, layout, rendering, and application
+  callbacks run on the AppKit main thread;
+- ordinary `tokio::spawn`, Tokio timers, and I/O readiness run on the Tokio
+  worker;
+- `spawn_blocking` runs on Tokio's blocking pool;
+- native window callbacks run on the AppKit main thread.
 
-Important upstream seams used by this patch:
+A detached worker task that changes UI-observed shared state must either wake an
+awaited local future/channel or call `EventLoopProxy::wake_up`. Tokio does not
+wake AppKit for unrelated worker-side state changes.
 
-- `runtime/scheduler/current_thread/mod.rs`: `take_core`, `CoreGuard::enter`,
-  `Core::next_task`, `Context::run_task`, and `park_yield`;
-- `runtime/driver.rs`: composite I/O/signal/process/time driver and unpark fanout;
-- `runtime/io/driver.rs`: exclusive `Poll`/`Events` owner and shared cloned
-  `Registry` handle;
-- `runtime/time/mod.rs`: traditional timer wheel processing and earliest
-  expiration;
-- `runtime/io/scheduled_io.rs`: atomic readiness publication and waiter waking;
-- `runtime/io/registration_set.rs`: deferred `ScheduledIo` reclamation.
+## Poll and wake bridge
 
-## Public prototype API
+Each native tick enters the Tokio runtime, constructs
+`LocalSet::run_until(std::future::pending())`, polls that temporary future once,
+and drops it. `run_until` is cancel-safe: dropping the temporary future does not
+drop tasks owned by the persistent `LocalSet`.
 
-```rust
-use std::sync::Arc;
-use tokio::runtime::{Builder, ExternalWake, TickResult};
+`EventLoopProxy` implements `std::task::Wake`. A `Waker` backed by the proxy is
+passed to every `LocalSet` poll. When a timer, socket, channel, worker task, or
+LocalSet backlog makes local work runnable, Tokio calls that waker, which
+signals the macOS `CFRunLoopSource` and wakes `CFRunLoop`.
 
-struct PlatformWake;
-impl ExternalWake for PlatformWake {
-    fn wake(&self) {
-        // PostMessage, eventfd write, CFRunLoopSourceSignal, ...
-    }
-}
+No Tokio timer deadline is copied into the native loop. Tokio's worker owns its
+timer driver and wakes the LocalSet when a sleep becomes ready. The reusable
+Core Foundation timer represents only an application
+`ControlFlow::WaitUntil` deadline. `ControlFlow::Poll` explicitly self-wakes;
+`ControlFlow::Wait` sleeps until native input or a wake source fires.
 
-let runtime = Builder::new_current_thread()
-    .enable_all()
-    .external_event_loop(Arc::new(PlatformWake))
-    .external_tick_budget(64)
-    .build()?;
+One future can still perform arbitrarily long synchronous work in one poll.
+This bridge provides wake integration, not preemption.
 
-let TickResult {
-    has_more_work,
-    next_deadline,
-    tasks_polled,
-} = runtime.tick_nonblocking();
-```
+## Callback and reentrancy contract
 
-`Runtime::tick_nonblocking_with_local_set(&mut LocalSet)` polls a `LocalSet` in
-the same scheduler entry, and `LocalRuntime::tick_nonblocking` supports the
-thread-affine local runtime. The regular `Runtime`, `Handle`, `tokio::spawn`,
-`LocalSet::spawn_local`, `tokio::net`, `tokio::time`, `tokio::sync`, and
-`spawn_blocking` APIs remain intact.
+`resumed`, `window_event`, `about_to_wait`, and `exiting` run with both the Tokio
+runtime and persistent LocalSet context entered, so callbacks may use
+`tokio::spawn`, `spawn_local`, timers, and I/O APIs.
 
-A tick:
+The tick keeps a mutable `RefCell` borrow of the LocalSet while polling it. If a
+native callback reenters during that poll, `with_external_context` observes the
+failed borrow and runs under the already-installed runtime/local context rather
+than recursively entering or polling the same LocalSet. Native events that
+cannot borrow the application handler are deferred in FIFO order.
 
-1. acquires the current-thread `Core` without waiting;
-2. enters Tokio's scheduler/runtime TLS;
-3. performs a zero-duration composite-driver turn, expiring elapsed timers;
-4. optionally polls the supplied `LocalSet` root;
-5. polls at most `external_tick_budget` regular scheduler tasks;
-6. performs another zero-duration driver turn so timers registered by those
-   tasks are visible;
-7. signals `ExternalWake` when the budget leaves immediately runnable work;
-8. returns immediate-work state and the earliest timer-wheel deadline.
+## macOS integration
 
-A returned deadline only covers timers registered by tasks polled so far. When
-`has_more_work` is true, the automatic wake requests another bounded platform
-callback instead of allowing the host to sleep until that partial deadline.
-This promptly exposes an earlier timer created by a task beyond the previous
-budget while preserving UI responsiveness.
+The macOS backend installs:
 
-The count bound is not preemption. One future can perform arbitrarily long
-synchronous work in one `poll`, which blocks both AppKit and Tokio as expected.
-Timer expiration can also wake a large elapsed batch in one turn, and a
-`LocalSet` has its own bounded queue in addition to the regular task budget.
-Recursive or concurrent ticks panic rather than waiting for the scheduler core.
-Paused/virtual Tokio time is not supported by native deadline driving; do not
-call `start_paused` or `tokio::time::pause` in this mode.
+- a level-0 `CFRunLoopSource` for cross-thread and LocalSet wakes;
+- one reusable `CFRunLoopTimer` for application `WaitUntil` deadlines;
+- both objects in `kCFRunLoopCommonModes` and
+  `NSEventTrackingRunLoopMode` so work continues during live resize;
+- a reentrancy guard and one deferred-retick flag;
+- panic boundaries that prevent unwinding through Core Foundation callbacks.
 
-An integration using `LocalSet` should retain and consistently pass one
-persistent set to `tick_nonblocking_with_local_set`. Do not alternate plain
-runtime ticks or multiple sets, because Tokio exposes one root-wake bit.
+When shutdown is requested, AppKit receives a synthetic application event after
+`NSApplication::stop`; this makes the native run loop return normally instead
+of requiring process termination.
 
-## Mio reactor split
+## Shutdown order
 
-Mio already has the required ownership split: `Poll::poll` requires exclusive
-mutable access, while a cloned `Registry` supports registration from other
-threads. In external mode, `runtime/io/driver.rs` moves the existing poll and
-event buffer into one thread named `tokio-mio-reactor`. No mutex permits a
-second poll caller.
+The application requests native-loop exit only after its QuickJS lifecycle has
+reached `Stopped` or `Failed`. `run_app_external` then:
 
-The reactor runs the existing readiness dispatch:
+1. invokes `ApplicationHandler::exiting` with runtime and LocalSet context;
+2. unpublishes and invalidates native callbacks while retaining their Core
+   Foundation objects;
+3. drops local/QuickJS work;
+4. drops and joins the Tokio runtime;
+5. releases the retained Core Foundation objects and returns the application.
 
-```text
-Mio Event
-  -> Ready::from_mio
-  -> ScheduledIo::set_readiness(Tick::Set, ...)
-  -> ScheduledIo::wake
-  -> current-thread remote injection queue
-  -> ExternalWake::wake
-```
+## LLRT / QuickJS example
 
-The main-thread composite driver's I/O park becomes a Tokio `ParkThread`. A
-zero-duration tick therefore never touches `mio::Poll`; ordinary `block_on`
-remains capable of parking if an embedding uses it outside the platform loop.
-The reactor unparks that scheduler parker after every Mio turn, including
-special Unix signal/process tokens that do not wake a `ScheduledIo`.
-The Mio waker still handles source registration/deregistration pressure and
-reactor shutdown.
-
-On runtime shutdown, the patch sets the reactor stop flag, wakes Mio, joins the
-reactor, marks the registration set shut down, and only then shuts down retained
-`ScheduledIo` values.
-
-## Wake and timer contract
-
-The external callback is attached below the timer driver at `IoHandle::unpark`,
-not only at the scheduler handle. This covers:
-
-- tasks spawned or woken from another thread;
-- Tokio synchronization that makes a task runnable;
-- readiness published by the Mio reactor;
-- insertion/reset of a timer earlier than the timer driver's cached wake;
-- ordinary scheduler unpark transitions.
-
-The callback can execute on the main thread, the Mio reactor, or another
-producer thread. It is also invoked before a bounded tick returns when
-`has_more_work` is true, so work left by `external_tick_budget` causes a prompt
-follow-up callback rather than a wait for `next_deadline`. It must only signal
-the native loop and return. It must not recursively tick Tokio. Platform
-integrations should coalesce signals if their native primitive does not already
-do so.
-
-`next_deadline` queries the authoritative traditional timer wheel under its
-existing lock and converts the remaining duration using Tokio's runtime clock.
-If a producer inserts an earlier timer after a tick returns, that insertion also
-calls `ExternalWake`, causing the platform loop to tick and re-arm.
-
-## AppKit proof of concept
-
-`burokku-winit` exposes the platform-neutral `EventLoop::run_app_external`
-interface. It builds and owns a current-thread runtime connected through an
-`EventLoopProxy`, which implements Tokio's `ExternalWake`; callers cannot pass
-an unwired runtime. Each platform backend supplies its native wake source, deadline
-timer, and owned main-loop implementation. The macOS backend currently implements that contract
-with a level-0 `CFRunLoopSource` and a reusable `CFRunLoopTimer`; unsupported
-backends can add their own implementation without changing application code.
-
-`crates/winit/examples/cf_run_loop_tokio.rs` uses only this shared interface and
-contains no AppKit or Core Foundation code. It installs selected LLRT 0.9
-modules into the repository's rquickjs runtime and runs
-`crates/winit/examples/cf_run_loop_tokio.js` on a persistent `LocalSet`. The
-script increments a counter every second and fetches `https://example.com`
-every three seconds. LLRT is pinned to a Git revision and shares rquickjs 0.12
-and this workspace's patched Tokio through Cargo dependency resolution.
-
-On macOS, both source and timer are installed in:
-
-- `kCFRunLoopCommonModes`; and
-- `NSEventTrackingRunLoopMode` explicitly.
-
-The explicit tracking-mode registration is what keeps Tokio, rquickjs, and LLRT
-progressing during AppKit's nested live-resize loop.
-
-Build and run:
+`crates/winit/examples/cf_run_loop_tokio.rs` runs LLRT on the persistent
+main-thread LocalSet. Its JavaScript increments a counter every second and
+attempts a fetch every three seconds.
 
 ```sh
 cargo run -p burokku-winit --example cf_run_loop_tokio
 ```
 
-Manual acceptance procedure:
+Manual macOS acceptance:
 
-1. Confirm `[llrt] count = N` prints approximately once per second.
-2. Confirm `[llrt] fetched example.com: status=200, ...` prints approximately
-   once per three seconds. A sandbox without direct network access may instead
-   print the script's `[llrt] fetch failed: ...` diagnostic.
-3. Grab a window resize handle and continuously resize for at least five
-   seconds. Observe the counter and at least one fetch attempt while the drag is
-   still active.
-4. Confirm the window remains responsive and counter output has no multi-second
-   gap ending only when resize stops.
-5. Confirm the Rust main-thread assertions do not fail.
+1. confirm the counter advances approximately once per second;
+2. confirm fetch succeeds or reports the expected sandbox error every three
+   seconds without stalling timers;
+3. continuously resize the window for at least five seconds and observe both
+   operations continue;
+4. confirm the window remains responsive;
+5. close the application and confirm normal QuickJS shutdown and process return.
 
-Expected limitation test:
+The expected non-preemption demonstration is:
 
 ```sh
 TOKIO_EXTERNAL_CPU_BLOCK=1 \
   cargo run -p burokku-winit --example cf_run_loop_tokio
 ```
 
-After three seconds, one Tokio task spins synchronously for two seconds. The
-window and timer intentionally stall for those two seconds, demonstrating that
-the patch moves only blocking readiness waiting—not application computation.
-
-The macOS source callback has a reentrancy guard because AppKit can nest run
-loops. A nested notification sets one pending-retick flag, which is signalled
-only after the outer callback returns to avoid spinning inside the nested loop.
-During teardown, callbacks are unpublished and invalidated first, their CF
-objects remain retained while the runtime and Mio reactor stop, and only then
-are the source and timer released. Callback and shutdown panics are caught long
-enough to complete that cleanup before unwinding resumes on the Rust side.
+The intentional two-second main-thread spin stalls the window and local timers.
 
 ## Automated coverage
 
-`crates/tokio/tokio/tests/rt_external_driver.rs` covers:
+`crates/runtime/tests/external_tokio.rs` proves against registry Tokio that:
 
-- task-poll budget enforcement and `has_more_work`;
-- timer deadline propagation;
-- TCP progress where loopback sockets are permitted;
-- readiness publication through a Unix socket pair, including a required
-  reactor-thread `ExternalWake` callback (works in hermetic macOS runners that
-  deny TCP bind);
-- application task thread identity before and after I/O/timer suspension;
-- timer deadline accuracy and expiration independent of TCP availability;
-- blocking-pool completion wake propagation;
-- `Rc<Cell<_>>` work through `LocalSet` on the driving thread;
-- bounded reactor join with an outstanding registration;
-- the repository's actual QuickJS `RuntimeDriver`, eval/macrotask path, and
-  shutdown on the external main-thread tick (`crates/runtime/tests/external_tokio.rs`).
+- a one-worker runtime drives ordinary `tokio::spawn` away from the main thread;
+- a proxy-style standard waker drives a manually polled persistent LocalSet;
+- a local Tokio sleep resumes on the driving thread;
+- LocalSet work beyond one internal poll slice requests another wake and drains;
+- QuickJS evaluation, shutdown, and driver completion succeed.
+
+`crates/winit/tests/external_wake_macos.rs` proves that a worker-side oneshot
+wakes the main-thread LocalSet, `about_to_wait` requests exit, `exiting` runs,
+and `run_app_external` returns before a watchdog.
 
 Run:
 
 ```sh
-cargo test --manifest-path crates/tokio/Cargo.toml -p tokio \
-  --test rt_external_driver --features full
-cargo test -p runtime --test external_tokio
-cargo check -p burokku-winit --example cf_run_loop_tokio
+cargo test -p runtime --locked
+cargo test -p burokku-winit --locked
+cargo check -p burokku-winit --example cf_run_loop_tokio --locked
+cargo tree -i tokio --workspace
 ```
 
-An automated test cannot synthesize a trustworthy five-second AppKit drag in a
-headless unit-test runner; the example is the behavioral test harness for that
-manual interaction.
+The dependency tree must contain exactly one registry Tokio version. A reliable
+five-second AppKit drag remains a manual test.
 
-## LLRT / QuickJS compatibility
+## Platform scope
 
-The patch does not introduce replacement networking, timer, channel, or spawn
-APIs. LLRT code can continue using `tokio::net`, `tokio::time`, `tokio::sync`,
-and `tokio::spawn`. Keep the runtime and the LLRT/QuickJS owner in the platform
-main-loop state and invoke ticks only from that thread. Use `LocalSet` (via
-`tick_nonblocking_with_local_set`) or `LocalRuntime` for Rust futures holding
-`Rc`, `RefCell`, rquickjs values, or UI objects.
-
-The reactor receives only Tokio's Send/Sync readiness bookkeeping. It has no
-scheduler core and no path that polls LLRT or application futures.
-`crates/runtime/tests/external_tokio.rs` exercises the repository's real
-rquickjs runtime driver, JavaScript evaluation, macrotask wakeups, and shutdown
-through a persistent main-thread `LocalSet`.
-
-## Windows and Linux integration
-
-The Tokio API is platform-neutral and Mio remains the backend.
-
-- **Win32:** implement `ExternalWake` with `PostMessageW`, a manual-reset event,
-  or another message-loop wake. Translate `next_deadline` to a waitable timer or
-  message-loop timer. Mio's IOCP-backed `Poll` stays exclusively on the reactor
-  thread.
-- **X11:** signal an `eventfd` or pipe watched beside the X connection; arm
-  `timerfd` or the host loop's timer from `next_deadline`.
-- **Wayland:** signal an `eventfd`/pipe integrated with the display poll and use
-  the compositor loop's timer facility. Do not call a Tokio tick while holding
-  Wayland dispatch locks if callbacks can reenter application code.
-
-WASI lacks the required threading/waker support. Building external mode with
-I/O enabled therefore returns `Unsupported` instead of silently falling back to
-an idle inline reactor.
-
-## Internal invariants
-
-The patch relies on all of the following:
-
-1. Exactly one thread owns `mio::Poll`, mutable `mio::Events`, and calls `poll`.
-2. Registration uses only a cloned `Registry` for that same poll instance.
-3. OS deregistration happens before Tokio registration bookkeeping removal.
-4. `RegistrationSet` retains each token's `Arc<ScheduledIo>` until the reactor
-   crosses the required post-deregistration poll boundary.
-5. Readiness is atomically published before waiter wakers run.
-6. `ScheduledIo` invokes wakers outside waiter/registration locks.
-7. Existing generation-qualified readiness clearing remains unchanged.
-8. The current-thread core has only one driver at a time. Explicit
-   `UnhandledPanic::ShutdownRuntime` detection returns the core from
-   `CoreGuard::enter` before propagating its public panic.
-9. Application futures are polled only through `Context::run_task` (or the
-   LocalSet root) while current-thread scheduler TLS is installed.
-10. Timer-wheel mutation and queries use the existing timer lock.
-11. External wake callbacks are nonblocking and nonreentrant.
-12. Runtime shutdown joins the reactor before freeing registration tokens.
-
-## Maintenance and rebase assessment
-
-This is a moderate-to-high maintenance internal patch. The public surface is
-small, but the implementation touches Tokio's most change-sensitive internals:
-current-thread scheduling, composite driver construction, I/O token lifetime,
-and timer-wheel inspection.
-
-Likely easy rebase areas:
-
-- `ExternalWake`, `TickResult`, builder plumbing, and platform example;
-- the bounded loop if `CoreGuard`, `Context::run_task`, and `park_yield` retain
-  their current roles.
-
-Likely conflict areas:
-
-- Tokio driver-stack refactors;
-- changes to signal/process wrapping;
-- Mio registration reclamation or token provenance;
-- alternative timer adoption by current-thread runtimes;
-- scheduler fairness/metrics loop changes;
-- io-uring integration.
-
-For each Tokio upgrade, diff the upstream versions of the five investigation
-areas listed above; re-check panic/unwind paths, signal/process parker handoff,
-AppKit wake-source lifetime, standalone manifest test registration, and the
-Windows/Linux/WASI feature matrix; rerun the focused external-driver tests and
-Tokio's I/O/time/current-thread suites; then repeat the manual AppKit live-resize
-test. Keeping the patch as an opt-in builder mode and
-reusing the canonical readiness/task paths limits—but does not eliminate—the
-rebase cost.
+Only the macOS native backend is implemented. Other targets compile but return
+`Error::UnsupportedPlatform`; this bridge does not add Windows, Linux, Wayland,
+X11, or WASI backends.
