@@ -6,7 +6,7 @@ Implemented. The migration phases are complete; this document remains the archit
 
 ## Summary
 
-Layout already runs on the UI thread inside `ApplicationHost`; the mutable DOM and application JavaScript currently run in the background runtime. The patched Tokio integration allows the main QuickJS driver to progress inside the native event loop, so the DOM-facing JavaScript runtime can move onto the UI thread beside window management, layout, scene construction, and presentation.
+Layout, the mutable DOM, and application JavaScript run on the UI thread inside `ApplicationHost`. The upstream Tokio integration keeps one worker for timers, I/O, and `Send` tasks while native callbacks poll the persistent main-thread `LocalSet`, so QuickJS remains colocated with window management, layout, scene construction, and presentation.
 
 The final architecture uses one JavaScript runtime for the Burokku application. `DualRuntime`, its dedicated background JavaScript thread, and its cross-runtime bridge are removed rather than retained as optional infrastructure.
 
@@ -14,9 +14,10 @@ Application code that needs asynchronous I/O continues to use Tokio. CPU-intensi
 
 ```text
 AppKit event loop
-  -> patched Tokio bounded tick
+  <- Tokio worker wakes ready local work
+  -> poll persistent LocalSet once
   -> main QuickJS macrotask and ready microtasks
-  -> bounded Tokio tick returns
+  -> LocalSet poll returns
   -> about_to_wait observes the DOM revision
   -> native-window reconciliation
   -> redraw: borrow DOM -> layout -> build scene and hit-test plan
@@ -39,7 +40,7 @@ AppKit event loop
 - Reintroducing a background JavaScript isolate or cross-runtime DOM bridge.
 - Holding a DOM borrow across an `.await`, native operation that may reenter the event loop, or GPU presentation.
 - Removing the owned presented-frame hit-test plan.
-- Replacing Tokio's bounded external tick with synchronous polling from window callbacks.
+- Polling QuickJS synchronously from window-event handlers instead of the event-loop source callback.
 
 ## Current architecture
 
@@ -74,9 +75,9 @@ LayoutEngine::compute
 
 `ComputedLayout` retains `Arc<PublishedDom>` because scene construction later reads DOM iteration order and paint styles from the publication's snapshot.
 
-### Application runner mismatch
+### Application runner
 
-`crates/burokku/src/app.rs` still assumes an already-running Tokio runtime and calls `EventLoop::run_app`. The updated window crate exposes `EventLoop::run_app_external`, which owns a patched current-thread Tokio runtime and one persistent `LocalSet` while the native platform loop remains outermost.
+`Burokku::run` calls `EventLoop::run_app_external`, which owns an upstream one-worker Tokio runtime and one persistent main-thread `LocalSet` while the native platform loop remains outermost.
 
 ## Target architecture
 
@@ -97,7 +98,7 @@ pub fn run(self) -> Result<(), BurokkuError> {
 }
 ```
 
-The persistent `LocalSet` owns the main QuickJS driver and other thread-affine futures. Tokio I/O readiness may be collected by its reactor thread, but application futures, QuickJS, DOM access, layout, and rendering remain on the UI thread.
+The persistent `LocalSet` owns the main QuickJS driver and other thread-affine futures. Upstream Tokio's worker owns timers, I/O readiness, and ordinary `tokio::spawn` tasks; application callbacks, `spawn_local`, QuickJS, DOM access, layout, and rendering remain on the UI thread.
 
 ### DOM ownership
 
@@ -134,7 +135,7 @@ The retained `ComputedLayout`, `BuiltScene`, `ScenePlan`, and `PresentedFrame` m
 
 The target architecture removes `Plugin::checkpoint` and the runtime's post-macrotask plugin iteration. The production checkpoint override is used only by `DomPlugin`; its snapshot-publication responsibility disappears, and its detached-node reclamation moves to `ApplicationHost::about_to_wait`.
 
-The local QuickJS task executes one synchronous macrotask and drains its ready microtasks before yielding back to Tokio. `run_app_external` invokes `about_to_wait` after the bounded Tokio tick returns, so the host cannot observe the middle of that JavaScript work. One tick may complete several JavaScript tasks; processing only the latest DOM revision intentionally coalesces them into one native reconciliation and redraw request.
+The local QuickJS task executes one synchronous macrotask and drains its ready microtasks before yielding. `run_app_external` invokes `about_to_wait` after the LocalSet poll returns, so the host cannot observe the middle of that JavaScript work. One poll may complete several JavaScript tasks; processing only the latest DOM revision intentionally coalesces them into one native reconciliation and redraw request.
 
 `about_to_wait` should:
 
@@ -377,7 +378,7 @@ With `DualRuntime` removed, `crates/runtime` should make thread affinity part of
 - remove or redesign `Runtime::build` if it automatically uses `tokio::spawn`;
 - prefer `RuntimeBuilder::build_driven` under the event loop's persistent `LocalSet`;
 - remove rquickjs's `parallel` feature so QuickJS's type-level contract matches local execution;
-- update runtime tests to enter a current-thread runtime and persistent `LocalSet`.
+- update runtime tests to enter an upstream one-worker runtime and poll a persistent `LocalSet`.
 
 Asynchronous networking, timers, and synchronization continue to use Tokio. Blocking or CPU-intensive Rust work must be explicitly offloaded with `spawn_blocking`; no background JavaScript runtime is retained.
 
@@ -427,7 +428,7 @@ JavaScript mutation
   -> reconcile and request redraw
 ```
 
-A separate `CommitNotifier` wake is unnecessary because runnable Tokio/QuickJS work already wakes the patched external event loop, and `about_to_wait` follows every bounded external tick.
+A separate `CommitNotifier` wake is unnecessary because runnable local Tokio/QuickJS work wakes the proxy-backed native source, and `about_to_wait` follows every LocalSet poll.
 
 ### Host state machine
 
@@ -456,7 +457,7 @@ Tests should create `Dom` directly and pass `&Dom` to window, text, layout, and 
 
 ### Batch consistency
 
-Layout and rendering may only observe DOM state after one JavaScript macrotask and all currently ready microtasks have finished and the bounded Tokio tick has returned. No native callback may synchronously poll QuickJS and then render before that scheduler boundary.
+Layout and rendering may only observe DOM state after one JavaScript macrotask and all currently ready microtasks have finished and the LocalSet poll has returned. No native callback may synchronously poll QuickJS and then render before that scheduler boundary.
 
 ### No long-lived DOM references
 
@@ -506,7 +507,7 @@ Snapshots are removable; temporal identity is not.
 6. Replace automatic `tokio::spawn` driving with explicit `build_driven` plus `spawn_local`.
 7. Remove the rquickjs `parallel` feature.
 8. Remove `Plugin::checkpoint`, runtime checkpoint iteration, and checkpoint-only tests.
-9. Update remaining runtime tests to use a current-thread runtime and `LocalSet`.
+9. Update remaining runtime tests to use an upstream one-worker runtime and `LocalSet`.
 
 Exit criteria:
 
@@ -519,7 +520,7 @@ Exit criteria:
 
 1. Change `BurokkuBuilder` from `DualRuntimeBuilder` to `RuntimeBuilder`.
 2. Make `Burokku::run` synchronous.
-3. Supply one persistent `LocalSet` to `run_app_external`; it builds and owns patched Tokio.
+3. Supply one persistent `LocalSet` to `run_app_external`; it builds and owns upstream one-worker Tokio.
 4. Build and drive the single QuickJS runtime on that LocalSet.
 5. Install Console, JSON, Timers, and `DomPlugin` once.
 6. Evaluate the application script on the single runtime.
@@ -641,7 +642,7 @@ Same-thread state can still be reentered through nested native loops. Keeping DO
 
 ### Long synchronous work
 
-Patched Tokio's external tick budget limits task polls, not the duration of one poll. Long JavaScript, layout, shaping, or scene construction still blocks native events. This migration removes transport overhead; it does not provide preemption.
+A LocalSet poll is not preemption. Long JavaScript, layout, shaping, or scene construction still blocks native events. This migration removes transport overhead; it does not provide preemption.
 
 ### Shutdown ordering
 

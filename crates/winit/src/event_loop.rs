@@ -125,8 +125,8 @@ fn with_external_context<T>(
             .enter();
         callback()
     } else {
-        // A native event may be emitted reentrantly while a Tokio tick is
-        // polling the LocalSet. That tick has already entered this exact local
+        // A native event may be emitted reentrantly while a native tick is
+        // polling the LocalSet. That poll already entered this exact local
         // context, so borrowing the LocalSet again is unnecessary.
         callback()
     }
@@ -158,8 +158,8 @@ impl<F: FnOnce()> Drop for EventHandlerGuard<F> {
 
 /// A thread-safe handle for promptly waking an idle native event loop.
 ///
-/// Waking does not itself dispatch an application event. It schedules a bounded
-/// Tokio tick and invokes `about_to_wait`, where cross-thread state can be consumed
+/// Waking does not itself dispatch an application event. It requests a LocalSet
+/// poll and then invokes `about_to_wait`, where cross-thread state can be consumed
 /// without busy polling.
 #[derive(Clone, Debug)]
 pub struct EventLoopProxy {
