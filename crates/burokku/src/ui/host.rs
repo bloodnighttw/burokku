@@ -459,14 +459,13 @@ impl ApplicationHost {
         };
         match initialized {
             Ok((graphics, renderer)) => {
-                let previous_graphics = self.graphics.replace(graphics);
+                self.graphics.replace(graphics);
                 let (previous_window, previous_renderer) =
                     pending
                         .prepared
                         .commit_with(&mut self.windows, &mut self.renderer, renderer);
                 self.discard_stale_presented_frame();
-                drop(previous_renderer);
-                drop(previous_graphics);
+                drop(previous_renderer); // releases surface before window
                 if let Some(previous_window) = previous_window {
                     previous_window.close();
                 }
