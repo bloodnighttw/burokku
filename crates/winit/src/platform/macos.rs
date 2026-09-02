@@ -744,7 +744,7 @@ impl PlatformEventLoop {
             .set_handler(Box::new(move |window_id, event| {
                 handler(window_id, event);
                 // A platform-owned loop must run about_to_wait after native
-                // dispatch even when no Tokio task independently wakes it.
+                // dispatch even when no local task independently wakes it.
                 wake.wake_up();
             }));
     }

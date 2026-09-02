@@ -23,8 +23,9 @@ such as live window resizing.
 ```text
 AppKit / CFRunLoop owns the main thread
   -> native wake source or deadline timer fires
-  -> burokku-winit performs one bounded, nonblocking Tokio tick
-  -> Tokio tasks, timers, I/O readiness, and one persistent LocalSet progress
+  -> burokku-winit polls one persistent main-thread LocalSet
+  -> upstream Tokio's worker drives timers, I/O, and Send tasks
+  -> ready local tasks run on the main thread
   -> application callbacks receive queued window events
   -> control returns to AppKit
 ```
@@ -43,43 +44,22 @@ progress while a window is being interactively resized.
   and close-request events.
 - `raw-window-handle` 0.6 support for graphics integrations.
 - A thread-safe `EventLoopProxy` for waking an idle UI loop.
-- Patched Tokio current-thread runtime integration with configurable bounded
-  tick work.
+- Upstream Tokio integration with one worker and a main-thread `LocalSet`.
 - Persistent `LocalSet` support for `!Send` futures and thread-affine runtimes.
 - Responsive redraw and Tokio progress during AppKit's nested live-resize loop.
 
-## Workspace and Tokio setup
+## Tokio setup
 
-This crate's external-loop API depends on the patched Tokio source in
-`crates/tokio/tokio`. The repository workspace already selects it in the root
-`Cargo.toml`:
-
-```toml
-[patch.crates-io]
-tokio = { path = "crates/tokio/tokio" }
-```
-
-Cargo patches are not transitive. A downstream root project that consumes
-`burokku-winit` by path or Git must apply an equivalent `[patch.crates-io]`
-entry pointing to this repository's patched Tokio checkout. Without that patch,
-methods such as `Builder::external_event_loop`,
-`Builder::external_tick_budget`, and
-`Runtime::tick_nonblocking_with_local_set` are unavailable.
-
-Use one resolved Tokio version for the application, `burokku-winit`, and any
-runtime integration built on top of it. In this workspace, a dependency can use
-Tokio normally because the root patch redirects it:
+The external-loop API uses upstream Tokio from crates.io and requires no Cargo
+patch or vendored source. Applications may depend on Tokio normally:
 
 ```toml
 [dependencies]
 burokku-winit = { path = "crates/winit" }
-tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
-
-[patch.crates-io]
-tokio = { path = "crates/tokio/tokio" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 ```
 
-Adjust the paths when `burokku-winit` is consumed from another repository.
+Keep one resolved Tokio version in the application lockfile.
 
 ## Minimal application
 
@@ -168,8 +148,8 @@ application value.
 - `resumed` runs before the native loop begins and is the usual place to create
   windows and initialize renderer state.
 - `window_event` receives an event together with the originating `WindowId`.
-- `about_to_wait` runs after a bounded Tokio tick and before the native loop
-  waits again. It is useful for consuming state produced by other threads.
+- `about_to_wait` runs after one LocalSet poll and before the native loop waits
+  again. It is useful for consuming state produced by other threads.
 - `exiting` runs once while the event loop is shutting down.
 
 Native events are normally delivered immediately. If an AppKit callback occurs
@@ -192,17 +172,16 @@ keeping resize and redraw events responsive in nested platform loops.
 
 The available `ControlFlow` modes are:
 
-- `Wait` (default): sleep until native input, an explicit wake, or Tokio's next
-  timer deadline.
-- `WaitUntil(instant)`: wake at the earlier of the application deadline and
-  Tokio's next timer deadline.
+- `Wait` (default): sleep until native input or an explicit/runtime wake.
+- `WaitUntil(instant)`: additionally arm the native application deadline. Tokio
+  timers remain owned by Tokio's worker and wake the LocalSet through the proxy.
 - `Poll`: continually request another event-loop tick. This is useful for
   continuous rendering but consumes more power than redraw-on-demand.
 
 ### Waking from another thread
 
 `EventLoopProxy::wake_up` does not synthesize a custom application event. It
-only causes a prompt bounded Tokio tick followed by `about_to_wait`, where the
+only requests a prompt LocalSet poll followed by `about_to_wait`, where the
 application can inspect a channel, atomic, or other shared state:
 
 ```rust
@@ -213,7 +192,7 @@ std::thread::spawn(move || {
 });
 ```
 
-The proxy also implements the patched `tokio::runtime::ExternalWake` trait.
+The proxy implements `std::task::Wake` and backs the LocalSet waker.
 
 ## Windows and rendering
 
@@ -262,21 +241,20 @@ coordinates and sizes reported by events are physical pixels.
 
 ## Runtime behavior and constraints
 
-`run_app_external` builds and owns a Tokio **current-thread** runtime and wires
-its external wake callback to the native loop. Callers cannot supply an unwired
-runtime.
+`run_app_external` builds and owns an upstream Tokio multi-thread runtime with
+exactly one worker. Callers cannot supply a runtime. The worker owns timers, I/O
+drivers, and ordinary `tokio::spawn` tasks.
 
-Each native callback performs nonblocking reactor work, advances timers, polls
-the persistent `LocalSet`, and polls at most the configured number of regular
-Tokio scheduler tasks. If runnable work remains, Tokio wakes the platform loop
-for another tick. I/O readiness is collected on Tokio's dedicated Mio reactor
-thread, but application futures and `LocalSet` futures remain on the UI thread.
+Each native tick enters that runtime and polls
+`LocalSet::run_until(std::future::pending())` once with a standard waker backed
+by `EventLoopProxy`. The persistent LocalSet keeps `spawn_local`, QuickJS, DOM,
+layout, and rendering futures on the UI thread; LocalSet backlog and worker-side
+completions wake AppKit through the proxy.
 
-The tick budget bounds the number of scheduler tasks polled; it is **not
-preemption**. A future that performs long synchronous work in one poll still
-blocks AppKit, window events, and all other current-thread tasks. Move blocking
-or CPU-heavy work to `spawn_blocking` or another worker and wake the UI loop when
-its result is ready.
+This is **not preemption**. A local future that performs long synchronous work
+in one poll still blocks AppKit and window events. Move blocking or CPU-heavy
+work to `spawn_blocking` or another worker, then resolve a future/channel awaited
+locally or call `EventLoopProxy::wake_up`.
 
 Additional constraints:
 
@@ -284,7 +262,6 @@ Additional constraints:
 - On macOS, event-loop creation and driving must happen on the process main
   thread or `Error::NotMainThread` is returned.
 - Keep one persistent `LocalSet`; do not alternate different local sets.
-- Tokio paused/virtual time is not supported by native deadline driving.
 - `ControlFlow::Poll` can increase CPU and battery use.
 - Linux, Windows, Wayland, X11, and WASI native backends are not implemented.
 
@@ -299,7 +276,7 @@ cargo run -p burokku-winit --example cf_run_loop_tokio
 
 While it runs, continuously resize the window for at least five seconds. The
 JavaScript counter and fetch attempts should continue during the drag, showing
-that the wake source and timer are active in AppKit's nested tracking loop.
+that the proxy-backed source remains active in AppKit's nested tracking loop.
 
 To demonstrate the non-preemptive limitation, run:
 
@@ -316,18 +293,14 @@ thread; both the window and timers are expected to stall for those two seconds.
 From the repository root:
 
 ```sh
-cargo test -p burokku-winit
-cargo check -p burokku-winit --example cf_run_loop_tokio
+cargo test -p runtime --locked
+cargo test -p burokku-winit --locked
+cargo check -p burokku-winit --example cf_run_loop_tokio --locked
+cargo tree -i tokio --workspace
 ```
 
-The patched Tokio driver and runtime integration have additional focused tests:
-
-```sh
-cargo test --manifest-path crates/tokio/Cargo.toml -p tokio \
-  --test rt_external_driver --features full
-cargo test -p runtime --test external_tokio
-```
+The dependency tree must contain one registry Tokio version.
 
 See [`docs/tokio_external_event_loop.md`](../../docs/tokio_external_event_loop.md)
-for the patched Tokio scheduler/reactor design, wake and deadline contract,
-shutdown invariants, test coverage, and notes for future platform backends.
+for the worker/LocalSet ownership model, wake contract, shutdown order, and test
+coverage.
