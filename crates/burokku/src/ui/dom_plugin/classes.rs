@@ -1,15 +1,11 @@
 use std::{cell::Ref, collections::HashMap, rc::Rc};
 
 use rquickjs::{
-    class::Trace, object::Property, Class, Coerced, Constructor, Ctx, Function, IntoJs,
-    JsLifetime, Null, Object, Result, Value,
+    class::Trace, object::Property, Class, Coerced, Constructor, Ctx, Function, IntoJs, JsLifetime,
+    Null, Object, Result, Value,
 };
 
-use super::{
-    errors,
-    lifetime::SharedWrapperRoots,
-    LayoutRect, SharedUiDom, UiDomState,
-};
+use super::{errors, lifetime::SharedWrapperRoots, LayoutRect, SharedUiDom, UiDomState};
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
 #[derive(Trace, JsLifetime)]
@@ -20,14 +16,14 @@ struct WrapperEntry<'js> {
 }
 
 #[derive(Trace, JsLifetime)]
-#[rquickjs::class(frozen)]
+#[rquickjs::class]
 struct WrapperCache<'js> {
     // ponytail: linear lookup; add a traced index only if large DOMs make this measurable.
     entries: Vec<WrapperEntry<'js>>,
 }
 
-impl WrapperCache<'_> {
-    fn reference(&self, id: NodeId) -> Option<Object<'_>> {
+impl<'js> WrapperCache<'js> {
+    fn reference(&self, id: NodeId) -> Option<Object<'js>> {
         self.entries
             .iter()
             .find(|entry| entry.id == id)
@@ -48,13 +44,11 @@ pub(super) struct NativeNode<'js> {
     id: NodeId,
     #[qjs(skip_trace)]
     wrapper_roots: SharedWrapperRoots,
-    cache: Class<'js, WrapperCache<'js>>,
     listeners: HashMap<String, Vec<Function<'js>>>,
 }
 
 impl Drop for NativeNode<'_> {
     fn drop(&mut self) {
-        self.cache.borrow_mut().remove(self.id);
         self.wrapper_roots.borrow_mut().release(self.id);
     }
 }
@@ -203,11 +197,7 @@ impl<'js> NativeNode<'js> {
         Ok(old_child)
     }
 
-    fn contains(
-        &self,
-        context: Ctx<'js>,
-        other: Class<'js, NativeNode<'js>>,
-    ) -> Result<bool> {
+    fn contains(&self, context: Ctx<'js>, other: Class<'js, NativeNode<'js>>) -> Result<bool> {
         let other = self.related_id(&context, &other)?;
         let result = borrow(&context, &self.state)?
             .dom
@@ -414,11 +404,7 @@ impl<'js> NativeNode<'js> {
     }
 
     #[qjs(skip)]
-    fn related_id(
-        &self,
-        context: &Ctx<'js>,
-        node: &Class<'js, NativeNode<'js>>,
-    ) -> Result<NodeId> {
+    fn related_id(&self, context: &Ctx<'js>, node: &Class<'js, NativeNode<'js>>) -> Result<NodeId> {
         let node = node.try_borrow()?;
         if !Rc::ptr_eq(&self.state, &node.state) {
             return errors::invalid_token(context);
@@ -657,8 +643,15 @@ fn cache_wrapper<'js>(
 }
 
 fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result<Object<'js>> {
-    let token = encode_node_id(id);
-    if let Some(cached) = cached_wrapper(context, &token)? {
+    let cache = wrapper_cache(context)?;
+    let released = borrow(context, state)?.take_released_wrappers();
+    if !released.is_empty() {
+        let mut cache = cache.borrow_mut();
+        for id in released {
+            cache.remove(id);
+        }
+    }
+    if let Some(cached) = cached_wrapper(&cache, id)? {
         return Ok(cached);
     }
 
@@ -695,6 +688,7 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             state: state.clone(),
             id,
             wrapper_roots,
+            listeners: HashMap::new(),
         },
         prototype,
     )?;
@@ -712,7 +706,8 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
 
     cache_wrapper(
         context,
-        token,
+        &cache,
+        id,
         node.as_value()
             .as_object()
             .expect("class instance is an object"),

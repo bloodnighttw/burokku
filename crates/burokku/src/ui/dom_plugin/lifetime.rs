@@ -21,6 +21,7 @@ pub(super) type SharedWrapperRoots = Rc<RefCell<WrapperRoots>>;
 #[derive(Debug, Default)]
 pub(super) struct WrapperRoots {
     nodes: HashSet<NodeId>,
+    released: Vec<NodeId>,
 }
 
 impl WrapperRoots {
@@ -32,7 +33,11 @@ impl WrapperRoots {
     }
 
     pub(super) fn release(&mut self, id: NodeId) {
-        debug_assert!(self.nodes.remove(&id), "wrapper root must be registered");
+        let removed = self.nodes.remove(&id);
+        debug_assert!(removed, "wrapper root must be registered");
+        if removed {
+            self.released.push(id);
+        }
     }
 }
 
@@ -48,6 +53,10 @@ impl UiDomState {
             .ok_or(DomError::NodeNotFound(id))?;
         self.wrapper_roots.borrow_mut().acquire(id);
         Ok(Rc::clone(&self.wrapper_roots))
+    }
+
+    pub(super) fn take_released_wrappers(&self) -> Vec<NodeId> {
+        std::mem::take(&mut self.wrapper_roots.borrow_mut().released)
     }
 
     pub(crate) fn reclaim_detached(&mut self) -> runtime::Result<()> {
