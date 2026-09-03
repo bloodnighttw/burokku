@@ -1,13 +1,13 @@
 use std::{cell::Ref, rc::Rc};
 
 use rquickjs::{
-    class::Trace, object::Property, prelude::Func, Class, Coerced, Ctx, Function, IntoJs,
-    JsLifetime, Null, Object, Result, Value,
+    class::Trace, object::Property, Class, Coerced, Ctx, Function, IntoJs, JsLifetime, Null,
+    Object, Result, Value,
 };
 
 use super::{
     errors,
-    lifetime::{decode_node_id, encode_node_id},
+    lifetime::{encode_node_id, SharedWrapperRoots},
     LayoutRect, SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
@@ -19,8 +19,16 @@ pub(super) struct NativeNode {
     state: SharedUiDom,
     #[qjs(skip_trace)]
     id: NodeId,
+    // a tracer that 
+    #[qjs(skip_trace)]
+    wrapper_roots: SharedWrapperRoots,
 }
 
+impl Drop for NativeNode {
+    fn drop(&mut self) {
+        self.wrapper_roots.borrow_mut().release(self.id);
+    }
+}
 #[rquickjs::methods]
 impl<'js> NativeNode {
     #[qjs(get, rename = "parentNode")]
@@ -406,19 +414,8 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedUiDom) -> Result<()> {
         Class::<NativeNode>::prototype(context)?.expect("macro-backed Node class has a prototype");
     let style_methods = Class::<NativeStyleDeclaration>::prototype(context)?
         .expect("macro-backed style class has a prototype");
-    let release_wrapper = Func::from({
-        let state = state.clone();
-        move |context: Ctx<'_>, token: String| -> Result<()> {
-            let id = match decode_node_id(&token) {
-                Ok(id) => id,
-                Err(_) => return errors::invalid_token(&context),
-            };
-            borrow_mut(&context, &state)?.release_wrapper(id);
-            Ok(())
-        }
-    });
     let bootstrap: Function = context.eval(include_str!("../scripts/dom_facade.js"))?;
-    bootstrap.call::<_, ()>((node_methods, style_methods, release_wrapper))?;
+    bootstrap.call::<_, ()>((node_methods, style_methods))?;
 
     let root = borrow(context, &state)?.dom.root();
     let app = wrap_node(context, &state, root)?;
@@ -453,46 +450,41 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             },
         }
     };
-    {
-        let mut state = borrow_mut(context, state)?;
-        errors::map_dom(context, "acquire node wrapper", state.acquire_wrapper(id))?;
-    }
+    let constructor: Object = context.globals().get(constructor_name)?;
+    let prototype: Object = constructor.get("prototype")?;
+    let style_prototype = if is_element {
+        let constructor: Object = context.globals().get("BurokkuStyleDeclaration")?;
+        Some(constructor.get("prototype")?)
+    } else {
+        None
+    };
+    let wrapper_roots = {
+        let state = borrow(context, state)?;
+        errors::map_dom(context, "acquire node wrapper", state.acquire_wrapper(id))?
+    };
+    let node = Class::instance_proto(
+        NativeNode {
+            state: state.clone(),
+            id,
+            wrapper_roots,
+        },
+        prototype,
+    )?;
 
-    let result = (|| {
-        let constructor: Object = context.globals().get(constructor_name)?;
-        let prototype: Object = constructor.get("prototype")?;
-        let node = Class::instance_proto(
-            NativeNode {
+    if let Some(prototype) = style_prototype {
+        let style = Class::instance_proto(
+            NativeStyleDeclaration {
                 state: state.clone(),
                 id,
             },
             prototype,
         )?;
-
-        if is_element {
-            let constructor: Object = context.globals().get("BurokkuStyleDeclaration")?;
-            let prototype: Object = constructor.get("prototype")?;
-            let style = Class::instance_proto(
-                NativeStyleDeclaration {
-                    state: state.clone(),
-                    id,
-                },
-                prototype,
-            )?;
-            node.prop("style", Property::from(style))?;
-        }
-
-        let cache: Function = methods.get("cacheWrapper")?;
-        cache.call::<_, ()>((token, node.clone()))?;
-        Ok(node.into_inner())
-    })();
-
-    if result.is_err() {
-        if let Ok(mut state) = state.try_borrow_mut() {
-            state.release_wrapper(id);
-        }
+        node.prop("style", Property::from(style))?;
     }
-    result
+
+    let cache: Function = methods.get("cacheWrapper")?;
+    cache.call::<_, ()>((token, node.clone()))?;
+    Ok(node.into_inner())
 }
 
 fn layout_rect_object<'js>(context: &Ctx<'js>, rect: LayoutRect) -> Result<Object<'js>> {

@@ -1,6 +1,6 @@
 //! UI-thread ownership and QuickJS bindings for the live DOM.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use runtime::{rquickjs::Ctx, Plugin};
 
@@ -12,6 +12,8 @@ use super::{
 mod classes;
 mod errors;
 mod lifetime;
+
+use lifetime::SharedWrapperRoots;
 
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
@@ -26,7 +28,7 @@ pub(crate) struct LayoutRect {
 #[derive(Debug)]
 pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
-    pub(crate) live_wrappers: HashMap<NodeId, usize>,
+    wrapper_roots: SharedWrapperRoots,
     pub(crate) last_reclaim: ReclaimReport,
     layout: RefCell<Option<Rc<ComputedLayout>>>,
 }
@@ -65,7 +67,7 @@ impl DomPlugin {
     pub(crate) fn new() -> (Self, SharedUiDom) {
         let state = Rc::new(RefCell::new(UiDomState {
             dom: Dom::new(),
-            live_wrappers: HashMap::new(),
+            wrapper_roots: SharedWrapperRoots::default(),
             last_reclaim: ReclaimReport::default(),
             layout: RefCell::new(None),
         }));
@@ -167,8 +169,8 @@ mod tests {
         });
 
         let state = plugin.state();
-        assert_eq!(state.live_wrappers.len(), 1);
-        assert_eq!(state.live_wrappers.get(&state.dom.root()), Some(&1));
+        assert_eq!(state.live_wrapper_count(), 1);
+        assert!(state.has_wrapper(state.dom.root()));
     }
 
     #[test]
@@ -394,7 +396,7 @@ mod tests {
     #[test]
     fn unreachable_detached_wrappers_release_and_reclaim_during_host_maintenance() {
         let (plugin, _) = DomPlugin::new();
-        let (runtime, context) = context();
+        let (_runtime, context) = context();
 
         context.with(|context| {
             plugin.install(&context).unwrap();
@@ -408,10 +410,9 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(plugin.state().dom.node_count(), 2);
-        assert_eq!(plugin.state().live_wrappers.len(), 2);
-
-        collect_garbage(&runtime, &context);
-        assert_eq!(plugin.state().live_wrappers.len(), 1);
+        // NativeNode::drop releases the root when QuickJS drops the wrapper;
+        // no FinalizationRegistry callback or JavaScript job is needed.
+        assert_eq!(plugin.state().live_wrapper_count(), 1);
 
         plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
@@ -447,7 +448,7 @@ mod tests {
         assert_eq!(plugin.state().dom.node_count(), 4);
 
         collect_garbage(&runtime, &context);
-        assert_eq!(plugin.state().live_wrappers.len(), 2);
+        assert_eq!(plugin.state().live_wrapper_count(), 2);
         plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 4);
         assert!(plugin.state().last_reclaim.nodes.is_empty());
@@ -468,7 +469,7 @@ mod tests {
                 .unwrap();
         });
         collect_garbage(&runtime, &context);
-        assert_eq!(plugin.state().live_wrappers.len(), 1);
+        assert_eq!(plugin.state().live_wrapper_count(), 1);
 
         plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
@@ -531,7 +532,7 @@ mod tests {
         assert_eq!(plugin.state().dom.node_count(), 2);
 
         collect_garbage(&runtime, &context);
-        assert_eq!(plugin.state().live_wrappers.len(), 1);
+        assert_eq!(plugin.state().live_wrapper_count(), 1);
         plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
         context.with(|context| {
@@ -558,7 +559,7 @@ mod tests {
                 )
                 .unwrap();
         });
-        assert_eq!(plugin.state().live_wrappers.len(), 2);
+        assert_eq!(plugin.state().live_wrapper_count(), 1);
 
         // The native app tree retains the node even after its JavaScript
         // wrapper is collected, so traversal can intern a fresh wrapper.
@@ -572,7 +573,7 @@ mod tests {
                 .unwrap());
         });
         context.with(|context| while context.execute_pending_job() {});
-        assert_eq!(plugin.state().live_wrappers.len(), 2);
+        assert_eq!(plugin.state().live_wrapper_count(), 2);
         context.with(|context| {
             assert!(context
                 .eval::<bool, _>("app.firstChild === newWindowWrapper")
@@ -601,7 +602,7 @@ mod tests {
 
         collect_garbage(&runtime, &context);
         plugin.reclaim_for_test();
-        assert_eq!(plugin.state().live_wrappers.len(), 1);
+        assert_eq!(plugin.state().live_wrapper_count(), 1);
         assert_eq!(plugin.state().dom.node_count(), 1);
         assert_eq!(plugin.state().last_reclaim.nodes.len(), 100);
     }

@@ -1,4 +1,4 @@
-((nodeMethods, styleMethods, releaseWrapper) => {
+((nodeMethods, styleMethods) => {
   "use strict";
 
   function constructor(name, parent = null) {
@@ -96,7 +96,6 @@
   let nextGeneration = 1;
   const finalizers = new FinalizationRegistry(({ token, generation }) => {
     if (wrappers.get(token)?.generation === generation) wrappers.delete(token);
-    releaseWrapper(token);
   });
   const getWrapper = token => wrappers.get(token)?.reference.deref();
   const cacheWrapper = (token, wrapper) => {

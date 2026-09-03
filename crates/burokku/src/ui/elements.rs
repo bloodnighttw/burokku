@@ -961,7 +961,7 @@ impl Dom {
     /// sibling traversal makes every node in that component observable.
     pub(crate) fn reclaim_unreachable_detached<I>(
         &mut self,
-        live_wrappers: I,
+        wrapper_roots: I,
     ) -> Result<ReclaimReport, DomError>
     where
         I: IntoIterator<Item = NodeId>,
@@ -969,13 +969,14 @@ impl Dom {
         let mut marked = HashSet::new();
         self.mark_subtree(self.root, &mut marked);
 
-        for mut live in live_wrappers {
-            self.node(live).ok_or(DomError::NodeNotFound(live))?;
-            // find the root of the live wrapper
-            while let Some(parent) = self.nodes[live].parent {
-                live = parent;
+        for mut wrapper_root in wrapper_roots {
+            self.node(wrapper_root)
+                .ok_or(DomError::NodeNotFound(wrapper_root))?;
+            // Find the root of the component retained by this wrapper.
+            while let Some(parent) = self.nodes[wrapper_root].parent {
+                wrapper_root = parent;
             }
-            self.mark_subtree(live, &mut marked);
+            self.mark_subtree(wrapper_root, &mut marked);
         }
 
         // filter that id is not the root and hasn't been visited, which
