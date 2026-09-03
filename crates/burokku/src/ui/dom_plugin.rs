@@ -9,7 +9,7 @@ use super::{
     layout::ComputedLayout,
 };
 
-mod bindings;
+mod classes;
 mod errors;
 mod lifetime;
 
@@ -101,14 +101,14 @@ impl Plugin for DomPlugin {
     }
 
     fn install<'js>(&self, context: &Ctx<'js>) -> runtime::Result<()> {
-        bindings::install(context, Rc::clone(&self.state))
+        classes::install(context, Rc::clone(&self.state))
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use runtime::rquickjs::{CatchResultExt, Context, Runtime as JsRuntime};
+    use runtime::rquickjs::{CatchResultExt, Context, Object, Runtime as JsRuntime};
 
     use super::*;
     use crate::ui::{
@@ -150,6 +150,8 @@ mod tests {
 
         context.with(|context| {
             plugin.install(&context).unwrap();
+            let app: Object = context.globals().get("app").unwrap();
+            assert!(app.instance_of::<classes::NativeNode>());
             let values: Vec<bool> = context
                 .eval(
                     "[\

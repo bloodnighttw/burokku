@@ -25,6 +25,7 @@ glifo = { version = "0.3.0", default-features = false, features = ["std"] }
 llrt_modules = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", default-features = false, features = ["path", "timers"] }
 llrt_utils = { git = "https://github.com/awslabs/llrt", rev = "7b95c82a9b15e7ddfb2778eca4b5a63111e74f51", default-features = false }
 parley = "0.11.1"
+rquickjs = { version = "0.12", features = ["macro"] }
 runtime = { path = "../runtime" }
 skrifa = "0.44"
 slotmap = "1"
