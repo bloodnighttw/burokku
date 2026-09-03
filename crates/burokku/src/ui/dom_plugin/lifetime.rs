@@ -1,3 +1,14 @@
+//! DOM node lifetime ownership rules.
+//!
+//! 1. The app tree retains every connected descendant, even without JavaScript wrappers.
+//! 2. A live canonical JavaScript wrapper retains its entire detached component so parent
+//!    and sibling traversal remains valid.
+//! 3. `NodeId` values held by layout, rendering, or other derived state are non-owning.
+//! 4. Dropping the final wrapper only makes a detached component eligible for reclamation;
+//!    cleanup happens after QuickJS GC at the next host maintenance point (in about_to_wait).
+//! 5. Every use of a retained `NodeId` must validate its generation because reclamation can
+//!    make non-owning handles stale.
+
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use slotmap::Key;
