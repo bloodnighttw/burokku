@@ -18,12 +18,27 @@ impl<T> JsOptions<T> {
         matches!(self, Self::Undefined)
     }
 
+    pub fn is_undefined_and<U>(&self, f: impl FnOnce() -> U) -> Option<U> {
+        matches!(self, Self::Undefined).then(f)
+    }
+
     pub const fn is_null(&self) -> bool {
         matches!(self, Self::Null)
     }
 
+    pub fn is_null_and<U>(&self, f: impl FnOnce() -> U) -> Option<U> {
+        matches!(self, Self::Null).then(f)
+    }
+
     pub const fn is_some(&self) -> bool {
         matches!(self, Self::Some(_))
+    }
+
+    pub fn is_some_and<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
+        match self {
+            Self::Some(value) => Some(f(value)),
+            _ => None,
+        }
     }
 
     pub const fn as_ref(&self) -> JsOptions<&T> {
