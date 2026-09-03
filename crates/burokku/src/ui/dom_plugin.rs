@@ -24,52 +24,35 @@ pub(crate) struct LayoutRect {
 }
 
 #[derive(Debug)]
-struct LayoutSnapshot {
-    revision: u64,
-    rects: HashMap<NodeId, LayoutRect>,
-}
-
-#[derive(Debug)]
 pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
     pub(crate) live_wrappers: HashMap<NodeId, usize>,
     pub(crate) last_reclaim: ReclaimReport,
-    layout: RefCell<Option<LayoutSnapshot>>,
+    layout: RefCell<Option<Rc<ComputedLayout>>>,
 }
 
 impl UiDomState {
-    pub(crate) fn publish_layout(&self, computed: &ComputedLayout) {
-        let rects = self
-            .dom
-            .iter()
-            .filter_map(|(id, _)| {
-                let computed_box = computed.box_for(id)?;
-                let origin = computed_box.border_origin();
-                let size = computed_box.layout().size;
-                Some((
-                    id,
-                    LayoutRect {
-                        x: origin.x,
-                        y: origin.y,
-                        width: size.width,
-                        height: size.height,
-                    },
-                ))
-            })
-            .collect();
-        self.layout.replace(Some(LayoutSnapshot {
-            revision: computed.revision(),
-            rects,
-        }));
+    pub(crate) fn publish_layout(&self, computed: Rc<ComputedLayout>) {
+        self.layout.replace(Some(computed));
     }
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
         self.dom.element_tag(id)?;
         let layout = self.layout.borrow();
         Ok(layout
-            .as_ref()
-            .filter(|layout| layout.revision == self.dom.revision())
-            .and_then(|layout| layout.rects.get(&id).copied()))
+            .as_deref()
+            .filter(|layout| layout.revision() == self.dom.revision())
+            .and_then(|layout| layout.box_for(id))
+            .map(|computed_box| {
+                let origin = computed_box.border_origin();
+                let size = computed_box.layout().size;
+                LayoutRect {
+                    x: origin.x,
+                    y: origin.y,
+                    width: size.width,
+                    height: size.height,
+                }
+            }))
     }
 }
 
@@ -268,10 +251,15 @@ mod tests {
         let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
         {
             let state = state.borrow();
-            let computed = layout
+            layout
                 .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
                 .unwrap();
-            state.publish_layout(computed);
+            let computed = layout.current_shared().unwrap();
+            state.publish_layout(Rc::clone(&computed));
+            assert!(Rc::ptr_eq(
+                state.layout.borrow().as_ref().unwrap(),
+                &computed
+            ));
         }
 
         context.with(|context| {
@@ -303,10 +291,10 @@ mod tests {
 
         {
             let state = state.borrow();
-            let computed = layout
+            layout
                 .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
                 .unwrap();
-            state.publish_layout(computed);
+            state.publish_layout(layout.current_shared().unwrap());
         }
         context.with(|context| {
             assert_eq!(

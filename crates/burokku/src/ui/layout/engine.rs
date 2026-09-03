@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 
 use taffy::{geometry::Size, AvailableSpace};
 
@@ -20,7 +20,7 @@ use super::{
 #[derive(Debug)]
 pub(crate) struct LayoutEngine<M> {
     measurer: M,
-    current: Option<ComputedLayout>,
+    current: Option<Rc<ComputedLayout>>,
 }
 
 impl<M: TextMeasurer> LayoutEngine<M> {
@@ -32,7 +32,11 @@ impl<M: TextMeasurer> LayoutEngine<M> {
     }
 
     pub(crate) fn current(&self) -> Option<&ComputedLayout> {
-        self.current.as_ref()
+        self.current.as_deref()
+    }
+
+    pub(crate) fn current_shared(&self) -> Option<Rc<ComputedLayout>> {
+        self.current.clone()
     }
 
     pub(crate) fn measurer_mut(&mut self) -> &mut M {
@@ -56,7 +60,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         }) {
             return Ok(self
                 .current
-                .as_ref()
+                .as_deref()
                 .expect("the matching current layout was checked above"));
         }
 
@@ -88,10 +92,10 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             }
         };
         self.measurer.retain_sources(&active_text_sources);
-        self.current = Some(next);
+        self.current = Some(Rc::new(next));
         Ok(self
             .current
-            .as_ref()
+            .as_deref()
             .expect("a successfully computed layout was just installed"))
     }
 }

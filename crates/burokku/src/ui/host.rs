@@ -747,7 +747,7 @@ impl ApplicationHost {
                 .try_borrow()
                 .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?;
             revision = state.dom.revision();
-            let computed = self.layout.compute(&state.dom, viewport).map_err(|error| {
+            self.layout.compute(&state.dom, viewport).map_err(|error| {
                 classify_candidate_failure(
                     revision,
                     has_presented_frame,
@@ -756,10 +756,14 @@ impl ApplicationHost {
                     error.into(),
                 )
             })?;
-            state.publish_layout(computed);
+            let computed = self
+                .layout
+                .current_shared()
+                .expect("a successful layout computation installs current state");
+            state.publish_layout(Rc::clone(&computed));
             let frame = BuiltScene::build(
                 &state.dom,
-                computed,
+                &computed,
                 physical_size,
                 scale_factor,
                 renderer.resources_mut(),
