@@ -5,4 +5,4 @@ edition = "2021"
 publish = false
 
 [dependencies]
-burokku = { path = "../../crates/burokku" }
+burokku = { path = "../../crates/burokku", default-features = false, features = ["llrt-console"] }

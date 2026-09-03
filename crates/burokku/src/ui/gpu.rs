@@ -7,7 +7,10 @@ use std::{
 };
 
 use thiserror::Error;
-use vello_hybrid::{RenderSize, RenderTargetConfig, Renderer, Resources, TextureBindings};
+use vello_hybrid::{
+    AtlasConfig, LayersConfig, MemorySettings, RenderSettings, RenderSize, RenderTargetConfig,
+    Renderer, Resources, SizeU16, TextureBindings,
+};
 use wgpu::{
     Adapter, CurrentSurfaceTexture, Device, Instance, Queue, Surface, SurfaceConfiguration,
     SurfaceTargetUnsafe, TextureFormat,
@@ -20,6 +23,25 @@ static NEXT_SURFACE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn next_surface_generation() -> u64 {
     NEXT_SURFACE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+fn renderer_settings() -> RenderSettings {
+    RenderSettings {
+        memory_settings: MemorySettings {
+            image_atlas_config: AtlasConfig {
+                atlas_size: (1024, 1024),
+                max_atlases: 2,
+                ..Default::default()
+            },
+            // ponytail: four 4K layer textures cap GPU growth; expose settings if complex scenes need more.
+            layers_config: LayersConfig {
+                max_textures: Some(4),
+                min_texture_size: SizeU16::new(256),
+                max_texture_size: SizeU16::new(4096),
+            },
+        },
+        ..Default::default()
+    }
 }
 
 /// A WGPU surface paired with the thread-affine Window that owns its handles.
@@ -228,13 +250,14 @@ impl WindowRenderer {
             .ok_or(GraphicsError::UnsupportedSurface)?;
         config.format = format;
         target.surface.configure(&graphics.device, &config);
-        let (renderer, resources) = Renderer::new(
+        let (renderer, resources) = Renderer::new_with(
             &graphics.device,
             &RenderTargetConfig {
                 format,
                 width: size.width,
                 height: size.height,
             },
+            renderer_settings(),
         );
 
         Ok(Self {
@@ -380,13 +403,14 @@ impl WindowRenderer {
         let capabilities = surface.get_capabilities(&graphics.adapter);
         let format = choose_surface_format(&capabilities.formats)
             .ok_or(GraphicsError::UnsupportedSurface)?;
-        let (renderer, resources) = Renderer::new(
+        let (renderer, resources) = Renderer::new_with(
             &graphics.device,
             &RenderTargetConfig {
                 format,
                 width: self.config.width,
                 height: self.config.height,
             },
+            renderer_settings(),
         );
         self.config.format = format;
         self.target.surface = surface;
@@ -489,6 +513,17 @@ mod tests {
             selected,
             Err(("preferred incompatible", "fallback incompatible"))
         );
+    }
+
+    #[test]
+    fn renderer_memory_is_bounded_for_ui_workloads() {
+        let memory = renderer_settings().memory_settings;
+        assert_eq!(memory.image_atlas_config.initial_atlas_count, 0);
+        assert_eq!(memory.image_atlas_config.atlas_size, (1024, 1024));
+        assert_eq!(memory.image_atlas_config.max_atlases, 2);
+        assert_eq!(memory.layers_config.max_textures, Some(4));
+        assert_eq!(memory.layers_config.min_texture_size, SizeU16::new(256));
+        assert_eq!(memory.layers_config.max_texture_size, SizeU16::new(4096));
     }
 
     #[test]

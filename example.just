@@ -3,3 +3,6 @@ non-blocking:
 
 counter:
     cargo run -p burokku-example-counter
+
+layout:
+    cargo run -p burokku-example-layouts
