@@ -1,36 +1,65 @@
-use std::{cell::Ref, rc::Rc};
+use std::{cell::Ref, collections::HashMap, rc::Rc};
 
 use rquickjs::{
-    class::Trace, object::Property, Class, Coerced, Ctx, Function, IntoJs, JsLifetime, Null,
-    Object, Result, Value,
+    class::Trace, object::Property, Class, Coerced, Constructor, Ctx, Function, IntoJs,
+    JsLifetime, Null, Object, Result, Value,
 };
 
 use super::{
     errors,
-    lifetime::{encode_node_id, SharedWrapperRoots},
+    lifetime::SharedWrapperRoots,
     LayoutRect, SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
 #[derive(Trace, JsLifetime)]
-#[rquickjs::class(rename = "NativeNode", frozen)]
-pub(super) struct NativeNode {
+struct WrapperEntry<'js> {
+    #[qjs(skip_trace)]
+    id: NodeId,
+    reference: Object<'js>,
+}
+
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class(frozen)]
+struct WrapperCache<'js> {
+    // ponytail: linear lookup; add a traced index only if large DOMs make this measurable.
+    entries: Vec<WrapperEntry<'js>>,
+}
+
+impl WrapperCache<'_> {
+    fn reference(&self, id: NodeId) -> Option<Object<'_>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.reference.clone())
+    }
+
+    fn remove(&mut self, id: NodeId) {
+        self.entries.retain(|entry| entry.id != id);
+    }
+}
+
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class(rename = "NativeNode")]
+pub(super) struct NativeNode<'js> {
     #[qjs(skip_trace)]
     state: SharedUiDom,
     #[qjs(skip_trace)]
     id: NodeId,
-    // a tracer that 
     #[qjs(skip_trace)]
     wrapper_roots: SharedWrapperRoots,
+    cache: Class<'js, WrapperCache<'js>>,
+    listeners: HashMap<String, Vec<Function<'js>>>,
 }
 
-impl Drop for NativeNode {
+impl Drop for NativeNode<'_> {
     fn drop(&mut self) {
+        self.cache.borrow_mut().remove(self.id);
         self.wrapper_roots.borrow_mut().release(self.id);
     }
 }
 #[rquickjs::methods]
-impl<'js> NativeNode {
+impl<'js> NativeNode<'js> {
     #[qjs(get, rename = "parentNode")]
     fn parent_node(&self, context: Ctx<'js>) -> Result<Value<'js>> {
         self.optional_node(&context, "read parentNode", |state| {
@@ -88,12 +117,34 @@ impl<'js> NativeNode {
         errors::map_dom(&context, "read isConnected", result)
     }
 
+    #[qjs(rename = "addEventListener")]
+    fn add_event_listener(&mut self, event_type: Coerced<String>, callback: Function<'js>) {
+        let callbacks = self.listeners.entry(event_type.0).or_default();
+        if !callbacks.contains(&callback) {
+            callbacks.push(callback);
+        }
+    }
+
+    #[qjs(rename = "removeEventListener")]
+    fn remove_event_listener(&mut self, event_type: Coerced<String>, callback: Value<'js>) {
+        let Some(callback) = callback.into_function() else {
+            return;
+        };
+        let Some(callbacks) = self.listeners.get_mut(&event_type.0) else {
+            return;
+        };
+        callbacks.retain(|candidate| candidate != &callback);
+        if callbacks.is_empty() {
+            self.listeners.remove(&event_type.0);
+        }
+    }
+
     #[qjs(rename = "appendChild")]
     fn append_child(
         &self,
         context: Ctx<'js>,
-        child: Class<'js, NativeNode>,
-    ) -> Result<Class<'js, NativeNode>> {
+        child: Class<'js, NativeNode<'js>>,
+    ) -> Result<Class<'js, NativeNode<'js>>> {
         let child_id = self.related_id(&context, &child)?;
         let result = borrow_mut(&context, &self.state)?
             .dom
@@ -106,9 +157,9 @@ impl<'js> NativeNode {
     fn insert_before(
         &self,
         context: Ctx<'js>,
-        child: Class<'js, NativeNode>,
-        reference: Option<Class<'js, NativeNode>>,
-    ) -> Result<Class<'js, NativeNode>> {
+        child: Class<'js, NativeNode<'js>>,
+        reference: Option<Class<'js, NativeNode<'js>>>,
+    ) -> Result<Class<'js, NativeNode<'js>>> {
         let child_id = self.related_id(&context, &child)?;
         let reference_id = reference
             .as_ref()
@@ -126,8 +177,8 @@ impl<'js> NativeNode {
     fn remove_child(
         &self,
         context: Ctx<'js>,
-        child: Class<'js, NativeNode>,
-    ) -> Result<Class<'js, NativeNode>> {
+        child: Class<'js, NativeNode<'js>>,
+    ) -> Result<Class<'js, NativeNode<'js>>> {
         let child_id = self.related_id(&context, &child)?;
         let result = borrow_mut(&context, &self.state)?
             .dom
@@ -140,9 +191,9 @@ impl<'js> NativeNode {
     fn replace_child(
         &self,
         context: Ctx<'js>,
-        new_child: Class<'js, NativeNode>,
-        old_child: Class<'js, NativeNode>,
-    ) -> Result<Class<'js, NativeNode>> {
+        new_child: Class<'js, NativeNode<'js>>,
+        old_child: Class<'js, NativeNode<'js>>,
+    ) -> Result<Class<'js, NativeNode<'js>>> {
         let new_id = self.related_id(&context, &new_child)?;
         let old_id = self.related_id(&context, &old_child)?;
         let result = borrow_mut(&context, &self.state)?
@@ -152,7 +203,11 @@ impl<'js> NativeNode {
         Ok(old_child)
     }
 
-    fn contains(&self, context: Ctx<'js>, other: Class<'js, NativeNode>) -> Result<bool> {
+    fn contains(
+        &self,
+        context: Ctx<'js>,
+        other: Class<'js, NativeNode<'js>>,
+    ) -> Result<bool> {
         let other = self.related_id(&context, &other)?;
         let result = borrow(&context, &self.state)?
             .dom
@@ -359,7 +414,11 @@ impl<'js> NativeNode {
     }
 
     #[qjs(skip)]
-    fn related_id(&self, context: &Ctx<'js>, node: &Class<'js, NativeNode>) -> Result<NodeId> {
+    fn related_id(
+        &self,
+        context: &Ctx<'js>,
+        node: &Class<'js, NativeNode<'js>>,
+    ) -> Result<NodeId> {
         let node = node.try_borrow()?;
         if !Rc::ptr_eq(&self.state, &node.state) {
             return errors::invalid_token(context);
@@ -409,13 +468,23 @@ impl NativeStyleDeclaration {
     }
 }
 
-pub(super) fn install(context: &Ctx<'_>, state: SharedUiDom) -> Result<()> {
-    let node_methods =
-        Class::<NativeNode>::prototype(context)?.expect("macro-backed Node class has a prototype");
+const WRAPPER_CACHE: &str = "__burokkuWrapperCache";
+
+pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedUiDom) -> Result<()> {
+    let node_methods = Class::<NativeNode<'js>>::prototype(context)?
+        .expect("macro-backed Node class has a prototype");
+    node_methods.prop(
+        WRAPPER_CACHE,
+        Class::instance(
+            context.clone(),
+            WrapperCache {
+                entries: Vec::new(),
+            },
+        )?,
+    )?;
     let style_methods = Class::<NativeStyleDeclaration>::prototype(context)?
         .expect("macro-backed style class has a prototype");
-    let bootstrap: Function = context.eval(include_str!("../scripts/dom_facade.js"))?;
-    bootstrap.call::<_, ()>((node_methods, style_methods))?;
+    install_facade(context, &node_methods, &style_methods)?;
 
     let root = borrow(context, &state)?.dom.root();
     let app = wrap_node(context, &state, root)?;
@@ -425,12 +494,171 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedUiDom) -> Result<()> {
     Ok(())
 }
 
+fn install_facade<'js>(
+    context: &Ctx<'js>,
+    node_methods: &Object<'js>,
+    style_methods: &Object<'js>,
+) -> Result<()> {
+    let node = dom_constructor(context, "Node", None)?;
+    let app = dom_constructor(context, "AppNode", Some(&node))?;
+    let text_node = dom_constructor(context, "TextNode", Some(&node))?;
+    let element = dom_constructor(context, "Element", Some(&node))?;
+    let window = dom_constructor(context, "Window", Some(&element))?;
+    let div = dom_constructor(context, "Div", Some(&element))?;
+    let flex = dom_constructor(context, "Flex", Some(&element))?;
+    let grid = dom_constructor(context, "Grid", Some(&element))?;
+    let text_element = dom_constructor(context, "TextElement", Some(&element))?;
+    let style = dom_constructor(context, "BurokkuStyleDeclaration", None)?;
+
+    let node_prototype: Object = node.get("prototype")?;
+    copy_properties(
+        context,
+        &node_prototype,
+        node_methods,
+        &[
+            "parentNode",
+            "childNodes",
+            "firstChild",
+            "lastChild",
+            "nextSibling",
+            "previousSibling",
+            "isConnected",
+            "appendChild",
+            "insertBefore",
+            "removeChild",
+            "replaceChild",
+            "contains",
+            "textContent",
+            "nodeValue",
+            "addEventListener",
+            "removeEventListener",
+        ],
+    )?;
+
+    copy_properties(
+        context,
+        &app.get("prototype")?,
+        node_methods,
+        &["createElement", "createTextNode"],
+    )?;
+    copy_properties(
+        context,
+        &text_node.get("prototype")?,
+        node_methods,
+        &["data"],
+    )?;
+    copy_properties(
+        context,
+        &element.get("prototype")?,
+        node_methods,
+        &[
+            "localName",
+            "getBoundingClientRect",
+            "getAttribute",
+            "hasAttribute",
+            "setAttribute",
+            "removeAttribute",
+        ],
+    )?;
+    copy_properties(
+        context,
+        &style.get("prototype")?,
+        style_methods,
+        &["supportsProperty", "setProperty", "removeProperty"],
+    )?;
+
+    for (name, constructor) in [
+        ("Node", node),
+        ("AppNode", app),
+        ("TextNode", text_node),
+        ("Element", element),
+        ("Window", window),
+        ("Div", div),
+        ("Flex", flex),
+        ("Grid", grid),
+        ("TextElement", text_element),
+        ("BurokkuStyleDeclaration", style),
+    ] {
+        context.globals().prop(name, constructor)?;
+    }
+    Ok(())
+}
+
+fn dom_constructor<'js>(
+    context: &Ctx<'js>,
+    name: &str,
+    parent: Option<&Constructor<'js>>,
+) -> Result<Constructor<'js>> {
+    let parent_prototype = parent
+        .map(|constructor| constructor.get::<_, Object>("prototype"))
+        .transpose()?;
+    let prototype = Object::new_proto(context.clone(), parent_prototype.as_ref())?;
+    let constructor = Constructor::new_prototype(context, prototype, illegal_constructor)?;
+    constructor.set_name(name)?;
+    if let Some(parent) = parent {
+        let parent: &Object = parent.as_inner().as_inner();
+        constructor.set_prototype(Some(parent))?;
+    }
+    Ok(constructor)
+}
+
+fn illegal_constructor<'js>(context: Ctx<'js>) -> Result<Object<'js>> {
+    Err(rquickjs::Exception::throw_type(
+        &context,
+        "Illegal constructor",
+    ))
+}
+
+fn copy_properties<'js>(
+    context: &Ctx<'js>,
+    target: &Object<'js>,
+    source: &Object<'js>,
+    names: &[&str],
+) -> Result<()> {
+    let object: Object = context.globals().get("Object")?;
+    let descriptor: Function = object.get("getOwnPropertyDescriptor")?;
+    let define: Function = object.get("defineProperty")?;
+    for name in names {
+        let property: Object = descriptor.call((source.clone(), *name))?;
+        define.call::<_, Object>((target.clone(), *name, property))?;
+    }
+    Ok(())
+}
+
+fn wrapper_cache<'js>(context: &Ctx<'js>) -> Result<Class<'js, WrapperCache<'js>>> {
+    Class::<NativeNode<'js>>::prototype(context)?
+        .expect("macro-backed Node class has a prototype")
+        .get(WRAPPER_CACHE)
+}
+
+fn cached_wrapper<'js>(
+    cache: &Class<'js, WrapperCache<'js>>,
+    id: NodeId,
+) -> Result<Option<Object<'js>>> {
+    let Some(reference) = cache.borrow().reference(id) else {
+        return Ok(None);
+    };
+    let deref: Function = reference.get("deref")?;
+    deref.call((rquickjs::function::This(reference),))
+}
+
+fn cache_wrapper<'js>(
+    context: &Ctx<'js>,
+    cache: &Class<'js, WrapperCache<'js>>,
+    id: NodeId,
+    wrapper: &Object<'js>,
+) -> Result<()> {
+    let weak_ref: Constructor = context.globals().get("WeakRef")?;
+    cache.borrow_mut().entries.push(WrapperEntry {
+        id,
+        reference: weak_ref.construct((wrapper.clone(),))?,
+    });
+    Ok(())
+}
+
 fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result<Object<'js>> {
     let token = encode_node_id(id);
-    let methods =
-        Class::<NativeNode>::prototype(context)?.expect("macro-backed Node has a prototype");
-    let get_cached: Function = methods.get("getCachedWrapper")?;
-    if let Some(cached) = get_cached.call::<_, Option<Object>>((token.clone(),))? {
+    if let Some(cached) = cached_wrapper(context, &token)? {
         return Ok(cached);
     }
 
@@ -482,8 +710,13 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
         node.prop("style", Property::from(style))?;
     }
 
-    let cache: Function = methods.get("cacheWrapper")?;
-    cache.call::<_, ()>((token, node.clone()))?;
+    cache_wrapper(
+        context,
+        token,
+        node.as_value()
+            .as_object()
+            .expect("class instance is an object"),
+    )?;
     Ok(node.into_inner())
 }
 
