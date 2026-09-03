@@ -1,11 +1,11 @@
 use std::cell::{Ref, RefMut};
 
-use runtime::rquickjs::{prelude::Func, Ctx, Function, Object, Result};
+use runtime::rquickjs::{object::Property, prelude::Func, Ctx, Function, Object, Result};
 
 use super::{
     errors,
     lifetime::{decode_node_id, encode_node_id},
-    SharedUiDom, UiDomState,
+    LayoutRect, SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -313,6 +313,25 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedUiDom) -> Result<()> {
     )?;
 
     native.set(
+        "getBoundingClientRect",
+        Func::from({
+            let state = state.clone();
+            move |context: Ctx<'_>, token: String, object: Object<'_>| -> Result<bool> {
+                let id = decode(&context, &token)?;
+                let result = {
+                    let state = borrow(&context, &state)?;
+                    state.layout_rect(id)
+                };
+                let Some(rect) = errors::map_dom(&context, "read layout", result)? else {
+                    return Ok(false);
+                };
+                write_layout_rect(&object, rect)?;
+                Ok(true)
+            }
+        }),
+    )?;
+
+    native.set(
         "localName",
         Func::from({
             let state = state.clone();
@@ -464,6 +483,22 @@ pub(super) fn install(context: &Ctx<'_>, state: SharedUiDom) -> Result<()> {
 
     let bootstrap: Function = context.eval(include_str!("../scripts/dom_facade.js"))?;
     bootstrap.call((native,))
+}
+
+fn write_layout_rect(object: &Object<'_>, rect: LayoutRect) -> Result<()> {
+    for (name, value) in [
+        ("x", rect.x),
+        ("y", rect.y),
+        ("width", rect.width),
+        ("height", rect.height),
+        ("top", rect.y),
+        ("right", rect.x + rect.width),
+        ("bottom", rect.y + rect.height),
+        ("left", rect.x),
+    ] {
+        object.prop(name, Property::from(value).enumerable())?;
+    }
+    Ok(())
 }
 
 fn decode(context: &Ctx<'_>, token: &str) -> Result<NodeId> {

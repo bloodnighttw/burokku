@@ -49,6 +49,18 @@ export interface BurokkuStyleDeclaration {
   removeProperty(name: string): void;
 }
 
+/** Last successfully calculated border box in logical pixels. */
+export interface BurokkuDOMRectReadOnly {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+  readonly left: number;
+}
+
 /** Shared behavior for script-creatable Burokku elements. */
 export interface Element<
   Tag extends BurokkuTagName = BurokkuTagName,
@@ -57,6 +69,7 @@ export interface Element<
   readonly localName: Tag;
   readonly style: BurokkuStyleDeclaration;
 
+  getBoundingClientRect(): BurokkuDOMRectReadOnly | null;
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
   setAttribute(name: string, value: string): void;

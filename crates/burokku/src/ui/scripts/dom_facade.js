@@ -189,6 +189,13 @@
       return this.#style;
     }
 
+    getBoundingClientRect() {
+      const rect = {};
+      return native.getBoundingClientRect(handleOf(this), rect)
+        ? Object.freeze(rect)
+        : null;
+    }
+
     getAttribute(name) {
       const value = native.getAttribute(handleOf(this), String(name));
       return value === undefined ? null : value;

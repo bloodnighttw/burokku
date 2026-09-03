@@ -4,7 +4,10 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use runtime::{rquickjs::Ctx, Plugin};
 
-use super::elements::{Dom, NodeId, ReclaimReport};
+use super::{
+    elements::{Dom, DomError, NodeId, ReclaimReport},
+    layout::ComputedLayout,
+};
 
 mod bindings;
 mod errors;
@@ -12,11 +15,62 @@ mod lifetime;
 
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LayoutRect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+#[derive(Debug)]
+struct LayoutSnapshot {
+    revision: u64,
+    rects: HashMap<NodeId, LayoutRect>,
+}
+
 #[derive(Debug)]
 pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
     pub(crate) live_wrappers: HashMap<NodeId, usize>,
     pub(crate) last_reclaim: ReclaimReport,
+    layout: RefCell<Option<LayoutSnapshot>>,
+}
+
+impl UiDomState {
+    pub(crate) fn publish_layout(&self, computed: &ComputedLayout) {
+        let rects = self
+            .dom
+            .iter()
+            .filter_map(|(id, _)| {
+                let computed_box = computed.box_for(id)?;
+                let origin = computed_box.border_origin();
+                let size = computed_box.layout().size;
+                Some((
+                    id,
+                    LayoutRect {
+                        x: origin.x,
+                        y: origin.y,
+                        width: size.width,
+                        height: size.height,
+                    },
+                ))
+            })
+            .collect();
+        self.layout.replace(Some(LayoutSnapshot {
+            revision: computed.revision(),
+            rects,
+        }));
+    }
+
+    pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
+        self.dom.element_tag(id)?;
+        let layout = self.layout.borrow();
+        Ok(layout
+            .as_ref()
+            .filter(|layout| layout.revision == self.dom.revision())
+            .and_then(|layout| layout.rects.get(&id).copied()))
+    }
 }
 
 /// Installs bindings backed by the UI thread's live DOM.
@@ -30,6 +84,7 @@ impl DomPlugin {
             dom: Dom::new(),
             live_wrappers: HashMap::new(),
             last_reclaim: ReclaimReport::default(),
+            layout: RefCell::new(None),
         }));
         (
             Self {
@@ -73,7 +128,11 @@ mod tests {
     use runtime::rquickjs::{CatchResultExt, Context, Runtime as JsRuntime};
 
     use super::*;
-    use crate::ui::elements::{Element, NodeKind};
+    use crate::ui::{
+        elements::{Element, NodeKind},
+        layout::{LayoutEngine, LogicalViewport},
+        text::TextEngine,
+    };
 
     fn context() -> (JsRuntime, Context) {
         let runtime = JsRuntime::new().unwrap();
@@ -184,6 +243,79 @@ mod tests {
         ));
         assert_eq!(dom.text(text), Some("after"));
         assert_eq!(dom.attribute(div, "role"), Some("status"));
+    }
+
+    #[test]
+    fn element_exposes_only_current_read_only_layout_rects() {
+        let (plugin, state) = DomPlugin::new();
+        let (_runtime, context) = context();
+
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            assert!(context
+                .eval::<bool, _>(
+                    "globalThis.layoutWindow = app.createElement('window');\
+                     globalThis.layoutDiv = app.createElement('div');\
+                     layoutDiv.style.setProperty('width', '20px');\
+                     layoutDiv.style.setProperty('height', '10px');\
+                     layoutWindow.appendChild(layoutDiv);\
+                     app.appendChild(layoutWindow);\
+                     layoutDiv.getBoundingClientRect() === null",
+                )
+                .unwrap());
+        });
+
+        let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
+        {
+            let state = state.borrow();
+            let computed = layout
+                .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
+                .unwrap();
+            state.publish_layout(computed);
+        }
+
+        context.with(|context| {
+            let values: Vec<f32> = context
+                .eval(
+                    "const rect = layoutDiv.getBoundingClientRect();\
+                     [rect.x, rect.y, rect.width, rect.height,\
+                      rect.top, rect.right, rect.bottom, rect.left]",
+                )
+                .unwrap();
+            assert_eq!(values, [0.0, 0.0, 20.0, 10.0, 0.0, 20.0, 10.0, 0.0]);
+            assert!(context
+                .eval::<bool, _>(
+                    "const firstRect = layoutDiv.getBoundingClientRect();\
+                     const secondRect = layoutDiv.getBoundingClientRect();\
+                     Object.isFrozen(firstRect)\
+                       && firstRect !== secondRect\
+                       && Reflect.set(firstRect, 'width', 99) === false\
+                       && firstRect.width === 20",
+                )
+                .unwrap());
+            assert!(context
+                .eval::<bool, _>(
+                    "layoutDiv.style.setProperty('width', '30px');\
+                     layoutDiv.getBoundingClientRect() === null",
+                )
+                .unwrap());
+        });
+
+        {
+            let state = state.borrow();
+            let computed = layout
+                .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
+                .unwrap();
+            state.publish_layout(computed);
+        }
+        context.with(|context| {
+            assert_eq!(
+                context
+                    .eval::<f32, _>("layoutDiv.getBoundingClientRect().width")
+                    .unwrap(),
+                30.0
+            );
+        });
     }
 
     #[test]

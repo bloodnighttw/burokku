@@ -756,6 +756,7 @@ impl ApplicationHost {
                     error.into(),
                 )
             })?;
+            state.publish_layout(computed);
             let frame = BuiltScene::build(
                 &state.dom,
                 computed,

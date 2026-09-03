@@ -15,6 +15,14 @@ declare const text: TextElement;
 declare const windowElement: WindowElement;
 declare const flexStyles: BurokkuFlexStyle;
 
+const rect = div.getBoundingClientRect();
+if (rect) {
+  const width: number = rect.width;
+  void width;
+  // @ts-expect-error Calculated layout values are read-only.
+  rect.width = 10;
+}
+
 setStyles(div, {
   width: "100%",
   padding: "8px",
