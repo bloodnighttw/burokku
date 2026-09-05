@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn queued_click_reaches_its_target_listener() {
+    async fn queued_click_bubbles_and_honors_dispatch_controls() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (plugin, state) = DomPlugin::new();
@@ -578,25 +578,55 @@ mod tests {
                 runtime
                     .eval::<()>(
                         "globalThis.clickResult = [];\n\
+                         globalThis.clickEvent = null;\n\
+                         globalThis.immediateEvent = null;\n\
                          globalThis.clickWindow = app.createElement('window');\n\
                          globalThis.clickTarget = app.createElement('div');\n\
+                         globalThis.immediateTarget = app.createElement('div');\n\
+                         const removed = () => clickResult.push('removed');\n\
                          clickTarget.addEventListener('click', function (event) {\n\
-                           clickResult = [event.type,\n\
+                           globalThis.clickEvent = event;\n\
+                           clickResult.push(event.type,\n\
                              String(event.target === clickTarget),\n\
                              String(event.currentTarget === clickTarget),\n\
                              String(this === clickTarget),\n\
                              String(event.clientX), String(event.clientY),\n\
-                             String(event.button)];\n\
+                             String(event.button));\n\
+                           event.preventDefault();\n\
+                           clickTarget.removeEventListener('click', removed);\n\
                          });\n\
+                         clickTarget.addEventListener('click', removed);\n\
+                         clickTarget.addEventListener('click',\n\
+                           () => clickResult.push('target-2'));\n\
+                         clickTarget.addEventListener('click', () => {\n\
+                           throw new Error('expected listener failure');\n\
+                         });\n\
+                         clickTarget.addEventListener('click',\n\
+                           () => clickResult.push('after-error'));\n\
+                         clickWindow.addEventListener('click', function (event) {\n\
+                           clickResult.push(event.currentTarget === clickWindow\n\
+                             && this === clickWindow ? 'window' : 'wrong-window');\n\
+                           event.stopPropagation();\n\
+                         });\n\
+                         app.addEventListener('click', () => clickResult.push('app'));\n\
+                         immediateTarget.addEventListener('click', event => {\n\
+                           globalThis.immediateEvent = event;\n\
+                           clickResult.push('immediate');\n\
+                           event.stopImmediatePropagation();\n\
+                         });\n\
+                         immediateTarget.addEventListener('click',\n\
+                           () => clickResult.push('skipped'));\n\
                          clickWindow.appendChild(clickTarget);\n\
+                         clickWindow.appendChild(immediateTarget);\n\
                          app.appendChild(clickWindow);",
                     )
                     .await
                     .unwrap();
-                let (target, presented_revision) = {
+                let (target, immediate_target, presented_revision) = {
                     let state = state.borrow();
                     let window = state.dom.children(state.dom.root()).unwrap()[0];
-                    (state.dom.children(window).unwrap()[0], state.dom.revision())
+                    let children = state.dom.children(window).unwrap();
+                    (children[0], children[1], state.dom.revision())
                 };
 
                 state
@@ -608,10 +638,46 @@ mod tests {
                         client_y: 8.25,
                     })
                     .unwrap();
-                let result: Vec<String> = runtime.eval("clickResult").await.unwrap();
+                state
+                    .borrow()
+                    .enqueue_click(NativeClick {
+                        target: immediate_target,
+                        presented_revision,
+                        client_x: 20.0,
+                        client_y: 10.0,
+                    })
+                    .unwrap();
+                let result: Vec<String> = runtime
+                    .eval(
+                        "[...clickResult,\n\
+                         String(clickEvent.defaultPrevented),\n\
+                         String(clickEvent.currentTarget === null),\n\
+                         String(clickEvent.bubbles),\n\
+                         String(clickEvent.cancelable),\n\
+                         String(immediateEvent.currentTarget === null)]",
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(
                     result,
-                    ["click", "true", "true", "true", "12.5", "8.25", "0"]
+                    [
+                        "click",
+                        "true",
+                        "true",
+                        "true",
+                        "12.5",
+                        "8.25",
+                        "0",
+                        "target-2",
+                        "after-error",
+                        "window",
+                        "immediate",
+                        "true",
+                        "true",
+                        "true",
+                        "true",
+                        "true",
+                    ]
                 );
 
                 runtime.shutdown().await.unwrap();

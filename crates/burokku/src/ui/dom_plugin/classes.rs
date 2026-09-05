@@ -1,8 +1,8 @@
 use std::{cell::Ref, collections::HashMap, rc::Rc};
 
 use rquickjs::{
-    class::Trace, object::Property, prelude::This, Class, Coerced, Constructor, Ctx, Function,
-    IntoJs, JsLifetime, Null, Object, Result, Value,
+    class::Trace, object::Property, prelude::This, CatchResultExt, Class, Coerced, Constructor,
+    Ctx, Function, IntoJs, JsLifetime, Null, Object, Result, Value,
 };
 
 use super::{
@@ -44,7 +44,6 @@ struct NativeClickEvent<'js> {
     event_type: String,
     #[qjs(get, enumerable)]
     target: Object<'js>,
-    #[qjs(get, enumerable)]
     current_target: Option<Object<'js>>,
     #[qjs(get, enumerable)]
     client_x: f64,
@@ -52,6 +51,49 @@ struct NativeClickEvent<'js> {
     client_y: f64,
     #[qjs(get, enumerable)]
     button: u8,
+    #[qjs(get, enumerable)]
+    bubbles: bool,
+    #[qjs(get, enumerable)]
+    cancelable: bool,
+    #[qjs(get, enumerable)]
+    default_prevented: bool,
+    propagation_stopped: bool,
+    immediate_propagation_stopped: bool,
+}
+
+#[rquickjs::methods]
+impl<'js> NativeClickEvent<'js> {
+    #[qjs(get, rename = "currentTarget", enumerable)]
+    fn current_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
+        match &self.current_target {
+            Some(target) => Ok(target.clone().into_value()),
+            None => Null.into_js(&context),
+        }
+    }
+
+    #[qjs(rename = "preventDefault")]
+    fn prevent_default(&mut self) {
+        if self.cancelable {
+            self.default_prevented = true;
+        }
+    }
+
+    #[qjs(rename = "stopPropagation")]
+    fn stop_propagation(&mut self) {
+        self.propagation_stopped = true;
+    }
+
+    #[qjs(rename = "stopImmediatePropagation")]
+    fn stop_immediate_propagation(&mut self) {
+        self.propagation_stopped = true;
+        self.immediate_propagation_stopped = true;
+    }
+}
+
+#[derive(Clone, Trace, JsLifetime)]
+struct EventListener<'js> {
+    id: u64,
+    callback: Function<'js>,
 }
 
 #[derive(Trace, JsLifetime)]
@@ -63,7 +105,8 @@ pub(super) struct NativeNode<'js> {
     id: NodeId,
     #[qjs(skip_trace)]
     wrapper_roots: SharedWrapperRoots,
-    listeners: HashMap<String, Vec<Function<'js>>>,
+    listeners: HashMap<String, Vec<EventListener<'js>>>,
+    next_listener_id: u64,
 }
 
 impl Drop for NativeNode<'_> {
@@ -132,10 +175,23 @@ impl<'js> NativeNode<'js> {
 
     #[qjs(rename = "addEventListener")]
     fn add_event_listener(&mut self, event_type: Coerced<String>, callback: Function<'js>) {
-        let callbacks = self.listeners.entry(event_type.0).or_default();
-        if !callbacks.contains(&callback) {
-            callbacks.push(callback);
+        let event_type = event_type.0;
+        if self
+            .listeners
+            .get(&event_type)
+            .is_some_and(|listeners| listeners.iter().any(|item| item.callback == callback))
+        {
+            return;
         }
+        let id = self.next_listener_id;
+        self.next_listener_id = self
+            .next_listener_id
+            .checked_add(1)
+            .expect("event listener IDs exhausted");
+        self.listeners
+            .entry(event_type)
+            .or_default()
+            .push(EventListener { id, callback });
     }
 
     #[qjs(rename = "removeEventListener")]
@@ -146,7 +202,7 @@ impl<'js> NativeNode<'js> {
         let Some(callbacks) = self.listeners.get_mut(&event_type.0) else {
             return;
         };
-        callbacks.retain(|candidate| candidate != &callback);
+        callbacks.retain(|candidate| candidate.callback != callback);
         if callbacks.is_empty() {
             self.listeners.remove(&event_type.0);
         }
@@ -708,6 +764,7 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             id,
             wrapper_roots,
             listeners: HashMap::new(),
+            next_listener_id: 0,
         },
         prototype,
     )?;
@@ -740,42 +797,90 @@ pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()
         return Ok(());
     };
     let state = app.borrow().state.clone();
-    let valid_target = {
+    let path = {
         let state = borrow(context, &state)?;
-        click.presented_revision <= state.dom.revision()
-            && state.dom.is_connected(click.target).unwrap_or(false)
+        debug_assert!(click.presented_revision <= state.dom.revision());
+        if !state.dom.is_connected(click.target).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let mut path = Vec::new();
+        let mut current = Some(click.target);
+        while let Some(id) = current {
+            path.push(id);
+            current = errors::map_dom(
+                context,
+                "build click propagation path",
+                state.dom.parent_node(id),
+            )?;
+        }
+        path
     };
-    if !valid_target {
+
+    let mut listeners = Vec::with_capacity(path.len());
+    for id in path {
+        let current = wrap_node(context, &state, id)?;
+        let node =
+            Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+        let callbacks = node
+            .borrow()
+            .listeners
+            .get("click")
+            .cloned()
+            .unwrap_or_default();
+        listeners.push((current, callbacks));
+    }
+    if listeners.iter().all(|(_, callbacks)| callbacks.is_empty()) {
         return Ok(());
     }
 
-    let target = wrap_node(context, &state, click.target)?;
-    let node = Class::<NativeNode>::from_object(&target).expect("wrapped nodes use NativeNode");
-    let callbacks = node
-        .borrow()
-        .listeners
-        .get("click")
-        .cloned()
-        .unwrap_or_default();
-    if callbacks.is_empty() {
-        return Ok(());
-    }
-
+    let target = listeners[0].0.clone();
     let event = Class::instance(
         context.clone(),
         NativeClickEvent {
             event_type: "click".into(),
             target: target.clone(),
-            current_target: Some(target.clone()),
+            current_target: None,
             client_x: click.client_x,
             client_y: click.client_y,
             button: 0,
+            bubbles: true,
+            cancelable: true,
+            default_prevented: false,
+            propagation_stopped: false,
+            immediate_propagation_stopped: false,
         },
     )?;
 
-    for callback in callbacks {
-        callback.call::<_, ()>((This(target.clone()), event.clone()))?;
+    for (current, callbacks) in listeners {
+        event.borrow_mut().current_target = Some(current.clone());
+        for listener in callbacks {
+            let node =
+                Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+            let still_registered = node
+                .borrow()
+                .listeners
+                .get("click")
+                .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
+            if !still_registered {
+                continue;
+            }
+            if let Err(error) = listener
+                .callback
+                .call::<_, ()>((This(current.clone()), event.clone()))
+                .catch(context)
+            {
+                eprintln!("Burokku click listener failed: {error}");
+            }
+            if event.borrow().immediate_propagation_stopped {
+                break;
+            }
+        }
+        if event.borrow().propagation_stopped {
+            break;
+        }
     }
+    event.borrow_mut().current_target = None;
     Ok(())
 }
 
