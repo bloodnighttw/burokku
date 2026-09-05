@@ -14,10 +14,10 @@ const panel = app.createElement("flex");
 setStyles(panel, {
   width: "100%",
   height: "100%",
-  "flex-direction": "row",
+  "flex-direction": "column",
   "align-items": "center",
   "justify-content": "center",
-  gap: "16px",
+  gap: "4px",
   "background-color": "#111827ff",
 });
 
@@ -63,9 +63,9 @@ caption.appendChild(app.createTextNode("Updated every second on the UI-thread LL
 
 const controls = app.createElement("flex");
 setStyles(controls, {
-  width: "220px",
-  height: "100%",
-  "flex-direction": "column",
+  margin: "64px",
+  padding: "32px",
+  "flex-direction": "row",
   "align-items": "center",
   "justify-content": "center",
   gap: "8px",
