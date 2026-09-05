@@ -563,6 +563,85 @@ mod tests {
         });
     }
 
+    #[test]
+    fn connected_listener_wrapper_is_rooted_only_while_attached() {
+        let (plugin, _) = DomPlugin::new();
+        let (runtime, context) = context();
+
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    "globalThis.connectedListenerCalls = 0;\
+                     globalThis.weakRefDeref = WeakRef.prototype.deref;\
+                     WeakRef.prototype.deref = () => { throw new Error('overridden deref') };\
+                     (() => {\
+                       const windowNode = app.createElement('window');\
+                       const beforeAttach = app.createElement('div');\
+                       const afterAttach = app.createElement('div');\
+                       beforeAttach.addEventListener('click',\
+                         () => connectedListenerCalls++);\
+                       globalThis.beforeAttachWeakRef = new WeakRef(beforeAttach);\
+                       globalThis.afterAttachWeakRef = new WeakRef(afterAttach);\
+                       windowNode.appendChild(beforeAttach);\
+                       windowNode.appendChild(afterAttach);\
+                       app.appendChild(windowNode);\
+                       afterAttach.addEventListener('click',\
+                         () => connectedListenerCalls++);\
+                     })()",
+                )
+                .unwrap();
+        });
+        let (targets, presented_revision) = {
+            let state = plugin.state();
+            let window = state.dom.children(state.dom.root()).unwrap()[0];
+            (
+                state.dom.children(window).unwrap().to_vec(),
+                state.dom.revision(),
+            )
+        };
+
+        collect_garbage(&runtime, &context);
+        context.with(|context| {
+            assert!(context
+                .eval::<bool, _>(
+                    "weakRefDeref.call(beforeAttachWeakRef) !== undefined\
+                       && weakRefDeref.call(afterAttachWeakRef) !== undefined",
+                )
+                .unwrap());
+            for target in targets.iter().copied() {
+                classes::dispatch_click(
+                    &context,
+                    NativeClick {
+                        target,
+                        presented_revision,
+                        client_x: 0.0,
+                        client_y: 0.0,
+                    },
+                )
+                .unwrap();
+            }
+            assert_eq!(context.eval::<u32, _>("connectedListenerCalls").unwrap(), 2);
+            context
+                .eval::<(), _>("app.removeChild(app.firstChild)")
+                .unwrap();
+        });
+
+        collect_garbage(&runtime, &context);
+        context.with(|context| {
+            assert!(context
+                .eval::<bool, _>(
+                    "weakRefDeref.call(beforeAttachWeakRef) === undefined\
+                       && weakRefDeref.call(afterAttachWeakRef) === undefined",
+                )
+                .unwrap());
+        });
+        plugin.reclaim_for_test();
+        assert!(targets
+            .into_iter()
+            .all(|target| plugin.state().dom.node(target).is_none()));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn queued_click_bubbles_and_honors_dispatch_controls() {
         tokio::task::LocalSet::new()

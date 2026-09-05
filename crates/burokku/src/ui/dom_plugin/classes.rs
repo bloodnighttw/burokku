@@ -18,10 +18,20 @@ struct WrapperEntry<'js> {
 }
 
 #[derive(Trace, JsLifetime)]
+struct ListenerRoot<'js> {
+    #[qjs(skip_trace)]
+    id: NodeId,
+    wrapper: Object<'js>,
+}
+
+#[derive(Trace, JsLifetime)]
 #[rquickjs::class]
 struct WrapperCache<'js> {
     // ponytail: linear lookup; add a traced index only if large DOMs make this measurable.
     entries: Vec<WrapperEntry<'js>>,
+    listener_roots: Vec<ListenerRoot<'js>>,
+    weak_ref: Constructor<'js>,
+    weak_ref_deref: Function<'js>,
 }
 
 impl<'js> WrapperCache<'js> {
@@ -34,6 +44,7 @@ impl<'js> WrapperCache<'js> {
 
     fn remove(&mut self, id: NodeId) {
         self.entries.retain(|entry| entry.id != id);
+        self.listener_roots.retain(|entry| entry.id != id);
     }
 }
 
@@ -174,38 +185,59 @@ impl<'js> NativeNode<'js> {
     }
 
     #[qjs(rename = "addEventListener")]
-    fn add_event_listener(&mut self, event_type: Coerced<String>, callback: Function<'js>) {
-        let event_type = event_type.0;
-        if self
-            .listeners
-            .get(&event_type)
-            .is_some_and(|listeners| listeners.iter().any(|item| item.callback == callback))
+    fn add_event_listener(
+        this: This<Class<'js, NativeNode<'js>>>,
+        context: Ctx<'js>,
+        event_type: Coerced<String>,
+        callback: Function<'js>,
+    ) -> Result<()> {
+        let state = this.0.borrow().state.clone();
         {
-            return;
+            let mut node = this.0.borrow_mut();
+            let event_type = event_type.0;
+            if node
+                .listeners
+                .get(&event_type)
+                .is_some_and(|listeners| listeners.iter().any(|item| item.callback == callback))
+            {
+                return Ok(());
+            }
+            let id = node.next_listener_id;
+            node.next_listener_id = node
+                .next_listener_id
+                .checked_add(1)
+                .expect("event listener IDs exhausted");
+            node.listeners
+                .entry(event_type)
+                .or_default()
+                .push(EventListener { id, callback });
         }
-        let id = self.next_listener_id;
-        self.next_listener_id = self
-            .next_listener_id
-            .checked_add(1)
-            .expect("event listener IDs exhausted");
-        self.listeners
-            .entry(event_type)
-            .or_default()
-            .push(EventListener { id, callback });
+        sync_connected_listener_roots(&context, &state)
     }
 
     #[qjs(rename = "removeEventListener")]
-    fn remove_event_listener(&mut self, event_type: Coerced<String>, callback: Value<'js>) {
+    fn remove_event_listener(
+        this: This<Class<'js, NativeNode<'js>>>,
+        context: Ctx<'js>,
+        event_type: Coerced<String>,
+        callback: Value<'js>,
+    ) -> Result<()> {
         let Some(callback) = callback.into_function() else {
-            return;
+            return Ok(());
         };
-        let Some(callbacks) = self.listeners.get_mut(&event_type.0) else {
-            return;
-        };
-        callbacks.retain(|candidate| candidate.callback != callback);
-        if callbacks.is_empty() {
-            self.listeners.remove(&event_type.0);
+        let state = this.0.borrow().state.clone();
+        {
+            let mut node = this.0.borrow_mut();
+            let event_type = event_type.0;
+            let Some(callbacks) = node.listeners.get_mut(&event_type) else {
+                return Ok(());
+            };
+            callbacks.retain(|candidate| candidate.callback != callback);
+            if callbacks.is_empty() {
+                node.listeners.remove(&event_type);
+            }
         }
+        sync_connected_listener_roots(&context, &state)
     }
 
     #[qjs(rename = "appendChild")]
@@ -219,6 +251,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .append_child(self.id, child_id);
         errors::map_dom(&context, "appendChild", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -239,6 +272,7 @@ impl<'js> NativeNode<'js> {
                 .dom
                 .insert_before(self.id, child_id, reference_id);
         errors::map_dom(&context, "insertBefore", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -253,6 +287,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .remove_child(self.id, child_id);
         errors::map_dom(&context, "removeChild", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -269,6 +304,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .replace_child(self.id, new_id, old_id);
         errors::map_dom(&context, "replaceChild", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(old_child)
     }
 
@@ -291,7 +327,8 @@ impl<'js> NativeNode<'js> {
         let result = borrow_mut(&context, &self.state)?
             .dom
             .set_text_content(self.id, text.0);
-        errors::map_dom(&context, "set textContent", result).map(|_| ())
+        errors::map_dom(&context, "set textContent", result)?;
+        sync_connected_listener_roots(&context, &self.state)
     }
 
     #[qjs(get, rename = "nodeValue")]
@@ -532,6 +569,8 @@ impl NativeStyleDeclaration {
 const WRAPPER_CACHE: &str = "__burokkuWrapperCache";
 
 pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedUiDom) -> Result<()> {
+    let weak_ref: Constructor = context.globals().get("WeakRef")?;
+    let weak_ref_deref: Function = weak_ref.get::<_, Object>("prototype")?.get("deref")?;
     let node_methods = Class::<NativeNode<'js>>::prototype(context)?
         .expect("macro-backed Node class has a prototype");
     node_methods.prop(
@@ -540,6 +579,9 @@ pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedUiDom) -> Result<()>
             context.clone(),
             WrapperCache {
                 entries: Vec::new(),
+                listener_roots: Vec::new(),
+                weak_ref,
+                weak_ref_deref,
             },
         )?,
     )?;
@@ -692,28 +734,70 @@ fn wrapper_cache<'js>(context: &Ctx<'js>) -> Result<Class<'js, WrapperCache<'js>
         .get(WRAPPER_CACHE)
 }
 
+fn sync_connected_listener_roots<'js>(context: &Ctx<'js>, state: &SharedUiDom) -> Result<()> {
+    // ponytail: linear scan; index listener-bearing wrappers only if mutations make this measurable.
+    // ponytail: detached descendants survive only while their wrappers are live; root detached
+    // component groups if browser-compatible subtree retention becomes necessary.
+    let cache = wrapper_cache(context)?;
+    let (candidates, deref) = {
+        let cache = cache.borrow();
+        (
+            cache
+                .entries
+                .iter()
+                .map(|entry| (entry.id, entry.reference.clone()))
+                .collect::<Vec<_>>(),
+            cache.weak_ref_deref.clone(),
+        )
+    };
+    let candidates: Vec<_> = {
+        let state = borrow(context, state)?;
+        candidates
+            .into_iter()
+            .filter(|(id, _)| matches!(state.dom.is_connected(*id), Ok(true)))
+            .collect()
+    };
+
+    let mut roots = Vec::new();
+    for (id, reference) in candidates {
+        let Some(wrapper) = deref.call::<_, Option<Object>>((This(reference),))? else {
+            continue;
+        };
+        let node =
+            Class::<NativeNode>::from_object(&wrapper).expect("wrapped nodes use NativeNode");
+        if !node.borrow().listeners.is_empty() {
+            roots.push(ListenerRoot { id, wrapper });
+        }
+    }
+    cache.borrow_mut().listener_roots = roots;
+    Ok(())
+}
+
 fn cached_wrapper<'js>(
     cache: &Class<'js, WrapperCache<'js>>,
     id: NodeId,
 ) -> Result<Option<Object<'js>>> {
-    let Some(reference) = cache.borrow().reference(id) else {
+    let (reference, deref) = {
+        let cache = cache.borrow();
+        (cache.reference(id), cache.weak_ref_deref.clone())
+    };
+    let Some(reference) = reference else {
         return Ok(None);
     };
-    let deref: Function = reference.get("deref")?;
-    deref.call((rquickjs::function::This(reference),))
+    deref.call((This(reference),))
 }
 
 fn cache_wrapper<'js>(
-    context: &Ctx<'js>,
     cache: &Class<'js, WrapperCache<'js>>,
     id: NodeId,
     wrapper: &Object<'js>,
 ) -> Result<()> {
-    let weak_ref: Constructor = context.globals().get("WeakRef")?;
-    cache.borrow_mut().entries.push(WrapperEntry {
-        id,
-        reference: weak_ref.construct((wrapper.clone(),))?,
-    });
+    let weak_ref = cache.borrow().weak_ref.clone();
+    let reference = weak_ref.construct((wrapper.clone(),))?;
+    cache
+        .borrow_mut()
+        .entries
+        .push(WrapperEntry { id, reference });
     Ok(())
 }
 
@@ -781,7 +865,6 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
     }
 
     cache_wrapper(
-        context,
         &cache,
         id,
         node.as_value()
