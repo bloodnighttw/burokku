@@ -766,7 +766,7 @@ impl ApplicationHost {
         let viewport = logical_viewport(physical_size, scale_factor).map_err(|error| {
             classify_fatal_failure(has_presented_frame, FailureKind::Invariant, error)
         })?;
-        let frame = {
+        let (frame, computed) = {
             let state = self
                 .dom
                 .try_borrow()
@@ -785,7 +785,6 @@ impl ApplicationHost {
                 .layout
                 .current_shared()
                 .expect("a successful layout computation installs current state");
-            state.publish_layout(Rc::clone(&computed));
             let frame = BuiltScene::build(
                 &state.dom,
                 &computed,
@@ -803,7 +802,7 @@ impl ApplicationHost {
                 )
             })?;
             debug_assert_eq!(state.dom.revision(), revision);
-            frame
+            (frame, computed)
         };
         debug_assert!(frame.glyph_runs() <= frame.glyphs());
         let outcome = renderer.present(graphics, &frame).map_err(|error| {
@@ -819,6 +818,10 @@ impl ApplicationHost {
         {
             debug_assert_eq!(presented_revision, revision);
             debug_assert_eq!(renderer.last_presented_revision(), Some(presented_revision));
+            self.dom
+                .try_borrow()
+                .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?
+                .publish_presented_layout(computed);
             let surface = PresentedSurface {
                 window_id,
                 physical_size: renderer.physical_size(),

@@ -39,12 +39,12 @@ pub(crate) struct UiDomState {
     wrapper_roots: SharedWrapperRoots,
     pub(crate) last_reclaim: ReclaimReport,
     task_queue: Option<JsTaskQueue>,
-    layout: RefCell<Option<Rc<ComputedLayout>>>,
+    presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
 }
 
 impl UiDomState {
-    pub(crate) fn publish_layout(&self, computed: Rc<ComputedLayout>) {
-        self.layout.replace(Some(computed));
+    pub(crate) fn publish_presented_layout(&self, computed: Rc<ComputedLayout>) {
+        self.presented_layout.replace(Some(computed));
     }
 
     pub(crate) fn enqueue_click(&self, click: NativeClick) -> Result<(), JsTaskQueueError> {
@@ -56,10 +56,9 @@ impl UiDomState {
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
         self.dom.element_tag(id)?;
-        let layout = self.layout.borrow();
+        let layout = self.presented_layout.borrow();
         Ok(layout
             .as_deref()
-            .filter(|layout| layout.revision() == self.dom.revision())
             .and_then(|layout| layout.box_for(id))
             .map(|computed_box| {
                 let origin = computed_box.border_origin();
@@ -86,7 +85,7 @@ impl DomPlugin {
             wrapper_roots: SharedWrapperRoots::default(),
             last_reclaim: ReclaimReport::default(),
             task_queue: None,
-            layout: RefCell::new(None),
+            presented_layout: RefCell::new(None),
         }));
         (
             Self {
@@ -254,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn element_exposes_only_current_read_only_layout_rects() {
+    fn element_exposes_last_presented_read_only_layout_rects() {
         let (plugin, state) = DomPlugin::new();
         let (_runtime, context) = context();
 
@@ -280,9 +279,9 @@ mod tests {
                 .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
                 .unwrap();
             let computed = layout.current_shared().unwrap();
-            state.publish_layout(Rc::clone(&computed));
+            state.publish_presented_layout(Rc::clone(&computed));
             assert!(Rc::ptr_eq(
-                state.layout.borrow().as_ref().unwrap(),
+                state.presented_layout.borrow().as_ref().unwrap(),
                 &computed
             ));
         }
@@ -309,7 +308,7 @@ mod tests {
             assert!(context
                 .eval::<bool, _>(
                     "layoutDiv.style.setProperty('width', '30px');\
-                     layoutDiv.getBoundingClientRect() === null",
+                     layoutDiv.getBoundingClientRect().width === 20",
                 )
                 .unwrap());
         });
@@ -319,7 +318,7 @@ mod tests {
             layout
                 .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
                 .unwrap();
-            state.publish_layout(layout.current_shared().unwrap());
+            state.publish_presented_layout(layout.current_shared().unwrap());
         }
         context.with(|context| {
             assert_eq!(
@@ -662,6 +661,8 @@ mod tests {
                          globalThis.clickWindow = app.createElement('window');\n\
                          globalThis.clickTarget = app.createElement('div');\n\
                          globalThis.immediateTarget = app.createElement('div');\n\
+                         clickTarget.style.setProperty('width', '20px');\n\
+                         clickTarget.style.setProperty('height', '10px');\n\
                          const removed = () => clickResult.push('removed');\n\
                          clickTarget.addEventListener('click', function (event) {\n\
                            globalThis.clickEvent = event;\n\
@@ -670,7 +671,8 @@ mod tests {
                              String(event.currentTarget === clickTarget),\n\
                              String(this === clickTarget),\n\
                              String(event.clientX), String(event.clientY),\n\
-                             String(event.button));\n\
+                             String(event.button),\n\
+                             String(event.target.getBoundingClientRect().width));\n\
                            event.preventDefault();\n\
                            clickTarget.removeEventListener('click', removed);\n\
                          });\n\
@@ -701,12 +703,23 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
                 let (target, immediate_target, presented_revision) = {
                     let state = state.borrow();
+                    layout
+                        .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
+                        .unwrap();
+                    let presented_revision = state.dom.revision();
+                    state.publish_presented_layout(layout.current_shared().unwrap());
                     let window = state.dom.children(state.dom.root()).unwrap()[0];
                     let children = state.dom.children(window).unwrap();
-                    (children[0], children[1], state.dom.revision())
+                    (children[0], children[1], presented_revision)
                 };
+                runtime
+                    .eval::<()>("clickTarget.style.setProperty('width', '30px')")
+                    .await
+                    .unwrap();
+                assert!(state.borrow().dom.revision() > presented_revision);
 
                 state
                     .borrow()
@@ -747,6 +760,7 @@ mod tests {
                         "12.5",
                         "8.25",
                         "0",
+                        "20",
                         "target-2",
                         "after-error",
                         "window",

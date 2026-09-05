@@ -1,6 +1,33 @@
 export type BurokkuTagName = "div" | "flex" | "grid" | "text" | "window";
 
-export type BurokkuEventListener = (event: unknown) => void;
+export interface BurokkuEvent {
+  readonly type: string;
+  readonly target: BurokkuNode;
+  readonly currentTarget: BurokkuNode | null;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+
+  preventDefault(): void;
+  stopPropagation(): void;
+  stopImmediatePropagation(): void;
+}
+
+export interface BurokkuClickEvent extends BurokkuEvent {
+  readonly type: "click";
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly button: number;
+}
+
+export interface BurokkuEventMap {
+  click: BurokkuClickEvent;
+}
+
+export type BurokkuEventListener<Event extends BurokkuEvent = BurokkuEvent> = (
+  this: BurokkuNode,
+  event: Event,
+) => void;
 
 /** Shared behavior implemented by every Burokku-native node wrapper. */
 export interface Node<AllowedChild = never> {
@@ -25,7 +52,15 @@ export interface Node<AllowedChild = never> {
     oldChild: OldChild,
   ): OldChild;
   contains(other: BurokkuNode): boolean;
+  addEventListener<Type extends keyof BurokkuEventMap>(
+    type: Type,
+    callback: BurokkuEventListener<BurokkuEventMap[Type]>,
+  ): void;
   addEventListener(type: string, callback: BurokkuEventListener): void;
+  removeEventListener<Type extends keyof BurokkuEventMap>(
+    type: Type,
+    callback: BurokkuEventListener<BurokkuEventMap[Type]>,
+  ): void;
   removeEventListener(type: string, callback: BurokkuEventListener): void;
 }
 
@@ -49,7 +84,7 @@ export interface BurokkuStyleDeclaration {
   removeProperty(name: string): void;
 }
 
-/** Last successfully calculated border box in logical pixels. */
+/** Last successfully presented border box in logical pixels. */
 export interface BurokkuDOMRectReadOnly {
   readonly x: number;
   readonly y: number;
