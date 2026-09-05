@@ -5,7 +5,8 @@ use std::rc::Rc;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use winit::{
-    application::ApplicationHandler, ActiveEventLoop, PhysicalSize, WindowEvent, WindowId,
+    application::ApplicationHandler, ActiveEventLoop, ElementState, MouseButton, PhysicalSize,
+    WindowEvent, WindowId,
 };
 
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
@@ -76,6 +77,27 @@ fn pending_window_status(
         Some(desired_dom_id) if desired_dom_id == pending_dom_id => PendingWindowStatus::Current,
         Some(_) => PendingWindowStatus::Replaced,
         None => PendingWindowStatus::Removed,
+    }
+}
+
+fn recognize_primary_click(
+    pressed_target: &mut Option<NodeId>,
+    state: ElementState,
+    button: MouseButton,
+    target: Option<NodeId>,
+) -> Option<NodeId> {
+    if button != MouseButton::Left {
+        return None;
+    }
+
+    match state {
+        ElementState::Pressed => {
+            *pressed_target = target;
+            None
+        }
+        ElementState::Released => pressed_target
+            .take()
+            .filter(|pressed| Some(*pressed) == target),
     }
 }
 
@@ -237,6 +259,7 @@ pub(crate) struct ApplicationHost {
     presented: Option<PresentedFrame>,
     last_frame_failure: Option<FrameFailure>,
     cursor_target: Option<NodeId>,
+    pressed_target: Option<NodeId>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
     lifecycle: RuntimeLifecycle,
@@ -259,6 +282,7 @@ impl ApplicationHost {
             presented: None,
             last_frame_failure: None,
             cursor_target: None,
+            pressed_target: None,
             ever_had_window: false,
             fatal_error: None,
             lifecycle,
@@ -302,6 +326,7 @@ impl ApplicationHost {
         if !self.has_usable_presented_frame() {
             self.presented = None;
             self.cursor_target = None;
+            self.pressed_target = None;
         }
     }
 
@@ -948,13 +973,22 @@ impl ApplicationHandler for ApplicationHost {
                     .as_ref()
                     .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
             }
-            WindowEvent::MouseInput { position, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button,
+                position,
+            } => {
                 self.discard_stale_presented_frame();
                 self.cursor_target = self
                     .presented
                     .as_ref()
                     .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
-                let _target_for_problem_9_dispatch = self.cursor_target;
+                let _click_target = recognize_primary_click(
+                    &mut self.pressed_target,
+                    state,
+                    button,
+                    self.cursor_target,
+                );
             }
             WindowEvent::Occluded(false) => {
                 // On macOS, WGPU can reject the first surface texture as
@@ -965,7 +999,8 @@ impl ApplicationHandler for ApplicationHost {
                     window.window().request_redraw();
                 }
             }
-            WindowEvent::Focused(_)
+            WindowEvent::Focused(false) => self.pressed_target = None,
+            WindowEvent::Focused(true)
             | WindowEvent::Occluded(true)
             | WindowEvent::KeyboardInput(_)
             | WindowEvent::ModifiersChanged(_)
@@ -1236,6 +1271,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn primary_click_requires_press_and_release_on_the_same_target() {
+        let mut dom = Dom::new();
+        let first = dom.create_element(Element::from_tag(ElementTag::Div));
+        let second = dom.create_element(Element::from_tag(ElementTag::Div));
+        let mut pressed = None;
+        for (state, button, target, expected) in [
+            (ElementState::Pressed, MouseButton::Left, Some(first), None),
+            (
+                ElementState::Released,
+                MouseButton::Left,
+                Some(first),
+                Some(first),
+            ),
+            (ElementState::Pressed, MouseButton::Left, Some(first), None),
+            (
+                ElementState::Released,
+                MouseButton::Left,
+                Some(second),
+                None,
+            ),
+            (ElementState::Pressed, MouseButton::Left, Some(first), None),
+            (
+                ElementState::Released,
+                MouseButton::Right,
+                Some(first),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                recognize_primary_click(&mut pressed, state, button, target),
+                expected
+            );
+        }
+        assert_eq!(pressed, Some(first));
+    }
     #[test]
     fn stale_success_and_error_are_discarded_before_installation() {
         for status in [PendingWindowStatus::Removed, PendingWindowStatus::Replaced] {
