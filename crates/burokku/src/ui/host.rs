@@ -12,7 +12,7 @@ use winit::{
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
-    dom_plugin::SharedUiDom,
+    dom_plugin::{NativeClick, SharedUiDom},
     elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
@@ -983,12 +983,37 @@ impl ApplicationHandler for ApplicationHost {
                     .presented
                     .as_ref()
                     .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
-                let _click_target = recognize_primary_click(
+                if let Some(target) = recognize_primary_click(
                     &mut self.pressed_target,
                     state,
                     button,
                     self.cursor_target,
-                );
+                ) {
+                    let frame = self
+                        .presented
+                        .as_ref()
+                        .expect("a click target comes from the presented frame");
+                    let scale = frame.plan.scale_factor();
+                    let click = NativeClick {
+                        target,
+                        presented_revision: frame.revision(),
+                        client_x: position.x / scale,
+                        client_y: position.y / scale,
+                    };
+                    let queued = self
+                        .dom
+                        .try_borrow()
+                        .map(|state| state.enqueue_click(click));
+                    match queued {
+                        Err(_) => {
+                            self.fail(event_loop, HostError::DomBorrowConflict);
+                        }
+                        Ok(Err(error)) => {
+                            eprintln!("Burokku warning: dropped click event: {error}");
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                }
             }
             WindowEvent::Occluded(false) => {
                 // On macOS, WGPU can reject the first surface texture as

@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use runtime::{rquickjs::Ctx, Plugin};
+use runtime::{rquickjs::Ctx, JsTaskQueue, JsTaskQueueError, Plugin};
 
 use super::{
     elements::{Dom, DomError, NodeId, ReclaimReport},
@@ -18,6 +18,14 @@ use lifetime::SharedWrapperRoots;
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NativeClick {
+    pub(crate) target: NodeId,
+    pub(crate) presented_revision: u64,
+    pub(crate) client_x: f64,
+    pub(crate) client_y: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutRect {
     pub(crate) x: f32,
     pub(crate) y: f32,
@@ -30,12 +38,20 @@ pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
     wrapper_roots: SharedWrapperRoots,
     pub(crate) last_reclaim: ReclaimReport,
+    task_queue: Option<JsTaskQueue>,
     layout: RefCell<Option<Rc<ComputedLayout>>>,
 }
 
 impl UiDomState {
     pub(crate) fn publish_layout(&self, computed: Rc<ComputedLayout>) {
         self.layout.replace(Some(computed));
+    }
+
+    pub(crate) fn enqueue_click(&self, click: NativeClick) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(move |context| classes::dispatch_click(context, click))
     }
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
@@ -69,6 +85,7 @@ impl DomPlugin {
             dom: Dom::new(),
             wrapper_roots: SharedWrapperRoots::default(),
             last_reclaim: ReclaimReport::default(),
+            task_queue: None,
             layout: RefCell::new(None),
         }));
         (
@@ -103,6 +120,10 @@ impl Plugin for DomPlugin {
     }
 
     fn install<'js>(&self, context: &Ctx<'js>) -> runtime::Result<()> {
+        self.state
+            .try_borrow_mut()
+            .map_err(|_| runtime::rquickjs::Error::Unknown)?
+            .task_queue = JsTaskQueue::from_context(context).ok();
         classes::install(context, Rc::clone(&self.state))
     }
 }
@@ -540,6 +561,63 @@ mod tests {
                 .eval::<bool, _>("listenerCycleWeakRef.deref() === undefined")
                 .unwrap());
         });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_click_reaches_its_target_listener() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (plugin, state) = DomPlugin::new();
+                let (runtime, driver) = runtime::Runtime::builder()
+                    .plugin(plugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+
+                runtime
+                    .eval::<()>(
+                        "globalThis.clickResult = [];\n\
+                         globalThis.clickWindow = app.createElement('window');\n\
+                         globalThis.clickTarget = app.createElement('div');\n\
+                         clickTarget.addEventListener('click', function (event) {\n\
+                           clickResult = [event.type,\n\
+                             String(event.target === clickTarget),\n\
+                             String(event.currentTarget === clickTarget),\n\
+                             String(this === clickTarget),\n\
+                             String(event.clientX), String(event.clientY),\n\
+                             String(event.button)];\n\
+                         });\n\
+                         clickWindow.appendChild(clickTarget);\n\
+                         app.appendChild(clickWindow);",
+                    )
+                    .await
+                    .unwrap();
+                let (target, presented_revision) = {
+                    let state = state.borrow();
+                    let window = state.dom.children(state.dom.root()).unwrap()[0];
+                    (state.dom.children(window).unwrap()[0], state.dom.revision())
+                };
+
+                state
+                    .borrow()
+                    .enqueue_click(NativeClick {
+                        target,
+                        presented_revision,
+                        client_x: 12.5,
+                        client_y: 8.25,
+                    })
+                    .unwrap();
+                let result: Vec<String> = runtime.eval("clickResult").await.unwrap();
+                assert_eq!(
+                    result,
+                    ["click", "true", "true", "true", "12.5", "8.25", "0"]
+                );
+
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 
     #[test]

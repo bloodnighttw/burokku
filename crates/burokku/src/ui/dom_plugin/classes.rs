@@ -1,11 +1,13 @@
 use std::{cell::Ref, collections::HashMap, rc::Rc};
 
 use rquickjs::{
-    class::Trace, object::Property, Class, Coerced, Constructor, Ctx, Function, IntoJs, JsLifetime,
-    Null, Object, Result, Value,
+    class::Trace, object::Property, prelude::This, Class, Coerced, Constructor, Ctx, Function,
+    IntoJs, JsLifetime, Null, Object, Result, Value,
 };
 
-use super::{errors, lifetime::SharedWrapperRoots, LayoutRect, SharedUiDom, UiDomState};
+use super::{
+    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeClick, SharedUiDom, UiDomState,
+};
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
 #[derive(Trace, JsLifetime)]
@@ -33,6 +35,23 @@ impl<'js> WrapperCache<'js> {
     fn remove(&mut self, id: NodeId) {
         self.entries.retain(|entry| entry.id != id);
     }
+}
+
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class(rename = "BurokkuClickEvent", rename_all = "camelCase")]
+struct NativeClickEvent<'js> {
+    #[qjs(get, enumerable, rename = "type")]
+    event_type: String,
+    #[qjs(get, enumerable)]
+    target: Object<'js>,
+    #[qjs(get, enumerable)]
+    current_target: Option<Object<'js>>,
+    #[qjs(get, enumerable)]
+    client_x: f64,
+    #[qjs(get, enumerable)]
+    client_y: f64,
+    #[qjs(get, enumerable)]
+    button: u8,
 }
 
 #[derive(Trace, JsLifetime)]
@@ -713,6 +732,51 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             .expect("class instance is an object"),
     )?;
     Ok(node.into_inner())
+}
+
+pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let valid_target = {
+        let state = borrow(context, &state)?;
+        click.presented_revision <= state.dom.revision()
+            && state.dom.is_connected(click.target).unwrap_or(false)
+    };
+    if !valid_target {
+        return Ok(());
+    }
+
+    let target = wrap_node(context, &state, click.target)?;
+    let node = Class::<NativeNode>::from_object(&target).expect("wrapped nodes use NativeNode");
+    let callbacks = node
+        .borrow()
+        .listeners
+        .get("click")
+        .cloned()
+        .unwrap_or_default();
+    if callbacks.is_empty() {
+        return Ok(());
+    }
+
+    let event = Class::instance(
+        context.clone(),
+        NativeClickEvent {
+            event_type: "click".into(),
+            target: target.clone(),
+            current_target: Some(target.clone()),
+            client_x: click.client_x,
+            client_y: click.client_y,
+            button: 0,
+        },
+    )?;
+
+    for callback in callbacks {
+        callback.call::<_, ()>((This(target.clone()), event.clone()))?;
+    }
+    Ok(())
 }
 
 fn layout_rect_object<'js>(context: &Ctx<'js>, rect: LayoutRect) -> Result<Object<'js>> {
