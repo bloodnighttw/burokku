@@ -10,6 +10,13 @@ mod macos {
     };
 
     use burokku_winit::{application::ApplicationHandler, ActiveEventLoop, EventLoop};
+    use burokku_winit::{
+        raw_window_handle::{HasWindowHandle, RawWindowHandle},
+        ElementState, LogicalSize, MouseButton, PhysicalPosition, Window, WindowAttributes,
+        WindowEvent, WindowId,
+    };
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSView};
+    use objc2_foundation::{NSPoint, NSSize};
     use tokio::{sync::oneshot, task::LocalSet};
 
     const CHILD: &str = "BUROKKU_EXTERNAL_WAKE_TEST_CHILD";
@@ -46,6 +53,7 @@ mod macos {
             match child.as_str() {
                 WAKE_CHILD => wake_child(),
                 PANIC_CHILD => panic_child(),
+                "mouse" => mouse_child(),
                 _ => panic!("unknown child mode: {child}"),
             }
             return;
@@ -53,6 +61,7 @@ mod macos {
 
         run_child(WAKE_CHILD);
         run_child(PANIC_CHILD);
+        run_child("mouse");
     }
 
     fn run_child(mode: &str) {
@@ -106,6 +115,81 @@ mod macos {
             .unwrap();
         assert!(app.completed.get());
         assert!(app.exited);
+    }
+
+    #[derive(Default)]
+    struct MouseApp {
+        window: Option<Window>,
+        received: Vec<WindowEvent>,
+    }
+
+    impl ApplicationHandler for MouseApp {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let window = event_loop
+                .create_window(
+                    WindowAttributes::default().with_inner_size(LogicalSize::new(200.0, 150.0)),
+                )
+                .unwrap();
+            let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() else {
+                panic!("expected AppKit window");
+            };
+            // SAFETY: The Window retains this NSView and this callback runs on the main thread.
+            let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+            // Give the view deterministic geometry even without a WindowServer connection.
+            view.setFrameSize(NSSize::new(200.0, 150.0));
+            let native_window = view.window().unwrap();
+            for event_type in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    event_type,
+                    view.convertPoint_toView(NSPoint::new(25.0, 40.0), None),
+                    NSEventModifierFlags(0),
+                    0.0,
+                    native_window.windowNumber(),
+                    None,
+                    0,
+                    1,
+                    1.0,
+                ).unwrap();
+                // Invoke AppKit's responder selectors without requiring OS input injection.
+                if event_type == NSEventType::LeftMouseDown {
+                    view.mouseDown(&event);
+                } else {
+                    view.mouseUp(&event);
+                }
+            }
+            self.window = Some(window);
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            window_id: WindowId,
+            event: WindowEvent,
+        ) {
+            if matches!(event, WindowEvent::MouseInput { .. }) {
+                assert_eq!(window_id, self.window.as_ref().unwrap().id());
+                self.received.push(event);
+                if self.received.len() == 2 {
+                    event_loop.exit();
+                }
+            }
+        }
+    }
+
+    fn mouse_child() {
+        let app = EventLoop::new()
+            .unwrap()
+            .run_app_external(MouseApp::default(), LocalSet::new())
+            .unwrap();
+        let scale = app.window.as_ref().unwrap().scale_factor();
+        assert_eq!(
+            app.received,
+            [ElementState::Pressed, ElementState::Released].map(|state| WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                position: PhysicalPosition::new(25.0 * scale, 110.0 * scale),
+            })
+        );
     }
 
     fn panic_child() {

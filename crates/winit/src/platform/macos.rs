@@ -13,7 +13,10 @@ use std::{
 };
 
 use crate::{event_loop::EventLoopWaker, window::WindowState};
-use crate::{Error, LogicalSize, PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId};
+use crate::{
+    ElementState, Error, LogicalSize, MouseButton, PhysicalPosition, PhysicalSize, Window,
+    WindowAttributes, WindowEvent, WindowId,
+};
 use core_foundation_sys::{
     base::{kCFAllocatorDefault, CFRelease},
     date::CFAbsoluteTimeGetCurrent,
@@ -362,6 +365,16 @@ define_class!(
     unsafe impl NSObjectProtocol for ContentView {}
 
     impl ContentView {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Released);
+        }
+
         #[unsafe(method(frameDidChange:))]
         fn frame_did_change(&self, _notification: &NSNotification) {
             let scale_factor = self
@@ -438,6 +451,22 @@ impl ContentView {
         self.ivars().dispatcher.dispatch(NativeEvent {
             window_id: self.ivars().state.id,
             event,
+        });
+    }
+
+    fn send_mouse_input(&self, event: &NSEvent, state: ElementState) {
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let bounds = self.bounds();
+        let scale = self.ivars().state.scale_factor();
+        // AppKit's unflipped view uses bottom-left points; hit testing uses top-left pixels.
+        let position = PhysicalPosition::new(
+            (point.x - bounds.origin.x) * scale,
+            (bounds.origin.y + bounds.size.height - point.y) * scale,
+        );
+        self.send(WindowEvent::MouseInput {
+            state,
+            button: MouseButton::Left,
+            position,
         });
     }
 
