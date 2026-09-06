@@ -26,6 +26,13 @@ export interface BurokkuMouseEvent<Type extends string = string> extends Burokku
 
 export interface BurokkuClickEvent extends BurokkuMouseEvent<"click"> {}
 
+export interface BurokkuWheelEvent extends BurokkuMouseEvent<"wheel"> {
+  readonly deltaX: number;
+  readonly deltaY: number;
+  /** 0 for pixels, 1 for lines. */
+  readonly deltaMode: 0 | 1;
+}
+
 export interface BurokkuEventMap {
   click: BurokkuClickEvent;
   mousedown: BurokkuMouseEvent<"mousedown">;
@@ -35,6 +42,7 @@ export interface BurokkuEventMap {
   mouseout: BurokkuMouseEvent<"mouseout">;
   mouseenter: BurokkuMouseEvent<"mouseenter">;
   mouseleave: BurokkuMouseEvent<"mouseleave">;
+  wheel: BurokkuWheelEvent;
 }
 
 export type BurokkuEventListener<Event extends BurokkuEvent = BurokkuEvent> = (

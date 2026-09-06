@@ -64,6 +64,12 @@ struct MouseEvent<'js> {
     button: u16,
     #[qjs(get, enumerable)]
     buttons: u16,
+    #[qjs(get, enumerable)]
+    delta_x: f64,
+    #[qjs(get, enumerable)]
+    delta_y: f64,
+    #[qjs(get, enumerable)]
+    delta_mode: u16,
     related_target: Option<Object<'js>>,
     #[qjs(get, enumerable)]
     bubbles: bool,
@@ -941,6 +947,7 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
     let related_target = related_target
         .map(|id| wrap_node(context, &state, id))
         .transpose()?;
+    let (delta_x, delta_y, delta_mode) = mouse.wheel_delta.unwrap_or((0.0, 0.0, 0));
     let event = Class::instance(
         context.clone(),
         MouseEvent {
@@ -951,6 +958,9 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
             client_y: mouse.client_y,
             button: mouse.button,
             buttons: mouse.buttons,
+            delta_x,
+            delta_y,
+            delta_mode,
             related_target,
             bubbles,
             cancelable: bubbles,

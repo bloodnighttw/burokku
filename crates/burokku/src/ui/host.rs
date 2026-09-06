@@ -144,6 +144,7 @@ fn mouse_events_for_input(
         button,
         buttons,
         related_target: None,
+        wheel_delta: None,
     };
     let mut events = vec![mouse];
     if click.is_some() {
@@ -153,6 +154,37 @@ fn mouse_events_for_input(
         });
     }
     events
+}
+
+fn wheel_event_for_input(
+    plan: &ScenePlan,
+    position: PhysicalPosition<f64>,
+    delta_x: f64,
+    delta_y: f64,
+    precise: bool,
+    buttons: u16,
+) -> Option<NativeMouseEvent> {
+    let target = plan.hit_test_physical(position.x, position.y)?;
+    let delta_scale = if precise {
+        -1.0 / plan.scale_factor()
+    } else {
+        -1.0
+    };
+    Some(NativeMouseEvent {
+        event_type: "wheel",
+        target,
+        presented_revision: plan.revision(),
+        client_x: position.x / plan.scale_factor(),
+        client_y: position.y / plan.scale_factor(),
+        button: 0,
+        buttons,
+        related_target: None,
+        wheel_delta: Some((
+            delta_x * delta_scale,
+            delta_y * delta_scale,
+            if precise { 0 } else { 1 },
+        )),
+    })
 }
 
 fn hover_path(dom: &Dom, target: Option<NodeId>) -> Vec<NodeId> {
@@ -186,6 +218,7 @@ fn hover_events(
             client_y: position.y / presented.1,
             button: 0,
             buttons,
+            wheel_delta: None,
         })
     };
     let old_target = previous.first().copied();
@@ -474,6 +507,30 @@ impl ApplicationHost {
             buttons,
             (frame.revision(), frame.plan.scale_factor()),
             events,
+        )
+    }
+
+    fn queue_wheel_input(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        delta_x: f64,
+        delta_y: f64,
+        precise: bool,
+    ) -> Result<(), HostError> {
+        self.discard_stale_presented_frame();
+        let buttons = self.cursor.map_or(0, |(_, buttons)| buttons);
+        self.cursor = Some((position, buttons));
+        let Some(frame) = self.presented.as_ref() else {
+            return Ok(());
+        };
+        let event =
+            wheel_event_for_input(&frame.plan, position, delta_x, delta_y, precise, buttons);
+        self.queue_hover_and_mouse(
+            event.map(|event| event.target),
+            position,
+            buttons,
+            (frame.revision(), frame.plan.scale_factor()),
+            event.into_iter().collect(),
         )
     }
 
@@ -1215,6 +1272,16 @@ impl ApplicationHandler for ApplicationHost {
                     self.fail(event_loop, error);
                 }
             }
+            WindowEvent::MouseWheel {
+                delta_x,
+                delta_y,
+                precise,
+                position,
+            } => {
+                if let Err(error) = self.queue_wheel_input(position, delta_x, delta_y, precise) {
+                    self.fail(event_loop, error);
+                }
+            }
             WindowEvent::Occluded(false) => {
                 // On macOS, WGPU can reject the first surface texture as
                 // occluded while AppKit is still making a newly shown window
@@ -1228,8 +1295,7 @@ impl ApplicationHandler for ApplicationHost {
             WindowEvent::Focused(true)
             | WindowEvent::Occluded(true)
             | WindowEvent::KeyboardInput(_)
-            | WindowEvent::ModifiersChanged(_)
-            | WindowEvent::MouseWheel { .. } => {}
+            | WindowEvent::ModifiersChanged(_) => {}
         }
     }
 
@@ -1709,6 +1775,24 @@ mod tests {
                     .collect();
                 assert_eq!(log, expected);
                 assert_eq!(pressed, None);
+
+                let precise_wheel =
+                    wheel_event_for_input(&plan, position, 8.0, -4.0, true, 1).unwrap();
+                assert_eq!(precise_wheel.target, target);
+                assert_eq!(precise_wheel.event_type, "wheel");
+                assert_eq!(precise_wheel.wheel_delta, Some((-4.0, 2.0, 0)));
+                let line_wheel =
+                    wheel_event_for_input(&plan, position, 3.0, -5.0, false, 0).unwrap();
+                assert_eq!(line_wheel.wheel_delta, Some((-3.0, 5.0, 1)));
+                assert!(wheel_event_for_input(
+                    &plan,
+                    PhysicalPosition::new(-1.0, -1.0),
+                    1.0,
+                    1.0,
+                    true,
+                    0
+                )
+                .is_none());
 
                 let down = Some((ElementState::Pressed, MouseButton::Left));
                 let up = Some((ElementState::Released, MouseButton::Left));

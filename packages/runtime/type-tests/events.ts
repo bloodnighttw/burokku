@@ -2,6 +2,7 @@ import type {
   BurokkuClickEvent,
   BurokkuEventListener,
   BurokkuMouseEvent,
+  BurokkuWheelEvent,
   BurokkuNode,
   DivElement,
 } from "../src/index";
@@ -72,6 +73,17 @@ div.addEventListener("mousemove", event => {
   const type: "mousemove" = event.type;
   void type;
 });
+const wheelListener: BurokkuEventListener<BurokkuWheelEvent> = event => {
+  const type: "wheel" = event.type;
+  const deltaX: number = event.deltaX;
+  const deltaY: number = event.deltaY;
+  const deltaMode: 0 | 1 = event.deltaMode;
+  void [type, deltaX, deltaY, deltaMode];
+  // @ts-expect-error Wheel deltas are read-only.
+  event.deltaY = 0;
+};
+div.addEventListener("wheel", wheelListener);
+div.removeEventListener("wheel", wheelListener);
 
 // @ts-expect-error Mouse listeners receive a mouse event.
 div.addEventListener("mousedown", (event: string) => void event);
