@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
     fmt, mem,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
@@ -406,6 +406,7 @@ impl WindowDelegate {
 struct ContentViewIvars {
     state: Arc<WindowState>,
     dispatcher: Rc<EventDispatcher>,
+    pressed_modifier_keys: RefCell<HashSet<u16>>,
 }
 
 define_class!(
@@ -438,7 +439,12 @@ define_class!(
         #[unsafe(method(flagsChanged:))]
         fn flags_changed(&self, event: &NSEvent) {
             let modifiers = event_modifiers(event);
-            if let Some(state) = modifier_key_state(event.keyCode(), modifiers) {
+            let state = modifier_key_state(
+                event.keyCode(),
+                modifiers,
+                &mut self.ivars().pressed_modifier_keys.borrow_mut(),
+            );
+            if let Some(state) = state {
                 self.send(WindowEvent::KeyboardInput(KeyEvent {
                     key_code: event.keyCode(),
                     text: None,
@@ -588,7 +594,11 @@ impl ContentView {
         state: Arc<WindowState>,
         dispatcher: Rc<EventDispatcher>,
     ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ContentViewIvars { state, dispatcher });
+        let this = Self::alloc(mtm).set_ivars(ContentViewIvars {
+            state,
+            dispatcher,
+            pressed_modifier_keys: RefCell::new(HashSet::new()),
+        });
         // SAFETY: The selector and argument exactly match NSView's designated
         // frame initializer, and the Rust ivars were initialized above.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -716,16 +726,29 @@ fn event_modifiers(event: &NSEvent) -> Modifiers {
     }
 }
 
-fn modifier_key_state(key_code: u16, modifiers: Modifiers) -> Option<ElementState> {
+fn modifier_key_state(
+    key_code: u16,
+    modifiers: Modifiers,
+    pressed: &mut HashSet<u16>,
+) -> Option<ElementState> {
+    if key_code == 0x39 {
+        return Some(if modifiers.caps_lock {
+            ElementState::Pressed
+        } else {
+            ElementState::Released
+        });
+    }
     let active = match key_code {
         0x38 | 0x3c => modifiers.shift,
         0x3b | 0x3e => modifiers.control,
         0x3a | 0x3d => modifiers.alt,
         0x36 | 0x37 => modifiers.command,
-        0x39 => modifiers.caps_lock,
         _ => return None,
     };
-    Some(if active {
+    Some(if pressed.remove(&key_code) {
+        ElementState::Released
+    } else if active {
+        pressed.insert(key_code);
         ElementState::Pressed
     } else {
         ElementState::Released
@@ -1243,16 +1266,28 @@ mod tests {
     }
 
     #[test]
-    fn modifier_keys_follow_the_event_snapshot() {
+    fn modifier_keys_track_each_side() {
         let shift = Modifiers {
             shift: true,
             ..Modifiers::default()
         };
-        assert_eq!(modifier_key_state(0x38, shift), Some(ElementState::Pressed));
+        let mut pressed = HashSet::new();
         assert_eq!(
-            modifier_key_state(0x38, Modifiers::default()),
+            modifier_key_state(0x38, shift, &mut pressed),
+            Some(ElementState::Pressed)
+        );
+        assert_eq!(
+            modifier_key_state(0x3c, shift, &mut pressed),
+            Some(ElementState::Pressed)
+        );
+        assert_eq!(
+            modifier_key_state(0x38, shift, &mut pressed),
             Some(ElementState::Released)
         );
-        assert_eq!(modifier_key_state(0x00, shift), None);
+        assert_eq!(
+            modifier_key_state(0x3c, Modifiers::default(), &mut pressed),
+            Some(ElementState::Released)
+        );
+        assert_eq!(modifier_key_state(0x00, shift, &mut pressed), None);
     }
 }
