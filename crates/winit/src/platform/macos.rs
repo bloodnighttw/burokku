@@ -4,7 +4,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     ffi::c_void,
-    fmt,
+    fmt, mem,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr::{self, NonNull},
     rc::Rc,
@@ -26,7 +26,7 @@ use dispatch2::MainThreadBound;
 use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
-    runtime::ProtocolObject,
+    runtime::{Imp, ProtocolObject, Sel},
     sel, AnyThread, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::{
@@ -49,6 +49,60 @@ use raw_window_handle::{
 use super::PlatformTick;
 
 const DORMANT_TIMER_INTERVAL: f64 = 86_400.0;
+
+type SendEvent = extern "C" fn(&NSApplication, Sel, &NSEvent);
+
+static ORIGINAL_SEND_EVENT: MainThreadBound<Cell<Option<SendEvent>>> = MainThreadBound::new(
+    Cell::new(None),
+    // SAFETY: This static is only accessed with a real main-thread marker.
+    unsafe { MainThreadMarker::new_unchecked() },
+);
+
+extern "C" fn send_event(app: &NSApplication, selector: Sel, event: &NSEvent) {
+    let mtm = MainThreadMarker::from(app);
+    if event.r#type() == NSEventType::KeyUp
+        && event
+            .modifierFlags()
+            .contains(NSEventModifierFlags::Command)
+    {
+        let window = app
+            .keyWindow()
+            .or_else(|| app.windowWithWindowNumber(event.windowNumber()))
+            .or_else(|| {
+                // Headless AppKit leaves synthetic events and the sole window unnumbered.
+                let windows = app.windows();
+                (windows.len() == 1).then(|| windows.objectAtIndex(0))
+            });
+        if let Some(window) = window {
+            window.sendEvent(event);
+        }
+        return;
+    }
+
+    ORIGINAL_SEND_EVENT
+        .get(mtm)
+        .get()
+        .expect("sendEvent: override was not initialized")(app, selector, event);
+}
+
+fn override_send_event(app: &NSApplication) {
+    let mtm = MainThreadMarker::from(app);
+    let original = ORIGINAL_SEND_EVENT.get(mtm);
+    if original.get().is_some() {
+        return;
+    }
+
+    let method = app
+        .class()
+        .instance_method(sel!(sendEvent:))
+        .expect("NSApplication must implement sendEvent:");
+    // SAFETY: send_event has the Objective-C sendEvent: method signature.
+    let replacement = unsafe { mem::transmute::<SendEvent, Imp>(send_event) };
+    // SAFETY: replacement has the same signature and requirements as sendEvent:.
+    let previous = unsafe { method.set_implementation(replacement) };
+    // SAFETY: previous was the implementation of sendEvent: and has its signature.
+    original.set(Some(unsafe { mem::transmute::<Imp, SendEvent>(previous) }));
+}
 
 struct PlatformWakeState {
     run_loop: usize,
@@ -900,6 +954,7 @@ impl PlatformEventLoop {
     pub(crate) fn new() -> crate::Result<Self> {
         let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
         let app = NSApplication::sharedApplication(mtm);
+        override_send_event(&app);
         app.finishLaunching();
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         // Command-line binaries have no application bundle to activate them.
