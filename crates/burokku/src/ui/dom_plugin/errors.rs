@@ -70,7 +70,7 @@ fn throw_dom(context: &Ctx<'_>, operation: &str, error: DomError) -> runtime::Er
     }
 }
 
-fn throw_named<T>(context: &Ctx<'_>, name: &str, message: impl AsRef<str>) -> Result<T> {
+pub(super) fn throw_named<T>(context: &Ctx<'_>, name: &str, message: impl AsRef<str>) -> Result<T> {
     let exception = named_exception(context, name, message)?;
     Err(exception.throw())
 }

@@ -323,6 +323,42 @@ impl<'js> NativeNode<'js> {
         sync_connected_listener_roots(&context, &state)
     }
 
+    #[qjs(rename = "setPointerCapture")]
+    fn set_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<()> {
+        let mut state = borrow_mut(&context, &self.state)?;
+        if pointer_id != 1 || !state.pointer_active {
+            return errors::throw_named(&context, "NotFoundError", "pointer is not active");
+        }
+        if !state.dom.is_connected(self.id).unwrap_or(false) {
+            return errors::throw_named(
+                &context,
+                "InvalidStateError",
+                "capture target is not connected",
+            );
+        }
+        state.pointer_capture = Some(self.id);
+        Ok(())
+    }
+
+    #[qjs(rename = "releasePointerCapture")]
+    fn release_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<()> {
+        let mut state = borrow_mut(&context, &self.state)?;
+        if pointer_id != 1 || !state.pointer_active {
+            return errors::throw_named(&context, "NotFoundError", "pointer is not active");
+        }
+        if state.pointer_capture == Some(self.id) {
+            state.pointer_capture = None;
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "hasPointerCapture")]
+    fn has_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<bool> {
+        let mut state = borrow_mut(&context, &self.state)?;
+        state.clear_disconnected_pointer_capture();
+        Ok(pointer_id == 1 && state.pointer_capture == Some(self.id))
+    }
+
     #[qjs(rename = "appendChild")]
     fn append_child(
         &self,
@@ -738,6 +774,9 @@ fn install_facade<'js>(
         &element.get("prototype")?,
         node_methods,
         &[
+            "setPointerCapture",
+            "releasePointerCapture",
+            "hasPointerCapture",
             "localName",
             "getBoundingClientRect",
             "getAttribute",
@@ -822,6 +861,7 @@ fn sync_connected_listener_roots<'js>(context: &Ctx<'js>, state: &SharedUiDom) -
     // ponytail: detached descendants survive only while their wrappers are live; root detached
     // component groups if browser-compatible subtree retention becomes necessary.
     let cache = wrapper_cache(context)?;
+    borrow_mut(context, state)?.clear_disconnected_pointer_capture();
     let (candidates, deref) = {
         let cache = cache.borrow();
         (
@@ -957,7 +997,86 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
     Ok(node.into_inner())
 }
 
-pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Result<()> {
+pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEvent) -> Result<()> {
+    let routes_through_capture = matches!(
+        mouse.event_type,
+        "pointerdown" | "pointerup" | "pointermove" | "pointercancel"
+    );
+    if !routes_through_capture {
+        return dispatch_mouse_event_inner(context, mouse);
+    }
+
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    if mouse.event_type == "pointerdown" {
+        borrow_mut(context, &state)?.pointer_active = true;
+    }
+    dispatch_pointer_capture_transitions(context, &state, mouse)?;
+    if let Some(target) = borrow(context, &state)?.pointer_capture {
+        mouse.target = target;
+    }
+
+    let result = dispatch_mouse_event_inner(context, mouse);
+    if mouse.event_type == "pointercancel"
+        || (mouse.event_type == "pointerup" && mouse.buttons == 0)
+    {
+        let mut state = borrow_mut(context, &state)?;
+        state.pointer_active = false;
+        state.pointer_capture = None;
+    }
+    let transitions = dispatch_pointer_capture_transitions(context, &state, mouse);
+    result?;
+    transitions
+}
+
+fn dispatch_pointer_capture_transitions(
+    context: &Ctx<'_>,
+    state: &SharedUiDom,
+    source: NativeMouseEvent,
+) -> Result<()> {
+    let transitions = {
+        let mut state = borrow_mut(context, state)?;
+        if state
+            .pointer_capture
+            .is_some_and(|target| !state.dom.is_connected(target).unwrap_or(false))
+        {
+            state.pointer_capture = None;
+        }
+        let previous = state.announced_pointer_capture;
+        let next = state.pointer_capture;
+        if previous == next {
+            return Ok(());
+        }
+        state.announced_pointer_capture = next;
+        [
+            ("lostpointercapture", previous),
+            ("gotpointercapture", next),
+        ]
+    };
+
+    for (event_type, target) in transitions {
+        let Some(target) = target else {
+            continue;
+        };
+        dispatch_mouse_event_inner(
+            context,
+            NativeMouseEvent {
+                event_type,
+                target,
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: Some(1),
+                ..source
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn dispatch_mouse_event_inner(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Result<()> {
     let app: Object = context.globals().get("app")?;
     let Some(app) = Class::<NativeNode>::from_object(&app) else {
         return Ok(());
@@ -1018,7 +1137,11 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
         .transpose()?;
     let (delta_x, delta_y, delta_mode) = mouse.wheel_delta.unwrap_or((0.0, 0.0, 0));
     let pointer_id = mouse.pointer_id.unwrap_or(0);
-    let cancelable = bubbles && mouse.event_type != "pointercancel";
+    let cancelable = bubbles
+        && !matches!(
+            mouse.event_type,
+            "pointercancel" | "gotpointercapture" | "lostpointercapture"
+        );
     let event = Class::instance(
         context.clone(),
         MouseEvent {

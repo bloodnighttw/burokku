@@ -57,11 +57,25 @@ pub(crate) struct UiDomState {
     pub(crate) last_reclaim: ReclaimReport,
     task_queue: Option<JsTaskQueue>,
     presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
+    pointer_active: bool,
+    pointer_capture: Option<NodeId>,
+    announced_pointer_capture: Option<NodeId>,
 }
 
 impl UiDomState {
     pub(crate) fn publish_presented_layout(&self, computed: Rc<ComputedLayout>) {
         self.presented_layout.replace(Some(computed));
+    }
+
+    pub(crate) fn pointer_capture_target(&self) -> Option<NodeId> {
+        self.pointer_capture
+            .filter(|target| self.dom.is_connected(*target).unwrap_or(false))
+    }
+
+    fn clear_disconnected_pointer_capture(&mut self) {
+        if self.pointer_capture_target().is_none() {
+            self.pointer_capture = None;
+        }
     }
 
     pub(crate) fn enqueue_mouse_events(
@@ -121,6 +135,9 @@ impl DomPlugin {
             last_reclaim: ReclaimReport::default(),
             task_queue: None,
             presented_layout: RefCell::new(None),
+            pointer_active: false,
+            pointer_capture: None,
+            announced_pointer_capture: None,
         }));
         (
             Self {
@@ -836,6 +853,120 @@ mod tests {
                 .unwrap();
             classes::dispatch_mouse_event(&context, leave).unwrap();
             assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
+        });
+    }
+
+    #[test]
+    fn pointer_capture_retargets_and_releases() {
+        let (plugin, _) = DomPlugin::new();
+        let (_runtime, context) = context();
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    r#"
+                globalThis.captureWindow = app.createElement('window');
+                globalThis.hitTarget = app.createElement('div');
+                globalThis.captureTarget = app.createElement('div');
+                captureWindow.appendChild(hitTarget);
+                captureWindow.appendChild(captureTarget);
+                app.appendChild(captureWindow);
+                globalThis.captureLog = [];
+                hitTarget.addEventListener('pointerdown', event => {
+                    captureLog.push('down:hit');
+                    captureTarget.setPointerCapture(event.pointerId);
+                    captureLog.push(`set:${captureTarget.hasPointerCapture(1)}`);
+                });
+                captureTarget.addEventListener('gotpointercapture', event => {
+                    event.preventDefault();
+                    captureLog.push(`got:${event.target === captureTarget}:${event.cancelable}:${event.defaultPrevented}`);
+                });
+                captureTarget.addEventListener('pointermove', event => {
+                    captureLog.push(`move:capture`);
+                    captureTarget.releasePointerCapture(event.pointerId);
+                    captureLog.push(`release:${captureTarget.hasPointerCapture(1)}`);
+                });
+                captureTarget.addEventListener('lostpointercapture', event => {
+                    event.preventDefault();
+                    captureLog.push(`lost:${event.target === captureTarget}:${captureTarget.hasPointerCapture(1)}:${event.defaultPrevented}`);
+                });
+                hitTarget.addEventListener('pointermove', event => {
+                    captureLog.push('move:hit');
+                    captureTarget.setPointerCapture(event.pointerId);
+                });
+                captureTarget.addEventListener('pointerup', () => {
+                    captureLog.push(`up:${captureTarget.hasPointerCapture(1)}`);
+                });
+            "#,
+                )
+                .unwrap();
+            let (hit_target, capture_target, revision) = {
+                let state = plugin.state();
+                let window = state.dom.children(state.dom.root()).unwrap()[0];
+                let children = state.dom.children(window).unwrap();
+                (children[0], children[1], state.dom.revision())
+            };
+            let pointer = |event_type, buttons| NativeMouseEvent {
+                event_type,
+                target: hit_target,
+                presented_revision: revision,
+                client_x: 10.0,
+                client_y: 20.0,
+                button: 0,
+                buttons,
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: Some(1),
+            };
+            for event in [
+                pointer("pointerdown", 1),
+                pointer("pointermove", 1),
+                pointer("pointermove", 1),
+                pointer("pointerup", 0),
+            ] {
+                classes::dispatch_mouse_event(&context, event).unwrap();
+            }
+            assert_eq!(
+                context.eval::<Vec<String>, _>("captureLog").unwrap(),
+                [
+                    "down:hit",
+                    "set:true",
+                    "got:true:false:false",
+                    "move:capture",
+                    "release:false",
+                    "lost:true:false:false",
+                    "move:hit",
+                    "got:true:false:false",
+                    "up:true",
+                    "lost:true:false:false",
+                ]
+            );
+            assert_eq!(
+                context
+                    .eval::<Vec<String>, _>(
+                        r#"[
+                            (() => {
+                                try { captureTarget.setPointerCapture(2); return 'none'; }
+                                catch (error) { return error.name; }
+                            })(),
+                            (() => {
+                                try { captureTarget.releasePointerCapture(2); return 'none'; }
+                                catch (error) { return error.name; }
+                            })(),
+                        ]"#,
+                    )
+                    .unwrap(),
+                ["NotFoundError", "NotFoundError"]
+            );
+            classes::dispatch_mouse_event(&context, pointer("pointerdown", 1)).unwrap();
+            assert!(context
+                .eval::<bool, _>(
+                    "captureWindow.removeChild(captureTarget); \
+                     captureTarget.hasPointerCapture(1) === false",
+                )
+                .unwrap());
+            classes::dispatch_mouse_event(&context, pointer("pointerup", 0)).unwrap();
+            assert_ne!(hit_target, capture_target);
         });
     }
 
