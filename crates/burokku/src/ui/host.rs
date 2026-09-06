@@ -101,7 +101,7 @@ fn recognize_primary_click(
     }
 }
 
-fn mouse_events_for_input(
+fn pointer_events_for_input(
     plan: &ScenePlan,
     pressed_target: &mut Option<NodeId>,
     position: PhysicalPosition<f64>,
@@ -114,8 +114,8 @@ fn mouse_events_for_input(
         Some((state, mouse_button)) => {
             let click = recognize_primary_click(pressed_target, state, mouse_button, hit_target);
             let event_type = match state {
-                ElementState::Pressed => "mousedown",
-                ElementState::Released => "mouseup",
+                ElementState::Pressed => "pointerdown",
+                ElementState::Released => "pointerup",
             };
             let button = match mouse_button {
                 MouseButton::Left => 0,
@@ -140,7 +140,7 @@ fn mouse_events_for_input(
             if buttons & 1 == 0 {
                 *pressed_target = None;
             }
-            ("mousemove", 0, None, true)
+            ("pointermove", 0, None, true)
         }
     };
     let event = |event_type, target, pointer_id| NativeMouseEvent {
@@ -158,24 +158,11 @@ fn mouse_events_for_input(
     let mut events = Vec::new();
     if emit_pointer {
         if let Some(target) = hit_target.or(captured_target) {
-            let event_type = match event_type {
-                "mousedown" => "pointerdown",
-                "mouseup" => "pointerup",
-                "mousemove" => "pointermove",
-                _ => unreachable!(),
-            };
             events.push(event(event_type, target, Some(1)));
         }
     }
-    if let Some(target) = hit_target {
-        let mouse = event(event_type, target, None);
-        events.push(mouse);
-        if click.is_some() {
-            events.push(NativeMouseEvent {
-                event_type: "click",
-                ..mouse
-            });
-        }
+    if let Some(target) = click {
+        events.push(event("click", target, None));
     }
     (hit_target, events)
 }
@@ -267,30 +254,18 @@ fn hover_events(
             button: 0,
             buttons,
             wheel_delta: None,
-            pointer_id: event_type.starts_with("pointer").then_some(1),
+            pointer_id: Some(1),
         })
     };
     let old_target = previous.first().copied();
     let new_target = next.first().copied();
-    if old_target != new_target {
-        if let Some(target) = old_target {
-            push("mouseout", target, new_target);
-        }
-    }
     // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
     // Comparing membership also handles a still-hovered subtree being reparented.
     for &node in previous.iter().filter(|node| !next.contains(node)) {
         push("pointerleave", node, new_target);
-        push("mouseleave", node, new_target);
-    }
-    if old_target != new_target {
-        if let Some(target) = new_target {
-            push("mouseover", target, old_target);
-        }
     }
     for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
         push("pointerenter", node, old_target);
-        push("mouseenter", node, old_target);
     }
     events
 }
@@ -453,7 +428,6 @@ pub(crate) struct ApplicationHost {
     presented: Option<PresentedFrame>,
     last_frame_failure: Option<FrameFailure>,
     hover_path: Vec<NodeId>,
-    pointer_hover_path: Vec<NodeId>,
     hover_window: Option<WindowId>,
     cursor: Option<(PhysicalPosition<f64>, u16)>,
     pressed_target: Option<NodeId>,
@@ -480,7 +454,6 @@ impl ApplicationHost {
             presented: None,
             last_frame_failure: None,
             hover_path: Vec::new(),
-            pointer_hover_path: Vec::new(),
             hover_window: None,
             cursor: None,
             pressed_target: None,
@@ -528,7 +501,6 @@ impl ApplicationHost {
         let window = self.windows.current().map(|window| window.id());
         if self.hover_window != window {
             self.hover_path.clear();
-            self.pointer_hover_path.clear();
             self.cursor = None;
             self.pressed_target = None;
             self.active_pointer = None;
@@ -559,7 +531,7 @@ impl ApplicationHost {
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?
             .pointer_capture_target();
-        let (hit_target, events) = mouse_events_for_input(
+        let (hit_target, events) = pointer_events_for_input(
             &frame.plan,
             &mut self.pressed_target,
             position,
@@ -734,33 +706,22 @@ impl ApplicationHost {
             .map_err(|_| HostError::DomBorrowConflict)?;
         let next_path = hover_path(&state.dom, target);
         let capture_active = state.pointer_capture_target().is_some();
-        let mut batch = hover_events(&self.hover_path, &next_path, position, buttons, presented);
-        if capture_active {
-            batch.retain(|event| !event.event_type.starts_with("pointer"));
-        } else if self.pointer_hover_path != self.hover_path {
-            batch.retain(|event| !event.event_type.starts_with("pointer"));
-            let mut pointer_events = hover_events(
-                &self.pointer_hover_path,
-                &next_path,
-                position,
-                buttons,
-                presented,
-            );
-            pointer_events.retain(|event| event.event_type.starts_with("pointer"));
-            batch.extend(pointer_events);
-        }
+        let mut batch = if capture_active {
+            Vec::new()
+        } else {
+            hover_events(&self.hover_path, &next_path, position, buttons, presented)
+        };
         batch.extend(events);
         if !batch.is_empty() {
-            // Boundary events precede input; mouseup and click remain in the same task.
+            // Boundary events precede input; pointerup and click remain in the same task.
             if let Err(error) = state.enqueue_mouse_events(batch) {
-                eprintln!("Burokku warning: dropped mouse input: {error}");
+                eprintln!("Burokku warning: dropped pointer input: {error}");
                 return Ok(());
             }
         }
-        // Do not advance hover state if the queue rejected the transition.
-        self.hover_path = next_path.clone();
+        // Do not advance hover state if the queue rejected the transition or capture is active.
         if !capture_active {
-            self.pointer_hover_path = next_path;
+            self.hover_path = next_path;
         }
         Ok(())
     }
@@ -1128,7 +1089,6 @@ impl ApplicationHost {
                 self.renderer = None;
                 self.presented = None;
                 self.hover_path.clear();
-                self.pointer_hover_path.clear();
                 self.cursor = None;
                 if self.ever_had_window {
                     self.request_exit();
@@ -1322,7 +1282,6 @@ impl ApplicationHandler for ApplicationHost {
                 self.renderer = None;
                 self.presented = None;
                 self.hover_path.clear();
-                self.pointer_hover_path.clear();
                 self.cursor = None;
                 self.windows.close();
                 self.request_exit();
@@ -1770,22 +1729,18 @@ mod tests {
                 globalThis.b = app.createElement('div');
                 app.appendChild(w); w.appendChild(p); w.appendChild(q);
                 p.appendChild(a); p.appendChild(b);
-                globalThis.hoverLog = []; globalThis.hoverChecks = []; globalThis.bubbleLog = [];
+                globalThis.hoverLog = []; globalThis.hoverChecks = [];
                 for (const [name, node] of Object.entries({app, w, p, q, a, b})) {
                     node.testName = name;
-                    for (const type of ['mouseover', 'mouseout', 'mouseenter', 'mouseleave']) {
+                    for (const type of ['pointerenter', 'pointerleave']) {
                         node.addEventListener(type, function (event) {
-                            const boundary = type === 'mouseenter' || type === 'mouseleave';
                             hoverChecks.push(event.currentTarget === this, event.type === type,
-                                event.clientX === 12.5, event.clientY === 20, event.button === 0,
-                                event.buttons === 1, event.bubbles === !boundary, event.cancelable === !boundary);
-                            if (boundary) hoverChecks.push(event.target === this);
-                            else bubbleLog.push(`${type}:${name}`);
-                            if (event.target === this) {
-                                hoverLog.push(`${type}:${name}:${event.relatedTarget?.testName ?? '-'}`);
-                            }
+                                event.target === this, event.clientX === 12.5, event.clientY === 20,
+                                event.button === 0, event.buttons === 1, event.pointerId === 1,
+                                event.bubbles === false, event.cancelable === false);
+                            hoverLog.push(`${type}:${name}:${event.relatedTarget?.testName ?? '-'}`);
                             event.preventDefault();
-                            hoverChecks.push(event.defaultPrevented === !boundary);
+                            hoverChecks.push(event.defaultPrevented === false);
                         });
                     }
                 }
@@ -1801,53 +1756,94 @@ mod tests {
             let a_path = hover_path(&state.borrow().dom, Some(a));
             let enter = hover_events(&[], &a_path, position, 1, (revision, 2.0));
             assert_eq!(
-                enter.iter().map(|event| event.event_type).collect::<Vec<_>>(),
+                enter
+                    .iter()
+                    .map(|event| event.event_type)
+                    .collect::<Vec<_>>(),
                 [
-                    "mouseover",
-                    "pointerenter", "mouseenter",
-                    "pointerenter", "mouseenter",
-                    "pointerenter", "mouseenter",
-                    "pointerenter", "mouseenter",
+                    "pointerenter",
+                    "pointerenter",
+                    "pointerenter",
+                    "pointerenter",
                 ]
             );
             let leave = hover_events(&a_path, &[], position, 1, (revision, 2.0));
             assert_eq!(
-                leave.iter().map(|event| event.event_type).collect::<Vec<_>>(),
+                leave
+                    .iter()
+                    .map(|event| event.event_type)
+                    .collect::<Vec<_>>(),
                 [
-                    "mouseout",
-                    "pointerleave", "mouseleave",
-                    "pointerleave", "mouseleave",
-                    "pointerleave", "mouseleave",
-                    "pointerleave", "mouseleave",
+                    "pointerleave",
+                    "pointerleave",
+                    "pointerleave",
+                    "pointerleave",
                 ]
             );
-            assert!(enter.iter().chain(&leave).all(|event|
-                event.pointer_id == event.event_type.starts_with("pointer").then_some(1)
-            ));
+            assert!(enter
+                .iter()
+                .chain(&leave)
+                .all(|event| event.pointer_id == Some(1)));
             for (target, expected) in [
-                (Some(a), vec!["mouseover:a:-", "mouseenter:app:-", "mouseenter:w:-", "mouseenter:p:-", "mouseenter:a:-"]),
+                (
+                    Some(a),
+                    vec![
+                        "pointerenter:app:-",
+                        "pointerenter:w:-",
+                        "pointerenter:p:-",
+                        "pointerenter:a:-",
+                    ],
+                ),
                 (Some(a), vec![]), // Same target after movement or a repaint.
-                (Some(b), vec!["mouseout:a:b", "mouseleave:a:b", "mouseover:b:a", "mouseenter:b:a"]),
-                (Some(p), vec!["mouseout:b:p", "mouseleave:b:p", "mouseover:p:b"]),
-                (Some(a), vec!["mouseout:p:a", "mouseover:a:p", "mouseenter:a:p"]),
-                (None, vec!["mouseout:a:-", "mouseleave:a:-", "mouseleave:p:-", "mouseleave:w:-", "mouseleave:app:-"]),
+                (
+                    Some(b),
+                    vec!["pointerleave:a:b", "pointerenter:b:a"],
+                ),
+                (Some(p), vec!["pointerleave:b:p"]),
+                (Some(a), vec!["pointerenter:a:p"]),
+                (
+                    None,
+                    vec![
+                        "pointerleave:a:-",
+                        "pointerleave:p:-",
+                        "pointerleave:w:-",
+                        "pointerleave:app:-",
+                    ],
+                ),
                 (None, vec![]), // Repeated native exit is a no-op.
-                (Some(b), vec!["mouseover:b:-", "mouseenter:app:-", "mouseenter:w:-", "mouseenter:p:-", "mouseenter:b:-"]),
+                (
+                    Some(b),
+                    vec![
+                        "pointerenter:app:-",
+                        "pointerenter:w:-",
+                        "pointerenter:p:-",
+                        "pointerenter:b:-",
+                    ],
+                ),
             ] {
-                runtime.eval::<()>("hoverLog = []; bubbleLog = []").await.unwrap();
-                host.queue_hover_and_mouse(target, position, 1, (revision, 2.0), Vec::new()).unwrap();
+                runtime.eval::<()>("hoverLog = []").await.unwrap();
+                host.queue_hover_and_mouse(
+                    target,
+                    position,
+                    1,
+                    (revision, 2.0),
+                    Vec::new(),
+                )
+                .unwrap();
                 let log: Vec<String> = runtime.eval("hoverLog").await.unwrap();
                 assert_eq!(log, expected);
-                assert!(runtime.eval::<bool>("hoverChecks.every(Boolean)").await.unwrap());
-                if expected.first() == Some(&"mouseover:a:-") {
-                    let bubbles: Vec<String> = runtime.eval("bubbleLog").await.unwrap();
-                    assert_eq!(bubbles, ["mouseover:a", "mouseover:p", "mouseover:w", "mouseover:app"]);
-                }
+                assert!(runtime
+                    .eval::<bool>("hoverChecks.every(Boolean)")
+                    .await
+                    .unwrap());
             }
             // Keep the same leaf hovered but change its ancestry.
             runtime.eval::<()>("q.appendChild(b); hoverLog = []").await.unwrap();
             host.queue_hover_and_mouse(Some(b), position, 1, (revision, 2.0), Vec::new()).unwrap();
-            assert_eq!(runtime.eval::<Vec<String>>("hoverLog").await.unwrap(), ["mouseleave:p:b", "mouseenter:q:b"]);
+            assert_eq!(
+                runtime.eval::<Vec<String>>("hoverLog").await.unwrap(),
+                ["pointerleave:p:b", "pointerenter:q:b"]
+            );
 
             // A queued transition must skip disconnected targets, not their live ancestors.
             host.queue_hover_and_mouse(None, position, 1, (revision, 2.0), Vec::new()).unwrap();
@@ -1855,10 +1851,16 @@ mod tests {
             host.queue_hover_and_mouse(Some(b), position, 1, (revision, 2.0), Vec::new()).unwrap();
             runtime.eval::<()>("q.removeChild(b); hoverLog = []").await.unwrap();
             host.queue_hover_and_mouse(Some(q), position, 1, (revision, 2.0), Vec::new()).unwrap();
-            assert_eq!(runtime.eval::<Vec<String>>("hoverLog").await.unwrap(), ["mouseover:q:b"]);
+            assert!(runtime
+                .eval::<bool>("hoverLog.length === 0")
+                .await
+                .unwrap());
             runtime.eval::<()>("w.removeChild(q); hoverLog = []").await.unwrap();
             host.queue_hover_and_mouse(None, position, 1, (revision, 2.0), Vec::new()).unwrap();
-            assert_eq!(runtime.eval::<Vec<String>>("hoverLog").await.unwrap(), ["mouseleave:w:-", "mouseleave:app:-"]);
+            assert_eq!(
+                runtime.eval::<Vec<String>>("hoverLog").await.unwrap(),
+                ["pointerleave:w:-", "pointerleave:app:-"]
+            );
             assert!(runtime.eval::<bool>("hoverChecks.every(Boolean)").await.unwrap());
             assert!(hover_path(&state.borrow().dom, Some(b)).is_empty());
 
@@ -1973,7 +1975,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mouse_input_reaches_dom_in_order_with_presented_coordinates() {
+    async fn pointer_input_reaches_dom_in_order_with_presented_coordinates() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
@@ -1998,8 +2000,8 @@ mod tests {
                 mouseWindow.appendChild(mouseTarget);
                 app.appendChild(mouseWindow);
                 globalThis.inputLog = [];
-                mouseTarget.addEventListener('mouseenter', () => inputLog.push('enter'));
-                for (const type of ['mousedown', 'mouseup', 'mousemove', 'click']) {
+                mouseTarget.addEventListener('pointerenter', () => inputLog.push('enter'));
+                for (const type of ['pointerdown', 'pointerup', 'pointermove', 'click']) {
                     mouseTarget.addEventListener(type, event => {
                         inputLog.push(`${event.type}:${event.button}:${event.buttons}`);
                         event.preventDefault();
@@ -2078,8 +2080,14 @@ mod tests {
                         Some("pointerup"),
                     ),
                 ] {
-                    let (hit_target, events) =
-                        mouse_events_for_input(&plan, &mut pressed, position, buttons, input, None);
+                    let (hit_target, events) = pointer_events_for_input(
+                        &plan,
+                        &mut pressed,
+                        position,
+                        buttons,
+                        input,
+                        None,
+                    );
                     assert_eq!(hit_target, Some(target));
                     assert_eq!(
                         events
@@ -2108,19 +2116,17 @@ mod tests {
                 let expected: Vec<_> = std::iter::once("enter")
                     .chain(
                         [
-                            "mousedown:0:1",
-                            "mousemove:0:1",
-                            "mousedown:2:3",
-                            "mouseup:2:1",
-                            "mouseup:0:0",
+                            "pointerdown:0:1",
+                            "pointermove:0:1",
+                            "pointerup:0:0",
                             "click:0:0",
-                            "mousemove:0:0",
-                            "mousedown:1:4",
-                            "mouseup:1:0",
-                            "mousedown:3:8",
-                            "mouseup:3:0",
-                            "mousedown:4:16",
-                            "mouseup:4:0",
+                            "pointermove:0:0",
+                            "pointerdown:1:4",
+                            "pointerup:1:0",
+                            "pointerdown:3:8",
+                            "pointerup:3:0",
+                            "pointerdown:4:16",
+                            "pointerup:4:0",
                         ]
                         .into_iter()
                         .flat_map(|event| [event, "bubble"]),
@@ -2149,28 +2155,29 @@ mod tests {
 
                 let down = Some((ElementState::Pressed, MouseButton::Left));
                 let up = Some((ElementState::Released, MouseButton::Left));
-                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
                 let outside = PhysicalPosition::new(-1.0, -1.0);
-                let (_, events) = mouse_events_for_input(&plan, &mut pressed, outside, 0, up, None);
+                let (_, events) =
+                    pointer_events_for_input(&plan, &mut pressed, outside, 0, up, None);
                 assert!(events.is_empty());
                 assert_eq!(pressed, None);
 
-                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
                 let (hit_target, events) =
-                    mouse_events_for_input(&plan, &mut pressed, outside, 1, None, Some(target));
+                    pointer_events_for_input(&plan, &mut pressed, outside, 1, None, Some(target));
                 assert_eq!(hit_target, None);
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].event_type, "pointermove");
                 assert_eq!(events[0].target, target);
                 let (hit_target, events) =
-                    mouse_events_for_input(&plan, &mut pressed, outside, 0, up, Some(target));
+                    pointer_events_for_input(&plan, &mut pressed, outside, 0, up, Some(target));
                 assert_eq!(hit_target, None);
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].event_type, "pointerup");
                 assert_eq!(events[0].target, target);
 
-                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
-                let (_, events) = mouse_events_for_input(
+                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let (_, events) = pointer_events_for_input(
                     &plan,
                     &mut pressed,
                     PhysicalPosition::new(400.0, 400.0),
@@ -2178,20 +2185,19 @@ mod tests {
                     up,
                     None,
                 );
-                assert_eq!(events.len(), 2);
-                assert!(events.iter().all(|event| event.target == window));
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].target, window);
                 assert_eq!(events[0].event_type, "pointerup");
-                assert_eq!(events[1].event_type, "mouseup");
 
                 // Recover when a release was missed outside the window.
-                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
-                let _ = mouse_events_for_input(&plan, &mut pressed, position, 0, None, None);
+                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let _ = pointer_events_for_input(&plan, &mut pressed, position, 0, None, None);
                 assert_eq!(pressed, None);
                 assert_eq!(
-                    mouse_events_for_input(&plan, &mut pressed, position, 0, up, None)
+                    pointer_events_for_input(&plan, &mut pressed, position, 0, up, None)
                         .1
                         .len(),
-                    2
+                    1
                 );
 
                 runtime.shutdown().await.unwrap();
