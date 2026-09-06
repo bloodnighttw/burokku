@@ -513,7 +513,14 @@ impl ApplicationHost {
         };
         match state.enqueue_mouse_events(vec![event]) {
             Ok(()) => self.active_pointer = None,
-            Err(error) => eprintln!("Burokku warning: delayed pointer cancellation: {error}"),
+            Err(runtime::JsTaskQueueError::Full) => {
+                if let Err(error) = state.enqueue_mouse_event_when_ready(event) {
+                    eprintln!("Burokku warning: pointer cancellation stopped: {error}");
+                } else {
+                    self.active_pointer = None;
+                }
+            }
+            Err(error) => eprintln!("Burokku warning: pointer cancellation stopped: {error}"),
         }
         Ok(())
     }
@@ -650,8 +657,17 @@ impl ApplicationHost {
             .dom
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
-        if let Err(error) = state.enqueue_mouse_input(input) {
-            eprintln!("Burokku warning: dropped pointer input: {error}");
+        let enqueue = state.enqueue_mouse_input(input);
+        drop(state);
+        if let Err(error) = enqueue {
+            if input.event_type == Some("pointerup") && input.buttons == 0 {
+                eprintln!(
+                    "Burokku warning: replacing dropped pointer release with cancellation: {error}"
+                );
+                self.queue_pointer_cancel()?;
+            } else {
+                eprintln!("Burokku warning: dropped pointer input: {error}");
+            }
         }
         Ok(())
     }

@@ -108,6 +108,26 @@ impl UiDomState {
             })
     }
 
+    pub(crate) fn enqueue_mouse_event_when_ready(
+        &self,
+        event: NativeMouseEvent,
+    ) -> Result<(), JsTaskQueueError> {
+        let queue = self
+            .task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .clone();
+        tokio::task::spawn_local(async move {
+            if let Err(error) = queue
+                .enqueue(move |context| classes::dispatch_mouse_event(context, event))
+                .await
+            {
+                eprintln!("Burokku warning: pointer cancellation stopped: {error}");
+            }
+        });
+        Ok(())
+    }
+
     pub(crate) fn enqueue_mouse_input(
         &self,
         input: NativeMouseInput,
