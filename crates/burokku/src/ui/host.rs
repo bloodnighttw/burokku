@@ -371,7 +371,7 @@ pub(crate) struct ApplicationHost {
     hover_window: Option<WindowId>,
     cursor: Option<(PhysicalPosition<f64>, u16)>,
     pressed_target: Option<NodeId>,
-    active_pointer: Option<(NodeId, PhysicalPosition<f64>)>,
+    active_pointer: Option<(NodeId, PhysicalPosition<f64>, f64)>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
     lifecycle: RuntimeLifecycle,
@@ -461,7 +461,7 @@ impl ApplicationHost {
         self.cursor = Some((position, buttons));
         let Some(frame) = self.presented.as_ref() else {
             if buttons == 0 {
-                self.active_pointer = None;
+                self.queue_pointer_cancel()?;
             }
             return Ok(());
         };
@@ -475,10 +475,11 @@ impl ApplicationHost {
         let scale = frame.plan.scale_factor();
         if input.event_type == Some("pointerdown") {
             if let Some(target) = input.hit_target {
-                self.active_pointer = Some((target, position));
+                self.active_pointer = Some((target, position, scale));
             }
-        } else if let Some((_, active_position)) = self.active_pointer.as_mut() {
+        } else if let Some((_, active_position, active_scale)) = self.active_pointer.as_mut() {
             *active_position = position;
+            *active_scale = scale;
         }
         let result = self.queue_hover_and_mouse(input, scale);
         if buttons == 0 {
@@ -488,13 +489,9 @@ impl ApplicationHost {
     }
 
     fn queue_pointer_cancel(&mut self) -> Result<(), HostError> {
-        let Some((target, position)) = self.active_pointer.take() else {
+        let Some(&(target, position, scale)) = self.active_pointer.as_ref() else {
             return Ok(());
         };
-        let Some(window) = self.windows.current() else {
-            return Ok(());
-        };
-        let scale = window.window().scale_factor();
         if !scale.is_finite() || scale <= 0.0 {
             return Err(HostError::InvalidScaleFactor(scale));
         }
@@ -514,8 +511,9 @@ impl ApplicationHost {
             wheel_delta: None,
             pointer_id: Some(1),
         };
-        if let Err(error) = state.enqueue_mouse_events(vec![event]) {
-            eprintln!("Burokku warning: dropped pointer cancellation: {error}");
+        match state.enqueue_mouse_events(vec![event]) {
+            Ok(()) => self.active_pointer = None,
+            Err(error) => eprintln!("Burokku warning: delayed pointer cancellation: {error}"),
         }
         Ok(())
     }
@@ -600,9 +598,7 @@ impl ApplicationHost {
         buttons: u16,
     ) -> Result<(), HostError> {
         if buttons == 0 {
-            self.active_pointer = None;
-        } else if let Some((_, active_position)) = self.active_pointer.as_mut() {
-            *active_position = position;
+            self.queue_pointer_cancel()?;
         }
         self.cursor = None;
         self.pressed_target = None;
@@ -612,6 +608,10 @@ impl ApplicationHost {
             .ok_or(HostError::MissingNativeWindow)?
             .window()
             .scale_factor();
+        if let Some((_, active_position, active_scale)) = self.active_pointer.as_mut() {
+            *active_position = position;
+            *active_scale = scale;
+        }
         let revision = self
             .dom
             .try_borrow()
@@ -1860,7 +1860,7 @@ mod tests {
                     (state.dom.children(window).unwrap()[0], state.dom.revision())
                 };
                 let position = PhysicalPosition::new(10.0, 10.0);
-                host.active_pointer = Some((target, position));
+                host.active_pointer = Some((target, position, 1.0));
                 queue_test_mouse(
                     &mut host,
                     Some(target),
