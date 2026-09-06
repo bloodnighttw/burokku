@@ -12,13 +12,13 @@ mod macos {
     use burokku_winit::{application::ApplicationHandler, ActiveEventLoop, EventLoop};
     use burokku_winit::{
         raw_window_handle::{HasWindowHandle, RawWindowHandle},
-        ElementState, LogicalSize, MouseButton, PhysicalPosition, Window, WindowAttributes,
-        WindowEvent, WindowId,
+        ElementState, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition, Window,
+        WindowAttributes, WindowEvent, WindowId,
     };
     use objc2_app_kit::{
         NSEvent, NSEventModifierFlags, NSEventType, NSTrackingAreaOptions, NSView,
     };
-    use objc2_foundation::{NSPoint, NSSize};
+    use objc2_foundation::{NSPoint, NSSize, NSString};
     use tokio::{sync::oneshot, task::LocalSet};
 
     const CHILD: &str = "BUROKKU_EXTERNAL_WAKE_TEST_CHILD";
@@ -247,6 +247,31 @@ mod macos {
                     view.mouseExited(&event);
                 }
             }
+            let characters = NSString::from_str("A");
+            for (event_type, state, repeat) in [
+                (NSEventType::KeyDown, ElementState::Pressed, true),
+                (NSEventType::KeyUp, ElementState::Released, false),
+            ] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    event_type, NSPoint::new(0.0, 0.0), NSEventModifierFlags::Shift, 0.0,
+                    native_window.windowNumber(), None, &characters, &characters, repeat, 0,
+                ).unwrap();
+                self.expected.push(WindowEvent::KeyboardInput(KeyEvent {
+                    key_code: 0,
+                    text: Some("A".into()),
+                    state,
+                    repeat,
+                    modifiers: Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                }));
+                if state == ElementState::Pressed {
+                    view.keyDown(&event);
+                } else {
+                    view.keyUp(&event);
+                }
+            }
             self.window = Some(window);
         }
 
@@ -262,6 +287,7 @@ mod macos {
                     | WindowEvent::CursorMoved { .. }
                     | WindowEvent::CursorEntered { .. }
                     | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::KeyboardInput(_)
             ) {
                 assert_eq!(window_id, self.window.as_ref().unwrap().id());
                 self.received.push(event);
@@ -277,7 +303,7 @@ mod macos {
             .unwrap()
             .run_app_external(MouseApp::default(), LocalSet::new())
             .unwrap();
-        assert_eq!(app.expected.len(), 12);
+        assert_eq!(app.expected.len(), 14);
         assert_eq!(app.received, app.expected);
     }
 

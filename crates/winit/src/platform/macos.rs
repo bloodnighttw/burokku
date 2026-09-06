@@ -14,8 +14,8 @@ use std::{
 
 use crate::{event_loop::EventLoopWaker, window::WindowState};
 use crate::{
-    ElementState, Error, LogicalSize, MouseButton, PhysicalPosition, PhysicalSize, Window,
-    WindowAttributes, WindowEvent, WindowId,
+    ElementState, Error, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition,
+    PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId,
 };
 use core_foundation_sys::{
     base::{kCFAllocatorDefault, CFRelease},
@@ -366,6 +366,41 @@ define_class!(
     unsafe impl NSObjectProtocol for ContentView {}
 
     impl ContentView {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            self.send_key_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, event: &NSEvent) {
+            self.send_key_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            let modifiers = event_modifiers(event);
+            if let Some(state) = modifier_key_state(event.keyCode(), modifiers) {
+                self.send(WindowEvent::KeyboardInput(KeyEvent {
+                    key_code: event.keyCode(),
+                    text: None,
+                    state,
+                    repeat: false,
+                    modifiers,
+                }));
+            }
+            self.send(WindowEvent::ModifiersChanged(modifiers));
+        }
+
+        #[unsafe(method(_wantsKeyDownForEvent:))]
+        fn wants_key_down_for_event(&self, _event: &NSEvent) -> bool {
+            true
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             self.send_mouse_input(event, ElementState::Pressed);
@@ -544,6 +579,16 @@ impl ContentView {
         });
     }
 
+    fn send_key_input(&self, event: &NSEvent, state: ElementState) {
+        self.send(WindowEvent::KeyboardInput(KeyEvent {
+            key_code: event.keyCode(),
+            text: event.characters().map(|text| text.to_string()),
+            state,
+            repeat: state == ElementState::Pressed && event.isARepeat(),
+            modifiers: event_modifiers(event),
+        }));
+    }
+
     fn mouse_position(&self, event: &NSEvent) -> PhysicalPosition<f64> {
         let point = self.convertPoint_fromView(event.locationInWindow(), None);
         let bounds = self.bounds();
@@ -593,6 +638,33 @@ impl ContentView {
             }
         }
     }
+}
+
+fn event_modifiers(event: &NSEvent) -> Modifiers {
+    let flags = event.modifierFlags();
+    Modifiers {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        control: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        command: flags.contains(NSEventModifierFlags::Command),
+        caps_lock: flags.contains(NSEventModifierFlags::CapsLock),
+    }
+}
+
+fn modifier_key_state(key_code: u16, modifiers: Modifiers) -> Option<ElementState> {
+    let active = match key_code {
+        0x38 | 0x3c => modifiers.shift,
+        0x3b | 0x3e => modifiers.control,
+        0x3a | 0x3d => modifiers.alt,
+        0x36 | 0x37 => modifiers.command,
+        0x39 => modifiers.caps_lock,
+        _ => return None,
+    };
+    Some(if active {
+        ElementState::Pressed
+    } else {
+        ElementState::Released
+    })
 }
 
 fn wheel_delta(delta_x: f64, delta_y: f64, precise: bool, scale_factor: f64) -> (f64, f64) {
@@ -909,6 +981,7 @@ impl PlatformEventLoop {
         );
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
         native_window.setContentView(Some(&view));
+        native_window.makeFirstResponder(Some(&view));
 
         let delegate = WindowDelegate::new(self.mtm, state.clone(), self.dispatcher.clone());
         native_window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1101,5 +1174,19 @@ mod tests {
     fn precise_wheel_deltas_are_physical_pixels() {
         assert_eq!(wheel_delta(2.0, -3.0, true, 2.0), (4.0, -6.0));
         assert_eq!(wheel_delta(2.0, -3.0, false, 2.0), (2.0, -3.0));
+    }
+
+    #[test]
+    fn modifier_keys_follow_the_event_snapshot() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(modifier_key_state(0x38, shift), Some(ElementState::Pressed));
+        assert_eq!(
+            modifier_key_state(0x38, Modifiers::default()),
+            Some(ElementState::Released)
+        );
+        assert_eq!(modifier_key_state(0x00, shift), None);
     }
 }
