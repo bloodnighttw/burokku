@@ -2293,6 +2293,33 @@ mod tests {
     }
 
     #[test]
+    fn chorded_button_transitions_emit_pointermove() {
+        let plan = scene_plan(&Dom::new());
+        let position = PhysicalPosition::new(10.0, 10.0);
+        let mut pressed = None;
+
+        let _ = pointer_input_for_input(
+            &plan,
+            &mut pressed,
+            position,
+            1,
+            Some((ElementState::Pressed, MouseButton::Left)),
+        );
+        for (state, buttons) in [(ElementState::Pressed, 3), (ElementState::Released, 1)] {
+            let event = pointer_input_for_input(
+                &plan,
+                &mut pressed,
+                position,
+                buttons,
+                Some((state, MouseButton::Right)),
+            );
+            assert_eq!(event.event_type, Some("pointermove"));
+            assert_eq!(event.button, 2);
+            assert_eq!(event.buttons, buttons);
+        }
+    }
+
+    #[test]
     fn primary_click_requires_press_and_release_on_the_same_target() {
         let mut dom = Dom::new();
         let first = dom.create_element(Element::from_tag(ElementTag::Div));
