@@ -18,11 +18,15 @@ use lifetime::SharedWrapperRoots;
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct NativeClick {
+pub(crate) struct NativeMouseEvent {
+    pub(crate) event_type: &'static str,
     pub(crate) target: NodeId,
     pub(crate) presented_revision: u64,
     pub(crate) client_x: f64,
     pub(crate) client_y: f64,
+    pub(crate) button: u16,
+    pub(crate) buttons: u16,
+    pub(crate) related_target: Option<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,11 +51,14 @@ impl UiDomState {
         self.presented_layout.replace(Some(computed));
     }
 
-    pub(crate) fn enqueue_click(&self, click: NativeClick) -> Result<(), JsTaskQueueError> {
+    pub(crate) fn enqueue_mouse_event(
+        &self,
+        event: NativeMouseEvent,
+    ) -> Result<(), JsTaskQueueError> {
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(move |context| classes::dispatch_click(context, click))
+            .try_enqueue(move |context| classes::dispatch_mouse_event(context, event))
     }
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
@@ -609,13 +616,17 @@ mod tests {
                 )
                 .unwrap());
             for target in targets.iter().copied() {
-                classes::dispatch_click(
+                classes::dispatch_mouse_event(
                     &context,
-                    NativeClick {
+                    NativeMouseEvent {
+                        event_type: "click",
                         target,
                         presented_revision,
                         client_x: 0.0,
                         client_y: 0.0,
+                        button: 0,
+                        buttons: 0,
+                        related_target: None,
                     },
                 )
                 .unwrap();
@@ -639,6 +650,134 @@ mod tests {
         assert!(targets
             .into_iter()
             .all(|target| plugin.state().dom.node(target).is_none()));
+    }
+
+    #[test]
+    fn mouse_dispatch_preserves_payload_and_hover_propagation() {
+        let (plugin, _) = DomPlugin::new();
+        let (_runtime, context) = context();
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    r#"
+                globalThis.mouseWindow = app.createElement('window');
+                globalThis.mouseTarget = app.createElement('div');
+                globalThis.mouseRelated = app.createElement('div');
+                mouseWindow.appendChild(mouseTarget);
+                mouseWindow.appendChild(mouseRelated);
+                app.appendChild(mouseWindow);
+                globalThis.mouseCalls = [];
+                globalThis.mouseChecks = [];
+                globalThis.lastMouseEvent = null;
+                for (const type of ['click', 'mousedown', 'mouseup', 'mousemove',
+                                    'mouseover', 'mouseout', 'mouseenter', 'mouseleave']) {
+                    mouseTarget.addEventListener(type, function (event) {
+                        lastMouseEvent = event;
+                        mouseCalls.push('target');
+                        mouseChecks.push(event.type === type,
+                            event.target === mouseTarget,
+                            event.currentTarget === mouseTarget, this === mouseTarget,
+                            event.clientX === 12.5, event.clientY === 8.25,
+                            event.button === 2, event.buttons === 3,
+                            event.relatedTarget === mouseRelated);
+                        try { event.buttons = 99; } catch {}
+                        try { event.relatedTarget = mouseTarget; } catch {}
+                        mouseChecks.push(event.buttons === 3,
+                            event.relatedTarget === mouseRelated);
+                        event.preventDefault();
+                    });
+                    mouseWindow.addEventListener(type, function (event) {
+                        mouseCalls.push('window');
+                        mouseChecks.push(event.currentTarget === mouseWindow,
+                            this === mouseWindow, event.target === mouseTarget);
+                    });
+                    app.addEventListener(type, () => mouseCalls.push('app'));
+                }
+            "#,
+                )
+                .unwrap();
+            let (target, related_target, presented_revision) = {
+                let state = plugin.state();
+                let window = state.dom.children(state.dom.root()).unwrap()[0];
+                let children = state.dom.children(window).unwrap();
+                (children[0], children[1], state.dom.revision())
+            };
+            for event_type in [
+                "click",
+                "mousedown",
+                "mouseup",
+                "mousemove",
+                "mouseover",
+                "mouseout",
+                "mouseenter",
+                "mouseleave",
+            ] {
+                context
+                    .eval::<(), _>("mouseCalls = []; mouseChecks = []")
+                    .unwrap();
+                classes::dispatch_mouse_event(
+                    &context,
+                    NativeMouseEvent {
+                        event_type,
+                        target,
+                        presented_revision,
+                        client_x: 12.5,
+                        client_y: 8.25,
+                        button: 2,
+                        buttons: 3,
+                        related_target: Some(related_target),
+                    },
+                )
+                .unwrap();
+                let bubbles = !matches!(event_type, "mouseenter" | "mouseleave");
+                let calls: Vec<String> = context.eval("mouseCalls").unwrap();
+                let expected = if bubbles {
+                    vec!["target", "window", "app"]
+                } else {
+                    vec!["target"]
+                };
+                assert_eq!(calls, expected, "{event_type}");
+                assert!(
+                    context
+                        .eval::<bool, _>("mouseChecks.every(Boolean)")
+                        .unwrap(),
+                    "{event_type}"
+                );
+                let flags: Vec<bool> = context
+                    .eval(
+                        "[lastMouseEvent.bubbles, lastMouseEvent.cancelable,
+                      lastMouseEvent.defaultPrevented, lastMouseEvent.currentTarget === null]",
+                    )
+                    .unwrap();
+                assert_eq!(flags, [bubbles, bubbles, bubbles, true], "{event_type}");
+            }
+            // Leaving the window has no related node.
+            context
+                .eval::<(), _>("mouseRelated = null; mouseChecks = []")
+                .unwrap();
+            let leave = NativeMouseEvent {
+                event_type: "mouseleave",
+                target,
+                presented_revision,
+                client_x: 12.5,
+                client_y: 8.25,
+                button: 2,
+                buttons: 3,
+                related_target: None,
+            };
+            classes::dispatch_mouse_event(&context, leave).unwrap();
+            assert!(context
+                .eval::<bool, _>("mouseChecks.every(Boolean)")
+                .unwrap());
+
+            // A queued event must not reach a target detached before dispatch.
+            context
+                .eval::<(), _>("mouseWindow.removeChild(mouseTarget); mouseCalls = []")
+                .unwrap();
+            classes::dispatch_mouse_event(&context, leave).unwrap();
+            assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
+        });
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -723,20 +862,28 @@ mod tests {
 
                 state
                     .borrow()
-                    .enqueue_click(NativeClick {
+                    .enqueue_mouse_event(NativeMouseEvent {
+                        event_type: "click",
                         target,
                         presented_revision,
                         client_x: 12.5,
                         client_y: 8.25,
+                        button: 0,
+                        buttons: 0,
+                        related_target: None,
                     })
                     .unwrap();
                 state
                     .borrow()
-                    .enqueue_click(NativeClick {
+                    .enqueue_mouse_event(NativeMouseEvent {
+                        event_type: "click",
                         target: immediate_target,
                         presented_revision,
                         client_x: 20.0,
                         client_y: 10.0,
+                        button: 0,
+                        buttons: 0,
+                        related_target: None,
                     })
                     .unwrap();
                 let result: Vec<String> = runtime

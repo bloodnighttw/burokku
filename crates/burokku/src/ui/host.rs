@@ -12,7 +12,7 @@ use winit::{
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
-    dom_plugin::{NativeClick, SharedUiDom},
+    dom_plugin::{NativeMouseEvent, SharedUiDom},
     elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
@@ -997,16 +997,20 @@ impl ApplicationHandler for ApplicationHost {
                         .as_ref()
                         .expect("a click target comes from the presented frame");
                     let scale = frame.plan.scale_factor();
-                    let click = NativeClick {
+                    let click = NativeMouseEvent {
+                        event_type: "click",
                         target,
                         presented_revision: frame.revision(),
                         client_x: position.x / scale,
                         client_y: position.y / scale,
+                        button: 0,
+                        buttons: 0,
+                        related_target: None,
                     };
                     let queued = self
                         .dom
                         .try_borrow()
-                        .map(|state| state.enqueue_click(click));
+                        .map(|state| state.enqueue_mouse_event(click));
                     match queued {
                         Err(_) => {
                             self.fail(event_loop, HostError::DomBorrowConflict);

@@ -6,7 +6,7 @@ use rquickjs::{
 };
 
 use super::{
-    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeClick, SharedUiDom, UiDomState,
+    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeMouseEvent, SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -49,8 +49,8 @@ impl<'js> WrapperCache<'js> {
 }
 
 #[derive(Trace, JsLifetime)]
-#[rquickjs::class(rename = "BurokkuClickEvent", rename_all = "camelCase")]
-struct NativeClickEvent<'js> {
+#[rquickjs::class(rename = "BurokkuMouseEvent", rename_all = "camelCase")]
+struct MouseEvent<'js> {
     #[qjs(get, enumerable, rename = "type")]
     event_type: String,
     #[qjs(get, enumerable)]
@@ -61,7 +61,10 @@ struct NativeClickEvent<'js> {
     #[qjs(get, enumerable)]
     client_y: f64,
     #[qjs(get, enumerable)]
-    button: u8,
+    button: u16,
+    #[qjs(get, enumerable)]
+    buttons: u16,
+    related_target: Option<Object<'js>>,
     #[qjs(get, enumerable)]
     bubbles: bool,
     #[qjs(get, enumerable)]
@@ -73,7 +76,15 @@ struct NativeClickEvent<'js> {
 }
 
 #[rquickjs::methods]
-impl<'js> NativeClickEvent<'js> {
+impl<'js> MouseEvent<'js> {
+    #[qjs(get, rename = "relatedTarget", enumerable)]
+    fn related_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
+        match &self.related_target {
+            Some(target) => Ok(target.clone().into_value()),
+            None => Null.into_js(&context),
+        }
+    }
+
     #[qjs(get, rename = "currentTarget", enumerable)]
     fn current_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
         match &self.current_target {
@@ -874,30 +885,39 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
     Ok(node.into_inner())
 }
 
-pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()> {
+pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Result<()> {
     let app: Object = context.globals().get("app")?;
     let Some(app) = Class::<NativeNode>::from_object(&app) else {
         return Ok(());
     };
     let state = app.borrow().state.clone();
-    let path = {
+    let bubbles = !matches!(mouse.event_type, "mouseenter" | "mouseleave");
+    let (path, related_target) = {
         let state = borrow(context, &state)?;
-        debug_assert!(click.presented_revision <= state.dom.revision());
-        if !state.dom.is_connected(click.target).unwrap_or(false) {
+        debug_assert!(mouse.presented_revision <= state.dom.revision());
+        if !state.dom.is_connected(mouse.target).unwrap_or(false) {
             return Ok(());
         }
 
         let mut path = Vec::new();
-        let mut current = Some(click.target);
+        let mut current = Some(mouse.target);
         while let Some(id) = current {
             path.push(id);
+            if !bubbles {
+                break;
+            }
             current = errors::map_dom(
                 context,
-                "build click propagation path",
+                "build mouse propagation path",
                 state.dom.parent_node(id),
             )?;
         }
-        path
+        (
+            path,
+            mouse
+                .related_target
+                .filter(|id| state.dom.node(*id).is_some()),
+        )
     };
 
     let mut listeners = Vec::with_capacity(path.len());
@@ -908,7 +928,7 @@ pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()
         let callbacks = node
             .borrow()
             .listeners
-            .get("click")
+            .get(mouse.event_type)
             .cloned()
             .unwrap_or_default();
         listeners.push((current, callbacks));
@@ -918,17 +938,22 @@ pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()
     }
 
     let target = listeners[0].0.clone();
+    let related_target = related_target
+        .map(|id| wrap_node(context, &state, id))
+        .transpose()?;
     let event = Class::instance(
         context.clone(),
-        NativeClickEvent {
-            event_type: "click".into(),
-            target: target.clone(),
+        MouseEvent {
+            event_type: mouse.event_type.into(),
+            target,
             current_target: None,
-            client_x: click.client_x,
-            client_y: click.client_y,
-            button: 0,
-            bubbles: true,
-            cancelable: true,
+            client_x: mouse.client_x,
+            client_y: mouse.client_y,
+            button: mouse.button,
+            buttons: mouse.buttons,
+            related_target,
+            bubbles,
+            cancelable: bubbles,
             default_prevented: false,
             propagation_stopped: false,
             immediate_propagation_stopped: false,
@@ -943,7 +968,7 @@ pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()
             let still_registered = node
                 .borrow()
                 .listeners
-                .get("click")
+                .get(mouse.event_type)
                 .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
             if !still_registered {
                 continue;
@@ -953,7 +978,7 @@ pub(super) fn dispatch_click(context: &Ctx<'_>, click: NativeClick) -> Result<()
                 .call::<_, ()>((This(current.clone()), event.clone()))
                 .catch(context)
             {
-                eprintln!("Burokku click listener failed: {error}");
+                eprintln!("Burokku {} listener failed: {error}", mouse.event_type);
             }
             if event.borrow().immediate_propagation_stopped {
                 break;
