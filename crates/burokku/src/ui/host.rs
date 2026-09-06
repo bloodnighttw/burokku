@@ -1821,6 +1821,78 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn release_without_a_presented_frame_cancels_pointer_capture() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+                let (runtime, driver) = runtime::Runtime::builder()
+                    .plugin(plugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                let mut host = ApplicationHost::new(
+                    state.clone(),
+                    TextEngine::without_system_fonts(),
+                    RuntimeLifecycle::for_test(),
+                );
+                runtime
+                    .eval::<()>(
+                        r#"
+                        globalThis.captureWindow = app.createElement('window');
+                        globalThis.captureTarget = app.createElement('div');
+                        captureWindow.appendChild(captureTarget);
+                        app.appendChild(captureWindow);
+                        globalThis.terminalLog = [];
+                        captureTarget.addEventListener('pointerdown', event =>
+                            captureTarget.setPointerCapture(event.pointerId));
+                        captureTarget.addEventListener('pointercancel', () =>
+                            terminalLog.push('cancel'));
+                        captureTarget.addEventListener('lostpointercapture', () =>
+                            terminalLog.push('lost'));
+                        "#,
+                    )
+                    .await
+                    .unwrap();
+                let (target, revision) = {
+                    let state = state.borrow();
+                    let window = state.dom.children(state.dom.root()).unwrap()[0];
+                    (state.dom.children(window).unwrap()[0], state.dom.revision())
+                };
+                let position = PhysicalPosition::new(10.0, 10.0);
+                host.active_pointer = Some((target, position));
+                queue_test_mouse(
+                    &mut host,
+                    Some(target),
+                    position,
+                    1,
+                    (revision, 1.0),
+                    Some("pointerdown"),
+                )
+                .unwrap();
+                assert!(runtime
+                    .eval::<bool>("captureTarget.hasPointerCapture(1)")
+                    .await
+                    .unwrap());
+
+                host.queue_mouse_input(
+                    position,
+                    0,
+                    Some((ElementState::Released, MouseButton::Left)),
+                )
+                .unwrap();
+
+                assert_eq!(
+                    runtime.eval::<Vec<String>>("terminalLog").await.unwrap(),
+                    ["cancel", "lost"]
+                );
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn pointer_capture_uses_dispatch_time_state_and_reconciles_boundaries() {
         tokio::task::LocalSet::new()
             .run_until(async {
