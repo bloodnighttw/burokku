@@ -67,6 +67,7 @@ export interface BurokkuEventMap {
   pointermove: BurokkuPointerEvent<"pointermove">;
   pointerenter: BurokkuPointerEvent<"pointerenter">;
   pointerleave: BurokkuPointerEvent<"pointerleave">;
+  pointercancel: BurokkuPointerEvent<"pointercancel">;
   wheel: BurokkuWheelEvent;
 }
 

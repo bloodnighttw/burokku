@@ -78,7 +78,7 @@ for (const type of [
 }
 
 for (const type of [
-  "pointerdown", "pointerup", "pointermove", "pointerenter", "pointerleave",
+  "pointerdown", "pointerup", "pointermove", "pointerenter", "pointerleave", "pointercancel",
 ] as const) {
   const listener: BurokkuEventListener<BurokkuPointerEvent<typeof type>> = event => {
     const eventType: typeof type = event.type;

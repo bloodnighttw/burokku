@@ -443,6 +443,7 @@ pub(crate) struct ApplicationHost {
     hover_window: Option<WindowId>,
     cursor: Option<(PhysicalPosition<f64>, u16)>,
     pressed_target: Option<NodeId>,
+    active_pointer: Option<(NodeId, PhysicalPosition<f64>)>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
     lifecycle: RuntimeLifecycle,
@@ -468,6 +469,7 @@ impl ApplicationHost {
             hover_window: None,
             cursor: None,
             pressed_target: None,
+            active_pointer: None,
             ever_had_window: false,
             fatal_error: None,
             lifecycle,
@@ -513,6 +515,7 @@ impl ApplicationHost {
             self.hover_path.clear();
             self.cursor = None;
             self.pressed_target = None;
+            self.active_pointer = None;
             self.hover_window = window;
         }
         if !self.has_usable_presented_frame() {
@@ -530,8 +533,12 @@ impl ApplicationHost {
         self.discard_stale_presented_frame();
         self.cursor = Some((position, buttons));
         let Some(frame) = self.presented.as_ref() else {
+            if buttons == 0 {
+                self.active_pointer = None;
+            }
             return Ok(());
         };
+        let starts_pointer = matches!(input, Some((ElementState::Pressed, _)));
         let events = mouse_events_for_input(
             &frame.plan,
             &mut self.pressed_target,
@@ -539,13 +546,56 @@ impl ApplicationHost {
             buttons,
             input,
         );
-        self.queue_hover_and_mouse(
+        let presented = (frame.revision(), frame.plan.scale_factor());
+        if starts_pointer && self.active_pointer.is_none() {
+            self.active_pointer = events.first().map(|event| (event.target, position));
+        } else if let Some((_, active_position)) = self.active_pointer.as_mut() {
+            *active_position = position;
+        }
+        let result = self.queue_hover_and_mouse(
             events.first().map(|event| event.target),
             position,
             buttons,
-            (frame.revision(), frame.plan.scale_factor()),
+            presented,
             events,
-        )
+        );
+        if buttons == 0 {
+            self.active_pointer = None;
+        }
+        result
+    }
+
+    fn queue_pointer_cancel(&mut self) -> Result<(), HostError> {
+        let Some((target, position)) = self.active_pointer.take() else {
+            return Ok(());
+        };
+        let Some(window) = self.windows.current() else {
+            return Ok(());
+        };
+        let scale = window.window().scale_factor();
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(HostError::InvalidScaleFactor(scale));
+        }
+        let state = self
+            .dom
+            .try_borrow()
+            .map_err(|_| HostError::DomBorrowConflict)?;
+        let event = NativeMouseEvent {
+            event_type: "pointercancel",
+            target,
+            presented_revision: state.dom.revision(),
+            client_x: position.x / scale,
+            client_y: position.y / scale,
+            button: 0,
+            buttons: 0,
+            related_target: None,
+            wheel_delta: None,
+            pointer_id: Some(1),
+        };
+        if let Err(error) = state.enqueue_mouse_events(vec![event]) {
+            eprintln!("Burokku warning: dropped pointer cancellation: {error}");
+        }
+        Ok(())
     }
 
     fn queue_wheel_input(
@@ -624,6 +674,11 @@ impl ApplicationHost {
         position: PhysicalPosition<f64>,
         buttons: u16,
     ) -> Result<(), HostError> {
+        if buttons == 0 {
+            self.active_pointer = None;
+        } else if let Some((_, active_position)) = self.active_pointer.as_mut() {
+            *active_position = position;
+        }
         self.cursor = None;
         self.pressed_target = None;
         let scale = self
@@ -828,6 +883,7 @@ impl ApplicationHost {
         };
         match initialized {
             Ok((graphics, renderer)) => {
+                self.queue_pointer_cancel()?;
                 self.graphics.replace(graphics);
                 let (previous_window, previous_renderer) =
                     pending
@@ -935,6 +991,9 @@ impl ApplicationHost {
         // Record observation before native work so a rejected specification is
         // not retried on every event-loop turn.
         self.observed_revision = Some(revision);
+        if desired.is_none() {
+            self.queue_pointer_cancel()?;
+        }
         let change = match self.windows.reconcile(event_loop, desired) {
             Ok(change) => change,
             Err(error) => {
@@ -972,6 +1031,7 @@ impl ApplicationHost {
                     // now be cancelled without risking loss of the active Window
                     // when native candidate creation fails.
                     self.cancel_graphics_initialization();
+                    self.queue_pointer_cancel()?;
                     let previous_window = prepared.commit(&mut self.windows);
                     if let Some(previous_window) = previous_window {
                         previous_window.close();
@@ -1010,6 +1070,7 @@ impl ApplicationHost {
                     // No fallible work remains: install the already-created
                     // renderer with its candidate Window before releasing the old
                     // surface and closing the previous Window.
+                    self.queue_pointer_cancel()?;
                     let (previous_window, previous_renderer) = prepared.commit_with(
                         &mut self.windows,
                         &mut self.renderer,
@@ -1216,6 +1277,10 @@ impl ApplicationHandler for ApplicationHost {
 
         match event {
             WindowEvent::CloseRequested => {
+                if let Err(error) = self.queue_pointer_cancel() {
+                    self.fail(event_loop, error);
+                    return;
+                }
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
@@ -1366,7 +1431,12 @@ impl ApplicationHandler for ApplicationHost {
                     self.fail(event_loop, error);
                 }
             }
-            WindowEvent::Focused(false) => self.pressed_target = None,
+            WindowEvent::Focused(false) => {
+                self.pressed_target = None;
+                if let Err(error) = self.queue_pointer_cancel() {
+                    self.fail(event_loop, error);
+                }
+            }
             WindowEvent::Focused(true)
             | WindowEvent::Occluded(true)
             | WindowEvent::ModifiersChanged(_) => {}

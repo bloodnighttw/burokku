@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_dispatch_preserves_payload_and_hover_propagation() {
+    fn mouse_and_pointer_dispatch_preserves_payload_and_propagation() {
         let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
         context.with(|context| {
@@ -703,7 +703,7 @@ mod tests {
                 for (const type of ['click', 'mousedown', 'mouseup', 'mousemove',
                                     'mouseover', 'mouseout', 'mouseenter', 'mouseleave', 'wheel',
                                     'pointerdown', 'pointerup', 'pointermove',
-                                    'pointerenter', 'pointerleave']) {
+                                    'pointerenter', 'pointerleave', 'pointercancel']) {
                     mouseTarget.addEventListener(type, function (event) {
                         lastMouseEvent = event;
                         mouseCalls.push('target');
@@ -758,6 +758,7 @@ mod tests {
                 "pointermove",
                 "pointerenter",
                 "pointerleave",
+                "pointercancel",
             ] {
                 context
                     .eval::<(), _>("mouseCalls = []; mouseChecks = []")
@@ -782,6 +783,7 @@ mod tests {
                     event_type,
                     "mouseenter" | "mouseleave" | "pointerenter" | "pointerleave"
                 );
+                let cancelable = bubbles && event_type != "pointercancel";
                 let calls: Vec<String> = context.eval("mouseCalls").unwrap();
                 let expected = if bubbles {
                     vec!["target", "window", "app"]
@@ -801,7 +803,11 @@ mod tests {
                       lastMouseEvent.defaultPrevented, lastMouseEvent.currentTarget === null]",
                     )
                     .unwrap();
-                assert_eq!(flags, [bubbles, bubbles, bubbles, true], "{event_type}");
+                assert_eq!(
+                    flags,
+                    [bubbles, cancelable, cancelable, true],
+                    "{event_type}"
+                );
             }
             // Leaving the window has no related node.
             context

@@ -1018,6 +1018,7 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
         .transpose()?;
     let (delta_x, delta_y, delta_mode) = mouse.wheel_delta.unwrap_or((0.0, 0.0, 0));
     let pointer_id = mouse.pointer_id.unwrap_or(0);
+    let cancelable = bubbles && mouse.event_type != "pointercancel";
     let event = Class::instance(
         context.clone(),
         MouseEvent {
@@ -1036,7 +1037,7 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
             is_primary: pointer_id != 0,
             related_target,
             bubbles,
-            cancelable: bubbles,
+            cancelable,
             default_prevented: false,
             propagation_stopped: false,
             immediate_propagation_stopped: false,
