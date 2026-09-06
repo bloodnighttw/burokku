@@ -303,6 +303,31 @@ mod macos {
                         .sendEvent(&event);
                 }
             }
+            let empty = NSString::from_str("");
+            for (key_code, flags, state) in [
+                (0x38, NSEventModifierFlags::Shift, ElementState::Pressed),
+                (0x3c, NSEventModifierFlags::Shift, ElementState::Pressed),
+                // Releasing left Shift while right Shift remains held keeps the aggregate flag set.
+                (0x38, NSEventModifierFlags::Shift, ElementState::Released),
+                (0x3c, NSEventModifierFlags(0), ElementState::Released),
+            ] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    NSEventType::FlagsChanged, NSPoint::new(0.0, 0.0), flags, 0.0,
+                    native_window.windowNumber(), None, &empty, &empty, false, key_code,
+                ).unwrap();
+                self.expected.push(WindowEvent::KeyboardInput(KeyEvent {
+                    key_code,
+                    text: None,
+                    logical_text: None,
+                    state,
+                    repeat: false,
+                    modifiers: Modifiers {
+                        shift: flags.contains(NSEventModifierFlags::Shift),
+                        ..Modifiers::default()
+                    },
+                }));
+                view.flagsChanged(&event);
+            }
             self.window = Some(window);
             self.injected = true;
         }
@@ -341,7 +366,7 @@ mod macos {
             .unwrap()
             .run_app_external(MouseApp::default(), LocalSet::new())
             .unwrap();
-        assert_eq!(app.expected.len(), 16);
+        assert_eq!(app.expected.len(), 20);
         assert_eq!(app.received, app.expected);
     }
 
