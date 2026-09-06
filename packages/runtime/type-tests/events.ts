@@ -79,6 +79,7 @@ for (const type of [
 
 for (const type of [
   "pointerdown", "pointerup", "pointermove", "pointerenter", "pointerleave", "pointercancel",
+  "gotpointercapture", "lostpointercapture",
 ] as const) {
   const listener: BurokkuEventListener<BurokkuPointerEvent<typeof type>> = event => {
     const eventType: typeof type = event.type;
@@ -93,6 +94,11 @@ for (const type of [
   div.addEventListener(type, listener);
   div.removeEventListener(type, listener);
 }
+
+div.setPointerCapture(1);
+div.releasePointerCapture(1);
+const hasPointerCapture: boolean = div.hasPointerCapture(1);
+void hasPointerCapture;
 
 div.addEventListener("mousedown", event => {
   const type: "mousedown" = event.type;

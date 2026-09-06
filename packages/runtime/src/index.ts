@@ -68,6 +68,8 @@ export interface BurokkuEventMap {
   pointerenter: BurokkuPointerEvent<"pointerenter">;
   pointerleave: BurokkuPointerEvent<"pointerleave">;
   pointercancel: BurokkuPointerEvent<"pointercancel">;
+  gotpointercapture: BurokkuPointerEvent<"gotpointercapture">;
+  lostpointercapture: BurokkuPointerEvent<"lostpointercapture">;
   wheel: BurokkuWheelEvent;
 }
 
@@ -150,6 +152,10 @@ export interface Element<
 > extends Node<AllowedChild> {
   readonly localName: Tag;
   readonly style: BurokkuStyleDeclaration;
+
+  setPointerCapture(pointerId: number): void;
+  releasePointerCapture(pointerId: number): void;
+  hasPointerCapture(pointerId: number): boolean;
 
   getBoundingClientRect(): BurokkuDOMRectReadOnly | null;
   getAttribute(name: string): string | null;
