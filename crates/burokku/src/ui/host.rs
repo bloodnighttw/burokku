@@ -112,10 +112,6 @@ fn pointer_input_for_input(
     let (event_type, button, click_target, emit_pointer) = match input {
         Some((state, mouse_button)) => {
             let click = recognize_primary_click(pressed_target, state, mouse_button, hit_target);
-            let event_type = match state {
-                ElementState::Pressed => "pointerdown",
-                ElementState::Released => "pointerup",
-            };
             let button = match mouse_button {
                 MouseButton::Left => 0,
                 MouseButton::Middle => 1,
@@ -128,9 +124,12 @@ fn pointer_input_for_input(
                 MouseButton::Middle => 4,
                 MouseButton::Other(number) => 1_u16.checked_shl(u32::from(number)).unwrap_or(0),
             };
-            let emit_pointer = match state {
-                ElementState::Pressed => changed_button != 0 && buttons == changed_button,
-                ElementState::Released => buttons == 0,
+            let (event_type, emit_pointer) = match state {
+                ElementState::Pressed if buttons == changed_button => {
+                    ("pointerdown", changed_button != 0)
+                }
+                ElementState::Released if buttons == 0 => ("pointerup", true),
+                _ => ("pointermove", changed_button != 0),
             };
             (event_type, button, click, emit_pointer)
         }
@@ -2158,8 +2157,16 @@ mod tests {
                         Some("pointerdown"),
                     ),
                     (None, 1, Some("pointermove")),
-                    (Some((ElementState::Pressed, MouseButton::Right)), 3, None),
-                    (Some((ElementState::Released, MouseButton::Right)), 1, None),
+                    (
+                        Some((ElementState::Pressed, MouseButton::Right)),
+                        3,
+                        Some("pointermove"),
+                    ),
+                    (
+                        Some((ElementState::Released, MouseButton::Right)),
+                        1,
+                        Some("pointermove"),
+                    ),
                     (
                         Some((ElementState::Released, MouseButton::Left)),
                         0,
@@ -2213,6 +2220,8 @@ mod tests {
                         [
                             "pointerdown:0:1",
                             "pointermove:0:1",
+                            "pointermove:2:3",
+                            "pointermove:2:1",
                             "pointerup:0:0",
                             "click:0:0",
                             "pointermove:0:0",
