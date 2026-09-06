@@ -71,6 +71,12 @@ struct MouseEvent<'js> {
     delta_y: f64,
     #[qjs(get, enumerable)]
     delta_mode: u16,
+    #[qjs(get, enumerable)]
+    pointer_id: u32,
+    #[qjs(get, enumerable)]
+    pointer_type: String,
+    #[qjs(get, enumerable)]
+    is_primary: bool,
     related_target: Option<Object<'js>>,
     #[qjs(get, enumerable)]
     bubbles: bool,
@@ -1008,6 +1014,7 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
         .map(|id| wrap_node(context, &state, id))
         .transpose()?;
     let (delta_x, delta_y, delta_mode) = mouse.wheel_delta.unwrap_or((0.0, 0.0, 0));
+    let pointer_id = mouse.pointer_id.unwrap_or(0);
     let event = Class::instance(
         context.clone(),
         MouseEvent {
@@ -1021,6 +1028,9 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
             delta_x,
             delta_y,
             delta_mode,
+            pointer_id,
+            pointer_type: if pointer_id == 0 { "" } else { "mouse" }.into(),
+            is_primary: pointer_id != 0,
             related_target,
             bubbles,
             cancelable: bubbles,

@@ -3,6 +3,7 @@ import type {
   BurokkuKeyboardEvent,
   BurokkuEventListener,
   BurokkuMouseEvent,
+  BurokkuPointerEvent,
   BurokkuWheelEvent,
   BurokkuNode,
   DivElement,
@@ -71,6 +72,21 @@ for (const type of [
     event.buttons = 0;
     // @ts-expect-error Related target is read-only.
     event.relatedTarget = null;
+  };
+  div.addEventListener(type, listener);
+  div.removeEventListener(type, listener);
+}
+
+for (const type of ["pointerdown", "pointerup", "pointermove"] as const) {
+  const listener: BurokkuEventListener<BurokkuPointerEvent<typeof type>> = event => {
+    const eventType: typeof type = event.type;
+    const pointerId: number = event.pointerId;
+    const pointerType: string = event.pointerType;
+    const isPrimary: boolean = event.isPrimary;
+    const clientX: number = event.clientX;
+    void [eventType, pointerId, pointerType, isPrimary, clientX];
+    // @ts-expect-error Pointer identity is read-only.
+    event.pointerId = 2;
   };
   div.addEventListener(type, listener);
   div.removeEventListener(type, listener);

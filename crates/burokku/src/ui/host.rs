@@ -145,8 +145,19 @@ fn mouse_events_for_input(
         buttons,
         related_target: None,
         wheel_delta: None,
+        pointer_id: None,
     };
-    let mut events = vec![mouse];
+    let pointer = NativeMouseEvent {
+        event_type: match event_type {
+            "mousedown" => "pointerdown",
+            "mouseup" => "pointerup",
+            "mousemove" => "pointermove",
+            _ => unreachable!(),
+        },
+        pointer_id: Some(1),
+        ..mouse
+    };
+    let mut events = vec![pointer, mouse];
     if click.is_some() {
         events.push(NativeMouseEvent {
             event_type: "click",
@@ -184,6 +195,7 @@ fn wheel_event_for_input(
             delta_y * delta_scale,
             if precise { 0 } else { 1 },
         )),
+        pointer_id: None,
     })
 }
 
@@ -242,6 +254,7 @@ fn hover_events(
             button: 0,
             buttons,
             wheel_delta: None,
+            pointer_id: None,
         })
     };
     let old_target = previous.first().copied();
@@ -1803,6 +1816,17 @@ mod tests {
                 ] {
                     let events =
                         mouse_events_for_input(&plan, &mut pressed, position, buttons, input);
+                    assert_eq!(events[0].pointer_id, Some(1));
+                    assert_eq!(events[1].pointer_id, None);
+                    assert_eq!(
+                        events[0].event_type,
+                        match events[1].event_type {
+                            "mousedown" => "pointerdown",
+                            "mouseup" => "pointerup",
+                            "mousemove" => "pointermove",
+                            _ => unreachable!(),
+                        }
+                    );
                     for event in &events {
                         assert_eq!(event.target, target);
                         assert_eq!(event.presented_revision, plan.revision());
@@ -1877,9 +1901,10 @@ mod tests {
                     0,
                     up,
                 );
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].target, window);
-                assert_eq!(events[0].event_type, "mouseup");
+                assert_eq!(events.len(), 2);
+                assert!(events.iter().all(|event| event.target == window));
+                assert_eq!(events[0].event_type, "pointerup");
+                assert_eq!(events[1].event_type, "mouseup");
 
                 // Recover when a release was missed outside the window.
                 mouse_events_for_input(&plan, &mut pressed, position, 1, down);
@@ -1887,7 +1912,7 @@ mod tests {
                 assert_eq!(pressed, None);
                 assert_eq!(
                     mouse_events_for_input(&plan, &mut pressed, position, 0, up).len(),
-                    1
+                    2
                 );
 
                 runtime.shutdown().await.unwrap();

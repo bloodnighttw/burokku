@@ -29,6 +29,7 @@ pub(crate) struct NativeMouseEvent {
     pub(crate) buttons: u16,
     pub(crate) related_target: Option<NodeId>,
     pub(crate) wheel_delta: Option<(f64, f64, u16)>,
+    pub(crate) pointer_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -655,6 +656,7 @@ mod tests {
                         buttons: 0,
                         related_target: None,
                         wheel_delta: None,
+                        pointer_id: None,
                     },
                 )
                 .unwrap();
@@ -699,7 +701,8 @@ mod tests {
                 globalThis.mouseChecks = [];
                 globalThis.lastMouseEvent = null;
                 for (const type of ['click', 'mousedown', 'mouseup', 'mousemove',
-                                    'mouseover', 'mouseout', 'mouseenter', 'mouseleave', 'wheel']) {
+                                    'mouseover', 'mouseout', 'mouseenter', 'mouseleave', 'wheel',
+                                    'pointerdown', 'pointerup', 'pointermove']) {
                     mouseTarget.addEventListener(type, function (event) {
                         lastMouseEvent = event;
                         mouseCalls.push('target');
@@ -710,13 +713,17 @@ mod tests {
                             event.button === 2, event.buttons === 3,
                             event.relatedTarget === mouseRelated,
                             type !== 'wheel' || (event.deltaX === 4.5 &&
-                                event.deltaY === -6.25 && event.deltaMode === 1));
+                                event.deltaY === -6.25 && event.deltaMode === 1),
+                            !type.startsWith('pointer') || (event.pointerId === 1 &&
+                                event.pointerType === 'mouse' && event.isPrimary));
                         try { event.buttons = 99; } catch {}
                         try { event.relatedTarget = mouseTarget; } catch {}
                         try { event.deltaY = 99; } catch {}
+                        try { event.pointerId = 2; } catch {}
                         mouseChecks.push(event.buttons === 3,
                             event.relatedTarget === mouseRelated,
-                            type !== 'wheel' || event.deltaY === -6.25);
+                            type !== 'wheel' || event.deltaY === -6.25,
+                            !type.startsWith('pointer') || event.pointerId === 1);
                         event.preventDefault();
                     });
                     mouseWindow.addEventListener(type, function (event) {
@@ -745,6 +752,9 @@ mod tests {
                 "mouseenter",
                 "mouseleave",
                 "wheel",
+                "pointerdown",
+                "pointerup",
+                "pointermove",
             ] {
                 context
                     .eval::<(), _>("mouseCalls = []; mouseChecks = []")
@@ -761,6 +771,7 @@ mod tests {
                         buttons: 3,
                         related_target: Some(related_target),
                         wheel_delta: (event_type == "wheel").then_some((4.5, -6.25, 1)),
+                        pointer_id: event_type.starts_with("pointer").then_some(1),
                     },
                 )
                 .unwrap();
@@ -800,6 +811,7 @@ mod tests {
                 buttons: 3,
                 related_target: None,
                 wheel_delta: None,
+                pointer_id: None,
             };
             classes::dispatch_mouse_event(&context, leave).unwrap();
             assert!(context
@@ -983,6 +995,7 @@ mod tests {
                         buttons: 0,
                         related_target: None,
                         wheel_delta: None,
+                        pointer_id: None,
                     }])
                     .unwrap();
                 state
@@ -997,6 +1010,7 @@ mod tests {
                         buttons: 0,
                         related_target: None,
                         wheel_delta: None,
+                        pointer_id: None,
                     }])
                     .unwrap();
                 let result: Vec<String> = runtime
