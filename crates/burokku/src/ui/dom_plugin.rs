@@ -32,6 +32,20 @@ pub(crate) struct NativeMouseEvent {
     pub(crate) pointer_id: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NativeMouseInput {
+    pub(crate) hit_target: Option<NodeId>,
+    pub(crate) event_type: Option<&'static str>,
+    pub(crate) click_target: Option<NodeId>,
+    pub(crate) presented_revision: u64,
+    pub(crate) client_x: f64,
+    pub(crate) client_y: f64,
+    pub(crate) button: u16,
+    pub(crate) buttons: u16,
+    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
+    pub(crate) pointer_id: Option<u32>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeKeyboardEvent {
     pub(crate) event_type: &'static str,
@@ -60,6 +74,7 @@ pub(crate) struct UiDomState {
     pointer_active: bool,
     pointer_capture: Option<NodeId>,
     announced_pointer_capture: Option<NodeId>,
+    pub(crate) hover_path: Vec<NodeId>,
 }
 
 impl UiDomState {
@@ -91,6 +106,16 @@ impl UiDomState {
                 }
                 Ok(())
             })
+    }
+
+    pub(crate) fn enqueue_mouse_input(
+        &self,
+        input: NativeMouseInput,
+    ) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(move |context| classes::dispatch_mouse_input(context, input))
     }
 
     pub(crate) fn enqueue_keyboard_event(
@@ -138,6 +163,7 @@ impl DomPlugin {
             pointer_active: false,
             pointer_capture: None,
             announced_pointer_capture: None,
+            hover_path: Vec::new(),
         }));
         (
             Self {

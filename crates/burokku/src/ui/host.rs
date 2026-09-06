@@ -12,8 +12,8 @@ use winit::{
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
-    dom_plugin::{NativeKeyboardEvent, NativeMouseEvent, SharedUiDom},
-    elements::{Dom, NodeId},
+    dom_plugin::{NativeKeyboardEvent, NativeMouseEvent, NativeMouseInput, SharedUiDom},
+    elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
     scene::{BuiltScene, SceneError, ScenePlan},
@@ -101,16 +101,15 @@ fn recognize_primary_click(
     }
 }
 
-fn pointer_events_for_input(
+fn pointer_input_for_input(
     plan: &ScenePlan,
     pressed_target: &mut Option<NodeId>,
     position: PhysicalPosition<f64>,
     buttons: u16,
     input: Option<(ElementState, MouseButton)>,
-    captured_target: Option<NodeId>,
-) -> (Option<NodeId>, Vec<NativeMouseEvent>) {
+) -> NativeMouseInput {
     let hit_target = plan.hit_test_physical(position.x, position.y);
-    let (event_type, button, click, emit_pointer) = match input {
+    let (event_type, button, click_target, emit_pointer) = match input {
         Some((state, mouse_button)) => {
             let click = recognize_primary_click(pressed_target, state, mouse_button, hit_target);
             let event_type = match state {
@@ -143,60 +142,50 @@ fn pointer_events_for_input(
             ("pointermove", 0, None, true)
         }
     };
-    let event = |event_type, target, pointer_id| NativeMouseEvent {
-        event_type,
-        target,
+    NativeMouseInput {
+        hit_target,
+        event_type: emit_pointer.then_some(event_type),
+        click_target,
         presented_revision: plan.revision(),
         client_x: position.x / plan.scale_factor(),
         client_y: position.y / plan.scale_factor(),
         button,
         buttons,
-        related_target: None,
         wheel_delta: None,
-        pointer_id,
-    };
-    let mut events = Vec::new();
-    if emit_pointer {
-        if let Some(target) = hit_target.or(captured_target) {
-            events.push(event(event_type, target, Some(1)));
-        }
+        pointer_id: Some(1),
     }
-    if let Some(target) = click {
-        events.push(event("click", target, None));
-    }
-    (hit_target, events)
 }
 
-fn wheel_event_for_input(
+fn wheel_input_for_input(
     plan: &ScenePlan,
     position: PhysicalPosition<f64>,
     delta_x: f64,
     delta_y: f64,
     precise: bool,
     buttons: u16,
-) -> Option<NativeMouseEvent> {
-    let target = plan.hit_test_physical(position.x, position.y)?;
+) -> NativeMouseInput {
+    let hit_target = plan.hit_test_physical(position.x, position.y);
     let delta_scale = if precise {
         -1.0 / plan.scale_factor()
     } else {
         -1.0
     };
-    Some(NativeMouseEvent {
-        event_type: "wheel",
-        target,
+    NativeMouseInput {
+        hit_target,
+        event_type: hit_target.map(|_| "wheel"),
+        click_target: None,
         presented_revision: plan.revision(),
         client_x: position.x / plan.scale_factor(),
         client_y: position.y / plan.scale_factor(),
         button: 0,
         buttons,
-        related_target: None,
         wheel_delta: Some((
             delta_x * delta_scale,
             delta_y * delta_scale,
             if precise { 0 } else { 1 },
         )),
         pointer_id: None,
-    })
+    }
 }
 
 fn keyboard_key(key_code: u16, text: Option<String>) -> String {
@@ -220,54 +209,6 @@ fn keyboard_key(key_code: u16, text: Option<String>) -> String {
             _ => "Unidentified".into(),
         },
     }
-}
-
-fn hover_path(dom: &Dom, target: Option<NodeId>) -> Vec<NodeId> {
-    let mut path = Vec::new();
-    let mut current = target.filter(|id| dom.is_connected(*id).unwrap_or(false));
-    while let Some(id) = current {
-        path.push(id);
-        current = dom.parent_node(id).expect("hover path contains live nodes");
-    }
-    path
-}
-
-fn hover_events(
-    previous: &[NodeId],
-    next: &[NodeId],
-    position: PhysicalPosition<f64>,
-    buttons: u16,
-    presented: (u64, f64),
-) -> Vec<NativeMouseEvent> {
-    if previous == next {
-        return Vec::new();
-    }
-    let mut events = Vec::new();
-    let mut push = |event_type, target, related_target| {
-        events.push(NativeMouseEvent {
-            event_type,
-            target,
-            related_target,
-            presented_revision: presented.0,
-            client_x: position.x / presented.1,
-            client_y: position.y / presented.1,
-            button: 0,
-            buttons,
-            wheel_delta: None,
-            pointer_id: Some(1),
-        })
-    };
-    let old_target = previous.first().copied();
-    let new_target = next.first().copied();
-    // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
-    // Comparing membership also handles a still-hovered subtree being reparented.
-    for &node in previous.iter().filter(|node| !next.contains(node)) {
-        push("pointerleave", node, new_target);
-    }
-    for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
-        push("pointerenter", node, old_target);
-    }
-    events
 }
 
 fn accept_current_graphics_result<T, E>(
@@ -427,7 +368,6 @@ pub(crate) struct ApplicationHost {
     layout: LayoutEngine<TextEngine>,
     presented: Option<PresentedFrame>,
     last_frame_failure: Option<FrameFailure>,
-    hover_path: Vec<NodeId>,
     hover_window: Option<WindowId>,
     cursor: Option<(PhysicalPosition<f64>, u16)>,
     pressed_target: Option<NodeId>,
@@ -453,7 +393,6 @@ impl ApplicationHost {
             layout: LayoutEngine::new(text),
             presented: None,
             last_frame_failure: None,
-            hover_path: Vec::new(),
             hover_window: None,
             cursor: None,
             pressed_target: None,
@@ -500,7 +439,7 @@ impl ApplicationHost {
     fn discard_stale_presented_frame(&mut self) {
         let window = self.windows.current().map(|window| window.id());
         if self.hover_window != window {
-            self.hover_path.clear();
+            self.dom.borrow_mut().hover_path.clear();
             self.cursor = None;
             self.pressed_target = None;
             self.active_pointer = None;
@@ -526,29 +465,22 @@ impl ApplicationHost {
             }
             return Ok(());
         };
-        let captured_target = self
-            .dom
-            .try_borrow()
-            .map_err(|_| HostError::DomBorrowConflict)?
-            .pointer_capture_target();
-        let (hit_target, events) = pointer_events_for_input(
+        let input = pointer_input_for_input(
             &frame.plan,
             &mut self.pressed_target,
             position,
             buttons,
             input,
-            captured_target,
         );
-        let presented = (frame.revision(), frame.plan.scale_factor());
-        if let Some(event) = events
-            .iter()
-            .find(|event| event.event_type == "pointerdown")
-        {
-            self.active_pointer = Some((event.target, position));
+        let scale = frame.plan.scale_factor();
+        if input.event_type == Some("pointerdown") {
+            if let Some(target) = input.hit_target {
+                self.active_pointer = Some((target, position));
+            }
         } else if let Some((_, active_position)) = self.active_pointer.as_mut() {
             *active_position = position;
         }
-        let result = self.queue_hover_and_mouse(hit_target, position, buttons, presented, events);
+        let result = self.queue_hover_and_mouse(input, scale);
         if buttons == 0 {
             self.active_pointer = None;
         }
@@ -601,15 +533,9 @@ impl ApplicationHost {
         let Some(frame) = self.presented.as_ref() else {
             return Ok(());
         };
-        let event =
-            wheel_event_for_input(&frame.plan, position, delta_x, delta_y, precise, buttons);
-        self.queue_hover_and_mouse(
-            event.map(|event| event.target),
-            position,
-            buttons,
-            (frame.revision(), frame.plan.scale_factor()),
-            event.into_iter().collect(),
-        )
+        let input =
+            wheel_input_for_input(&frame.plan, position, delta_x, delta_y, precise, buttons);
+        self.queue_hover_and_mouse(input, frame.plan.scale_factor())
     }
 
     fn queue_keyboard_input(&self, event: KeyEvent) -> Result<(), HostError> {
@@ -650,12 +576,21 @@ impl ApplicationHost {
         else {
             return Ok(());
         };
+        let scale = frame.plan.scale_factor();
         self.queue_hover_and_mouse(
-            frame.plan.hit_test_physical(position.x, position.y),
-            position,
-            buttons,
-            (frame.revision(), frame.plan.scale_factor()),
-            Vec::new(),
+            NativeMouseInput {
+                hit_target: frame.plan.hit_test_physical(position.x, position.y),
+                event_type: None,
+                click_target: None,
+                presented_revision: frame.revision(),
+                client_x: position.x / scale,
+                client_y: position.y / scale,
+                button: 0,
+                buttons,
+                wheel_delta: None,
+                pointer_id: None,
+            },
+            scale,
         )
     }
 
@@ -683,45 +618,40 @@ impl ApplicationHost {
             .map_err(|_| HostError::DomBorrowConflict)?
             .dom
             .revision();
-        self.queue_hover_and_mouse(None, position, buttons, (revision, scale), Vec::new())
+        self.queue_hover_and_mouse(
+            NativeMouseInput {
+                hit_target: None,
+                event_type: None,
+                click_target: None,
+                presented_revision: revision,
+                client_x: position.x / scale,
+                client_y: position.y / scale,
+                button: 0,
+                buttons,
+                wheel_delta: None,
+                pointer_id: None,
+            },
+            scale,
+        )
     }
 
     fn queue_hover_and_mouse(
         &mut self,
-        target: Option<NodeId>,
-        position: PhysicalPosition<f64>,
-        buttons: u16,
-        presented: (u64, f64),
-        events: Vec<NativeMouseEvent>,
+        input: NativeMouseInput,
+        scale: f64,
     ) -> Result<(), HostError> {
-        if !position.x.is_finite() || !position.y.is_finite() {
-            return Ok(());
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(HostError::InvalidScaleFactor(scale));
         }
-        if !presented.1.is_finite() || presented.1 <= 0.0 {
-            return Err(HostError::InvalidScaleFactor(presented.1));
+        if !input.client_x.is_finite() || !input.client_y.is_finite() {
+            return Ok(());
         }
         let state = self
             .dom
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
-        let next_path = hover_path(&state.dom, target);
-        let capture_active = state.pointer_capture_target().is_some();
-        let mut batch = if capture_active {
-            Vec::new()
-        } else {
-            hover_events(&self.hover_path, &next_path, position, buttons, presented)
-        };
-        batch.extend(events);
-        if !batch.is_empty() {
-            // Boundary events precede input; pointerup and click remain in the same task.
-            if let Err(error) = state.enqueue_mouse_events(batch) {
-                eprintln!("Burokku warning: dropped pointer input: {error}");
-                return Ok(());
-            }
-        }
-        // Do not advance hover state if the queue rejected the transition or capture is active.
-        if !capture_active {
-            self.hover_path = next_path;
+        if let Err(error) = state.enqueue_mouse_input(input) {
+            eprintln!("Burokku warning: dropped pointer input: {error}");
         }
         Ok(())
     }
@@ -1088,7 +1018,7 @@ impl ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.hover_path.clear();
+                self.dom.borrow_mut().hover_path.clear();
                 self.cursor = None;
                 if self.ever_had_window {
                     self.request_exit();
@@ -1281,7 +1211,7 @@ impl ApplicationHandler for ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.hover_path.clear();
+                self.dom.borrow_mut().hover_path.clear();
                 self.cursor = None;
                 self.windows.close();
                 self.request_exit();
@@ -1626,6 +1556,41 @@ mod tests {
 
     use super::*;
 
+    fn test_mouse_input(
+        target: Option<NodeId>,
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+        presented: (u64, f64),
+        event_type: Option<&'static str>,
+    ) -> NativeMouseInput {
+        NativeMouseInput {
+            hit_target: target,
+            event_type,
+            click_target: None,
+            presented_revision: presented.0,
+            client_x: position.x / presented.1,
+            client_y: position.y / presented.1,
+            button: 0,
+            buttons,
+            wheel_delta: None,
+            pointer_id: event_type.map(|_| 1),
+        }
+    }
+
+    fn queue_test_mouse(
+        host: &mut ApplicationHost,
+        target: Option<NodeId>,
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+        presented: (u64, f64),
+        event_type: Option<&'static str>,
+    ) -> Result<(), HostError> {
+        host.queue_hover_and_mouse(
+            test_mouse_input(target, position, buttons, presented, event_type),
+            presented.1,
+        )
+    }
+
     #[test]
     fn keyboard_text_uses_dom_key_names() {
         assert_eq!(keyboard_key(0, Some("a".into())), "a");
@@ -1753,37 +1718,6 @@ mod tests {
                 (parents[0], parents[1], children[0], children[1], state.dom.revision())
             };
             let position = PhysicalPosition::new(25.0, 40.0);
-            let a_path = hover_path(&state.borrow().dom, Some(a));
-            let enter = hover_events(&[], &a_path, position, 1, (revision, 2.0));
-            assert_eq!(
-                enter
-                    .iter()
-                    .map(|event| event.event_type)
-                    .collect::<Vec<_>>(),
-                [
-                    "pointerenter",
-                    "pointerenter",
-                    "pointerenter",
-                    "pointerenter",
-                ]
-            );
-            let leave = hover_events(&a_path, &[], position, 1, (revision, 2.0));
-            assert_eq!(
-                leave
-                    .iter()
-                    .map(|event| event.event_type)
-                    .collect::<Vec<_>>(),
-                [
-                    "pointerleave",
-                    "pointerleave",
-                    "pointerleave",
-                    "pointerleave",
-                ]
-            );
-            assert!(enter
-                .iter()
-                .chain(&leave)
-                .all(|event| event.pointer_id == Some(1)));
             for (target, expected) in [
                 (
                     Some(a),
@@ -1822,12 +1756,13 @@ mod tests {
                 ),
             ] {
                 runtime.eval::<()>("hoverLog = []").await.unwrap();
-                host.queue_hover_and_mouse(
+                queue_test_mouse(
+                    &mut host,
                     target,
                     position,
                     1,
                     (revision, 2.0),
-                    Vec::new(),
+                    None,
                 )
                 .unwrap();
                 let log: Vec<String> = runtime.eval("hoverLog").await.unwrap();
@@ -1839,47 +1774,54 @@ mod tests {
             }
             // Keep the same leaf hovered but change its ancestry.
             runtime.eval::<()>("q.appendChild(b); hoverLog = []").await.unwrap();
-            host.queue_hover_and_mouse(Some(b), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            queue_test_mouse(&mut host, Some(b), position, 1, (revision, 2.0), None).unwrap();
             assert_eq!(
                 runtime.eval::<Vec<String>>("hoverLog").await.unwrap(),
                 ["pointerleave:p:b", "pointerenter:q:b"]
             );
 
             // A queued transition must skip disconnected targets, not their live ancestors.
-            host.queue_hover_and_mouse(None, position, 1, (revision, 2.0), Vec::new()).unwrap();
+            queue_test_mouse(&mut host, None, position, 1, (revision, 2.0), None).unwrap();
             runtime.eval::<()>("hoverLog = []").await.unwrap();
-            host.queue_hover_and_mouse(Some(b), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            queue_test_mouse(&mut host, Some(b), position, 1, (revision, 2.0), None).unwrap();
             runtime.eval::<()>("q.removeChild(b); hoverLog = []").await.unwrap();
-            host.queue_hover_and_mouse(Some(q), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            queue_test_mouse(&mut host, Some(q), position, 1, (revision, 2.0), None).unwrap();
             assert!(runtime
                 .eval::<bool>("hoverLog.length === 0")
                 .await
                 .unwrap());
             runtime.eval::<()>("w.removeChild(q); hoverLog = []").await.unwrap();
-            host.queue_hover_and_mouse(None, position, 1, (revision, 2.0), Vec::new()).unwrap();
+            queue_test_mouse(&mut host, None, position, 1, (revision, 2.0), None).unwrap();
             assert_eq!(
                 runtime.eval::<Vec<String>>("hoverLog").await.unwrap(),
                 ["pointerleave:w:-", "pointerleave:app:-"]
             );
             assert!(runtime.eval::<bool>("hoverChecks.every(Boolean)").await.unwrap());
-            assert!(hover_path(&state.borrow().dom, Some(b)).is_empty());
 
             // Invalid input and rejected queues must not advance the hover path.
-            host.queue_hover_and_mouse(Some(a), PhysicalPosition::new(f64::NAN, 0.0), 1, (revision, 2.0), Vec::new()).unwrap();
-            assert!(host.hover_path.is_empty());
+            queue_test_mouse(
+                &mut host,
+                Some(a),
+                PhysicalPosition::new(f64::NAN, 0.0),
+                1,
+                (revision, 2.0),
+                None,
+            )
+            .unwrap();
+            assert!(state.borrow().hover_path.is_empty());
             assert!(matches!(
-                host.queue_hover_and_mouse(Some(a), position, 1, (revision, 0.0), Vec::new()),
+                queue_test_mouse(&mut host, Some(a), position, 1, (revision, 0.0), None),
                 Err(HostError::InvalidScaleFactor(0.0))
             ));
             runtime.shutdown().await.unwrap();
             driver.await.unwrap();
-            host.queue_hover_and_mouse(Some(a), position, 1, (revision, 2.0), Vec::new()).unwrap();
-            assert!(host.hover_path.is_empty());
+            queue_test_mouse(&mut host, Some(a), position, 1, (revision, 2.0), None).unwrap();
+            assert!(state.borrow().hover_path.is_empty());
         }).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pointer_capture_suppresses_and_reconciles_boundaries() {
+    async fn pointer_capture_uses_dispatch_time_state_and_reconciles_boundaries() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
@@ -1906,6 +1848,8 @@ mod tests {
                         globalThis.pointerBoundaryLog = [];
                         captureA.addEventListener('pointerdown', event =>
                             captureA.setPointerCapture(event.pointerId));
+                        captureA.addEventListener('pointermove', () =>
+                            pointerBoundaryLog.push('move:a'));
                         captureA.addEventListener('pointerleave', () =>
                             pointerBoundaryLog.push('leave:a'));
                         captureB.addEventListener('pointerenter', () =>
@@ -1921,35 +1865,42 @@ mod tests {
                     (children[0], children[1], state.dom.revision())
                 };
                 let position = PhysicalPosition::new(10.0, 10.0);
-                let pointer = |event_type, target, buttons| NativeMouseEvent {
-                    event_type,
-                    target,
-                    presented_revision: revision,
-                    client_x: 10.0,
-                    client_y: 10.0,
-                    button: 0,
-                    buttons,
-                    related_target: None,
-                    wheel_delta: None,
-                    pointer_id: Some(1),
-                };
-                host.queue_hover_and_mouse(
+                queue_test_mouse(
+                    &mut host,
                     Some(a),
                     position,
                     1,
                     (revision, 1.0),
-                    vec![pointer("pointerdown", a, 1)],
+                    Some("pointerdown"),
                 )
                 .unwrap();
-                runtime.eval::<()>("pointerBoundaryLog = []").await.unwrap();
+                // Queue movement outside every hit region before pointerdown JavaScript runs.
+                queue_test_mouse(
+                    &mut host,
+                    None,
+                    position,
+                    1,
+                    (revision, 1.0),
+                    Some("pointermove"),
+                )
+                .unwrap();
+                assert_eq!(
+                    runtime
+                        .eval::<Vec<String>>("pointerBoundaryLog")
+                        .await
+                        .unwrap(),
+                    ["move:a"]
+                );
                 assert_eq!(state.borrow().pointer_capture_target(), Some(a));
+                runtime.eval::<()>("pointerBoundaryLog = []").await.unwrap();
 
-                host.queue_hover_and_mouse(
+                queue_test_mouse(
+                    &mut host,
                     Some(b),
                     position,
                     0,
                     (revision, 1.0),
-                    vec![pointer("pointerup", b, 0)],
+                    Some("pointerup"),
                 )
                 .unwrap();
                 assert!(runtime
@@ -1958,8 +1909,7 @@ mod tests {
                     .unwrap());
                 assert_eq!(state.borrow().pointer_capture_target(), None);
 
-                host.queue_hover_and_mouse(Some(b), position, 0, (revision, 1.0), Vec::new())
-                    .unwrap();
+                queue_test_mouse(&mut host, Some(b), position, 0, (revision, 1.0), None).unwrap();
                 assert_eq!(
                     runtime
                         .eval::<Vec<String>>("pointerBoundaryLog")
@@ -2080,37 +2030,15 @@ mod tests {
                         Some("pointerup"),
                     ),
                 ] {
-                    let (hit_target, events) = pointer_events_for_input(
-                        &plan,
-                        &mut pressed,
-                        position,
-                        buttons,
-                        input,
-                        None,
-                    );
-                    assert_eq!(hit_target, Some(target));
-                    assert_eq!(
-                        events
-                            .iter()
-                            .find(|event| event.pointer_id.is_some())
-                            .map(|event| event.event_type),
-                        expected_pointer
-                    );
-                    for event in &events {
-                        assert_eq!(event.target, target);
-                        assert_eq!(event.presented_revision, plan.revision());
-                        assert_eq!((event.client_x, event.client_y), (12.5, 10.0));
-                        assert_eq!(event.buttons, buttons);
-                        assert_eq!(event.related_target, None);
-                    }
-                    host.queue_hover_and_mouse(
-                        Some(target),
-                        position,
-                        buttons,
-                        (plan.revision(), plan.scale_factor()),
-                        events,
-                    )
-                    .unwrap();
+                    let native =
+                        pointer_input_for_input(&plan, &mut pressed, position, buttons, input);
+                    assert_eq!(native.hit_target, Some(target));
+                    assert_eq!(native.event_type, expected_pointer);
+                    assert_eq!(native.presented_revision, plan.revision());
+                    assert_eq!((native.client_x, native.client_y), (12.5, 10.0));
+                    assert_eq!(native.buttons, buttons);
+                    host.queue_hover_and_mouse(native, plan.scale_factor())
+                        .unwrap();
                 }
                 let log: Vec<String> = runtime.eval("inputLog").await.unwrap();
                 let expected: Vec<_> = std::iter::once("enter")
@@ -2135,69 +2063,60 @@ mod tests {
                 assert_eq!(log, expected);
                 assert_eq!(pressed, None);
 
-                let precise_wheel =
-                    wheel_event_for_input(&plan, position, 8.0, -4.0, true, 1).unwrap();
-                assert_eq!(precise_wheel.target, target);
-                assert_eq!(precise_wheel.event_type, "wheel");
+                let precise_wheel = wheel_input_for_input(&plan, position, 8.0, -4.0, true, 1);
+                assert_eq!(precise_wheel.hit_target, Some(target));
+                assert_eq!(precise_wheel.event_type, Some("wheel"));
                 assert_eq!(precise_wheel.wheel_delta, Some((-4.0, 2.0, 0)));
-                let line_wheel =
-                    wheel_event_for_input(&plan, position, 3.0, -5.0, false, 0).unwrap();
+                let line_wheel = wheel_input_for_input(&plan, position, 3.0, -5.0, false, 0);
                 assert_eq!(line_wheel.wheel_delta, Some((-3.0, 5.0, 1)));
-                assert!(wheel_event_for_input(
-                    &plan,
-                    PhysicalPosition::new(-1.0, -1.0),
-                    1.0,
-                    1.0,
-                    true,
-                    0
-                )
-                .is_none());
+                assert_eq!(
+                    wheel_input_for_input(
+                        &plan,
+                        PhysicalPosition::new(-1.0, -1.0),
+                        1.0,
+                        1.0,
+                        true,
+                        0,
+                    )
+                    .event_type,
+                    None
+                );
 
                 let down = Some((ElementState::Pressed, MouseButton::Left));
                 let up = Some((ElementState::Released, MouseButton::Left));
-                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let _ = pointer_input_for_input(&plan, &mut pressed, position, 1, down);
                 let outside = PhysicalPosition::new(-1.0, -1.0);
-                let (_, events) =
-                    pointer_events_for_input(&plan, &mut pressed, outside, 0, up, None);
-                assert!(events.is_empty());
+                let outside_up = pointer_input_for_input(&plan, &mut pressed, outside, 0, up);
+                assert_eq!(outside_up.hit_target, None);
+                assert_eq!(outside_up.event_type, Some("pointerup"));
                 assert_eq!(pressed, None);
 
-                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
-                let (hit_target, events) =
-                    pointer_events_for_input(&plan, &mut pressed, outside, 1, None, Some(target));
-                assert_eq!(hit_target, None);
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].event_type, "pointermove");
-                assert_eq!(events[0].target, target);
-                let (hit_target, events) =
-                    pointer_events_for_input(&plan, &mut pressed, outside, 0, up, Some(target));
-                assert_eq!(hit_target, None);
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].event_type, "pointerup");
-                assert_eq!(events[0].target, target);
+                let _ = pointer_input_for_input(&plan, &mut pressed, position, 1, down);
+                let outside_move = pointer_input_for_input(&plan, &mut pressed, outside, 1, None);
+                assert_eq!(outside_move.hit_target, None);
+                assert_eq!(outside_move.event_type, Some("pointermove"));
+                let outside_up = pointer_input_for_input(&plan, &mut pressed, outside, 0, up);
+                assert_eq!(outside_up.hit_target, None);
+                assert_eq!(outside_up.event_type, Some("pointerup"));
 
-                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
-                let (_, events) = pointer_events_for_input(
+                let _ = pointer_input_for_input(&plan, &mut pressed, position, 1, down);
+                let window_up = pointer_input_for_input(
                     &plan,
                     &mut pressed,
                     PhysicalPosition::new(400.0, 400.0),
                     0,
                     up,
-                    None,
                 );
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].target, window);
-                assert_eq!(events[0].event_type, "pointerup");
+                assert_eq!(window_up.hit_target, Some(window));
+                assert_eq!(window_up.event_type, Some("pointerup"));
 
                 // Recover when a release was missed outside the window.
-                let _ = pointer_events_for_input(&plan, &mut pressed, position, 1, down, None);
-                let _ = pointer_events_for_input(&plan, &mut pressed, position, 0, None, None);
+                let _ = pointer_input_for_input(&plan, &mut pressed, position, 1, down);
+                let _ = pointer_input_for_input(&plan, &mut pressed, position, 0, None);
                 assert_eq!(pressed, None);
                 assert_eq!(
-                    pointer_events_for_input(&plan, &mut pressed, position, 0, up, None)
-                        .1
-                        .len(),
-                    1
+                    pointer_input_for_input(&plan, &mut pressed, position, 0, up).event_type,
+                    Some("pointerup")
                 );
 
                 runtime.shutdown().await.unwrap();

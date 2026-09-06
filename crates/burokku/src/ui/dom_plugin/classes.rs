@@ -7,7 +7,7 @@ use rquickjs::{
 
 use super::{
     errors, lifetime::SharedWrapperRoots, LayoutRect, NativeKeyboardEvent, NativeMouseEvent,
-    SharedUiDom, UiDomState,
+    NativeMouseInput, SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -995,6 +995,124 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             .expect("class instance is an object"),
     )?;
     Ok(node.into_inner())
+}
+
+fn hover_path(state: &UiDomState, target: Option<NodeId>) -> Vec<NodeId> {
+    let mut path = Vec::new();
+    let mut current = target.filter(|id| state.dom.is_connected(*id).unwrap_or(false));
+    while let Some(id) = current {
+        path.push(id);
+        current = state
+            .dom
+            .parent_node(id)
+            .expect("hover path contains live nodes");
+    }
+    path
+}
+
+fn hover_events(
+    previous: &[NodeId],
+    next: &[NodeId],
+    input: NativeMouseInput,
+) -> Vec<NativeMouseEvent> {
+    if previous == next {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let mut push = |event_type, target, related_target| {
+        events.push(NativeMouseEvent {
+            event_type,
+            target,
+            related_target,
+            presented_revision: input.presented_revision,
+            client_x: input.client_x,
+            client_y: input.client_y,
+            button: 0,
+            buttons: input.buttons,
+            wheel_delta: None,
+            pointer_id: Some(1),
+        });
+    };
+    let old_target = previous.first().copied();
+    let new_target = next.first().copied();
+    // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
+    // Comparing membership also handles a still-hovered subtree being reparented.
+    for &node in previous.iter().filter(|node| !next.contains(node)) {
+        push("pointerleave", node, new_target);
+    }
+    for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
+        push("pointerenter", node, old_target);
+    }
+    events
+}
+
+pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let boundaries = {
+        let mut state = borrow_mut(context, &state)?;
+        if state.pointer_capture_target().is_some() {
+            Vec::new()
+        } else {
+            let next = hover_path(&state, input.hit_target);
+            let events = hover_events(&state.hover_path, &next, input);
+            state.hover_path = next;
+            events
+        }
+    };
+    for event in boundaries {
+        dispatch_mouse_event(context, event)?;
+    }
+
+    if let Some(event_type) = input.event_type {
+        let target = {
+            let state = borrow(context, &state)?;
+            if input.pointer_id.is_some() {
+                state.pointer_capture_target().or(input.hit_target)
+            } else {
+                input.hit_target
+            }
+        };
+        if let Some(target) = target {
+            dispatch_mouse_event(
+                context,
+                NativeMouseEvent {
+                    event_type,
+                    target,
+                    presented_revision: input.presented_revision,
+                    client_x: input.client_x,
+                    client_y: input.client_y,
+                    button: input.button,
+                    buttons: input.buttons,
+                    related_target: None,
+                    wheel_delta: input.wheel_delta,
+                    pointer_id: input.pointer_id,
+                },
+            )?;
+        }
+    }
+
+    if let Some(target) = input.click_target {
+        dispatch_mouse_event(
+            context,
+            NativeMouseEvent {
+                event_type: "click",
+                target,
+                presented_revision: input.presented_revision,
+                client_x: input.client_x,
+                client_y: input.client_y,
+                button: input.button,
+                buttons: input.buttons,
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEvent) -> Result<()> {
