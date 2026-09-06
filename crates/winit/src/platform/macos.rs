@@ -388,6 +388,7 @@ define_class!(
                 self.send(WindowEvent::KeyboardInput(KeyEvent {
                     key_code: event.keyCode(),
                     text: None,
+                    logical_text: None,
                     state,
                     repeat: false,
                     modifiers,
@@ -580,12 +581,22 @@ impl ContentView {
     }
 
     fn send_key_input(&self, event: &NSEvent, state: ElementState) {
+        let modifiers = event_modifiers(event);
+        let text = event.characters().map(|text| text.to_string());
+        let logical_text = if modifiers.control || modifiers.command {
+            event
+                .charactersIgnoringModifiers()
+                .map(|text| text.to_string())
+        } else {
+            text.clone()
+        };
         self.send(WindowEvent::KeyboardInput(KeyEvent {
             key_code: event.keyCode(),
-            text: event.characters().map(|text| text.to_string()),
+            text,
+            logical_text,
             state,
             repeat: state == ElementState::Pressed && event.isARepeat(),
-            modifiers: event_modifiers(event),
+            modifiers,
         }));
     }
 

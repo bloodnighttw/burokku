@@ -27,8 +27,10 @@ pub struct Modifiers {
 pub struct KeyEvent {
     /// The platform's numeric virtual key code.
     pub key_code: u16,
-    /// Text after applying the current keyboard layout, when available.
+    /// Text after applying the current keyboard layout and modifiers, when available.
     pub text: Option<String>,
+    /// Layout-aware text for key identity, excluding Control and Command effects.
+    pub logical_text: Option<String>,
     pub state: ElementState,
     pub repeat: bool,
     pub modifiers: Modifiers,

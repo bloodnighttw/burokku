@@ -247,22 +247,24 @@ mod macos {
                     view.mouseExited(&event);
                 }
             }
-            let characters = NSString::from_str("A");
+            let characters = NSString::from_str("\u{3}");
+            let logical_characters = NSString::from_str("c");
             for (event_type, state, repeat) in [
                 (NSEventType::KeyDown, ElementState::Pressed, true),
                 (NSEventType::KeyUp, ElementState::Released, false),
             ] {
                 let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-                    event_type, NSPoint::new(0.0, 0.0), NSEventModifierFlags::Shift, 0.0,
-                    native_window.windowNumber(), None, &characters, &characters, repeat, 0,
+                    event_type, NSPoint::new(0.0, 0.0), NSEventModifierFlags::Control, 0.0,
+                    native_window.windowNumber(), None, &characters, &logical_characters, repeat, 8,
                 ).unwrap();
                 self.expected.push(WindowEvent::KeyboardInput(KeyEvent {
-                    key_code: 0,
-                    text: Some("A".into()),
+                    key_code: 8,
+                    text: Some("\u{3}".into()),
+                    logical_text: Some("c".into()),
                     state,
                     repeat,
                     modifiers: Modifiers {
-                        shift: true,
+                        control: true,
                         ..Modifiers::default()
                     },
                 }));

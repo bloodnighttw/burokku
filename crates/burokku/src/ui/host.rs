@@ -188,8 +188,8 @@ fn wheel_input_for_input(
     }
 }
 
-fn keyboard_key(key_code: u16, text: Option<String>) -> String {
-    match text.as_deref() {
+fn keyboard_key(key_code: u16, text: Option<String>, logical_text: Option<String>) -> String {
+    match logical_text.as_deref().or(text.as_deref()) {
         Some("\r" | "\n" | "\u{3}") => "Enter".into(),
         Some("\t") => "Tab".into(),
         Some("\u{1b}") => "Escape".into(),
@@ -550,6 +550,7 @@ impl ApplicationHost {
         let KeyEvent {
             key_code,
             text,
+            logical_text,
             state,
             repeat,
             modifiers,
@@ -560,7 +561,7 @@ impl ApplicationHost {
                 ElementState::Released => "keyup",
             },
             target,
-            key: keyboard_key(key_code, text),
+            key: keyboard_key(key_code, text, logical_text),
             key_code,
             repeat,
             modifiers,
@@ -1609,17 +1610,20 @@ mod tests {
 
     #[test]
     fn keyboard_text_uses_dom_key_names() {
-        assert_eq!(keyboard_key(0, Some("a".into())), "a");
-        assert_eq!(keyboard_key(0, Some("\r".into())), "Enter");
-        assert_eq!(keyboard_key(0, Some("\u{f700}".into())), "ArrowUp");
-        assert_eq!(keyboard_key(0x38, None), "Shift");
-        assert_eq!(keyboard_key(0, None), "Unidentified");
+        assert_eq!(keyboard_key(0, Some("a".into()), None), "a");
+        assert_eq!(keyboard_key(0, Some("\r".into()), None), "Enter");
+        assert_eq!(keyboard_key(0, Some("\u{f700}".into()), None), "ArrowUp");
+        assert_eq!(keyboard_key(0x38, None, None), "Shift");
+        assert_eq!(keyboard_key(0, None, None), "Unidentified");
     }
 
     #[test]
     fn control_c_is_not_mistaken_for_enter() {
-        // AppKit reports Control+C as U+0003 from NSEvent.characters().
-        assert_eq!(keyboard_key(0x08, Some("\u{3}".into())), "c");
+        // AppKit reports U+0003 in characters() and "c" in charactersIgnoringModifiers().
+        assert_eq!(
+            keyboard_key(0x08, Some("\u{3}".into()), Some("c".into())),
+            "c"
+        );
     }
 
     #[derive(Debug)]
