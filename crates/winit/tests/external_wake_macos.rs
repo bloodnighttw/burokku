@@ -16,9 +16,9 @@ mod macos {
         WindowAttributes, WindowEvent, WindowId,
     };
     use objc2_app_kit::{
-        NSEvent, NSEventModifierFlags, NSEventType, NSTrackingAreaOptions, NSView,
+        NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSTrackingAreaOptions, NSView,
     };
-    use objc2_foundation::{NSPoint, NSSize, NSString};
+    use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
     use tokio::{sync::oneshot, task::LocalSet};
 
     const CHILD: &str = "BUROKKU_EXTERNAL_WAKE_TEST_CHILD";
@@ -124,6 +124,7 @@ mod macos {
         window: Option<Window>,
         received: Vec<WindowEvent>,
         expected: Vec<WindowEvent>,
+        injected: bool,
     }
 
     impl ApplicationHandler for MouseApp {
@@ -274,7 +275,42 @@ mod macos {
                     view.keyUp(&event);
                 }
             }
+            let characters = NSString::from_str("c");
+            for (event_type, state) in [
+                (NSEventType::KeyDown, ElementState::Pressed),
+                (NSEventType::KeyUp, ElementState::Released),
+            ] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    event_type, NSPoint::new(0.0, 0.0), NSEventModifierFlags::Command, 0.0,
+                    native_window.windowNumber(), None, &characters, &characters, false, 8,
+                ).unwrap();
+                self.expected.push(WindowEvent::KeyboardInput(KeyEvent {
+                    key_code: 8,
+                    text: Some("c".into()),
+                    logical_text: Some("c".into()),
+                    state,
+                    repeat: false,
+                    modifiers: Modifiers {
+                        command: true,
+                        ..Modifiers::default()
+                    },
+                }));
+                if state == ElementState::Pressed {
+                    view.keyDown(&event);
+                } else {
+                    // AppKit suppresses Command-modified keyUp before it reaches the view.
+                    NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+                        .sendEvent(&event);
+                }
+            }
             self.window = Some(window);
+            self.injected = true;
+        }
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            if self.injected {
+                event_loop.exit();
+            }
         }
 
         fn window_event(
@@ -305,7 +341,7 @@ mod macos {
             .unwrap()
             .run_app_external(MouseApp::default(), LocalSet::new())
             .unwrap();
-        assert_eq!(app.expected.len(), 14);
+        assert_eq!(app.expected.len(), 16);
         assert_eq!(app.received, app.expected);
     }
 
