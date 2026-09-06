@@ -6,7 +6,8 @@ use rquickjs::{
 };
 
 use super::{
-    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeMouseEvent, SharedUiDom, UiDomState,
+    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeKeyboardEvent, NativeMouseEvent,
+    SharedUiDom, UiDomState,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -104,6 +105,65 @@ impl<'js> MouseEvent<'js> {
         if self.cancelable {
             self.default_prevented = true;
         }
+    }
+
+    #[qjs(rename = "stopPropagation")]
+    fn stop_propagation(&mut self) {
+        self.propagation_stopped = true;
+    }
+
+    #[qjs(rename = "stopImmediatePropagation")]
+    fn stop_immediate_propagation(&mut self) {
+        self.propagation_stopped = true;
+        self.immediate_propagation_stopped = true;
+    }
+}
+
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class(rename = "BurokkuKeyboardEvent", rename_all = "camelCase")]
+struct KeyboardEvent<'js> {
+    #[qjs(get, enumerable, rename = "type")]
+    event_type: String,
+    #[qjs(get, enumerable)]
+    target: Object<'js>,
+    current_target: Option<Object<'js>>,
+    #[qjs(get, enumerable)]
+    key: String,
+    #[qjs(get, enumerable)]
+    key_code: u16,
+    #[qjs(get, enumerable)]
+    repeat: bool,
+    #[qjs(get, enumerable)]
+    shift_key: bool,
+    #[qjs(get, enumerable)]
+    ctrl_key: bool,
+    #[qjs(get, enumerable)]
+    alt_key: bool,
+    #[qjs(get, enumerable)]
+    meta_key: bool,
+    #[qjs(get, enumerable)]
+    bubbles: bool,
+    #[qjs(get, enumerable)]
+    cancelable: bool,
+    #[qjs(get, enumerable)]
+    default_prevented: bool,
+    propagation_stopped: bool,
+    immediate_propagation_stopped: bool,
+}
+
+#[rquickjs::methods]
+impl<'js> KeyboardEvent<'js> {
+    #[qjs(get, rename = "currentTarget", enumerable)]
+    fn current_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
+        match &self.current_target {
+            Some(target) => Ok(target.clone().into_value()),
+            None => Null.into_js(&context),
+        }
+    }
+
+    #[qjs(rename = "preventDefault")]
+    fn prevent_default(&mut self) {
+        self.default_prevented = true;
     }
 
     #[qjs(rename = "stopPropagation")]
@@ -989,6 +1049,104 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mouse: NativeMouseEvent) -
                 .catch(context)
             {
                 eprintln!("Burokku {} listener failed: {error}", mouse.event_type);
+            }
+            if event.borrow().immediate_propagation_stopped {
+                break;
+            }
+        }
+        if event.borrow().propagation_stopped {
+            break;
+        }
+    }
+    event.borrow_mut().current_target = None;
+    Ok(())
+}
+
+pub(super) fn dispatch_keyboard_event(
+    context: &Ctx<'_>,
+    keyboard: NativeKeyboardEvent,
+) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let path = {
+        let state = borrow(context, &state)?;
+        if !state.dom.is_connected(keyboard.target).unwrap_or(false) {
+            return Ok(());
+        }
+        let mut path = Vec::new();
+        let mut current = Some(keyboard.target);
+        while let Some(id) = current {
+            path.push(id);
+            current = errors::map_dom(
+                context,
+                "build keyboard propagation path",
+                state.dom.parent_node(id),
+            )?;
+        }
+        path
+    };
+
+    let mut listeners = Vec::with_capacity(path.len());
+    for id in path {
+        let current = wrap_node(context, &state, id)?;
+        let node =
+            Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+        let callbacks = node
+            .borrow()
+            .listeners
+            .get(keyboard.event_type)
+            .cloned()
+            .unwrap_or_default();
+        listeners.push((current, callbacks));
+    }
+    if listeners.iter().all(|(_, callbacks)| callbacks.is_empty()) {
+        return Ok(());
+    }
+
+    let target = listeners[0].0.clone();
+    let event = Class::instance(
+        context.clone(),
+        KeyboardEvent {
+            event_type: keyboard.event_type.into(),
+            target,
+            current_target: None,
+            key: keyboard.key,
+            key_code: keyboard.key_code,
+            repeat: keyboard.repeat,
+            shift_key: keyboard.modifiers.shift,
+            ctrl_key: keyboard.modifiers.control,
+            alt_key: keyboard.modifiers.alt,
+            meta_key: keyboard.modifiers.command,
+            bubbles: true,
+            cancelable: true,
+            default_prevented: false,
+            propagation_stopped: false,
+            immediate_propagation_stopped: false,
+        },
+    )?;
+
+    for (current, callbacks) in listeners {
+        event.borrow_mut().current_target = Some(current.clone());
+        for listener in callbacks {
+            let node =
+                Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+            let still_registered = node
+                .borrow()
+                .listeners
+                .get(keyboard.event_type)
+                .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
+            if !still_registered {
+                continue;
+            }
+            if let Err(error) = listener
+                .callback
+                .call::<_, ()>((This(current.clone()), event.clone()))
+                .catch(context)
+            {
+                eprintln!("Burokku {} listener failed: {error}", keyboard.event_type);
             }
             if event.borrow().immediate_propagation_stopped {
                 break;

@@ -3,6 +3,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use runtime::{rquickjs::Ctx, JsTaskQueue, JsTaskQueueError, Plugin};
+use winit::Modifiers;
 
 use super::{
     elements::{Dom, DomError, NodeId, ReclaimReport},
@@ -28,6 +29,16 @@ pub(crate) struct NativeMouseEvent {
     pub(crate) buttons: u16,
     pub(crate) related_target: Option<NodeId>,
     pub(crate) wheel_delta: Option<(f64, f64, u16)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeKeyboardEvent {
+    pub(crate) event_type: &'static str,
+    pub(crate) target: NodeId,
+    pub(crate) key: String,
+    pub(crate) key_code: u16,
+    pub(crate) repeat: bool,
+    pub(crate) modifiers: Modifiers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +76,16 @@ impl UiDomState {
                 }
                 Ok(())
             })
+    }
+
+    pub(crate) fn enqueue_keyboard_event(
+        &self,
+        event: NativeKeyboardEvent,
+    ) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(move |context| classes::dispatch_keyboard_event(context, event))
     }
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
@@ -791,6 +812,82 @@ mod tests {
                 .unwrap();
             classes::dispatch_mouse_event(&context, leave).unwrap();
             assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
+        });
+    }
+
+    #[test]
+    fn keyboard_dispatch_preserves_payload_and_bubbles() {
+        let (plugin, _) = DomPlugin::new();
+        let (_runtime, context) = context();
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    r#"
+                globalThis.keyWindow = app.createElement('window');
+                app.appendChild(keyWindow);
+                globalThis.keyCalls = [];
+                globalThis.keyChecks = [];
+                globalThis.lastKeyEvent = null;
+                for (const type of ['keydown', 'keyup']) {
+                    keyWindow.addEventListener(type, function (event) {
+                        lastKeyEvent = event;
+                        keyCalls.push('window');
+                        keyChecks.push(event.type === type, event.target === keyWindow,
+                            event.currentTarget === keyWindow, this === keyWindow,
+                            event.key === 'A', event.keyCode === 0,
+                            event.repeat === (type === 'keydown'),
+                            event.shiftKey, event.ctrlKey, !event.altKey, event.metaKey,
+                            event.bubbles, event.cancelable);
+                        try { event.key = 'B'; } catch {}
+                        keyChecks.push(event.key === 'A');
+                        event.preventDefault();
+                    });
+                    app.addEventListener(type, event => {
+                        keyCalls.push('app');
+                        keyChecks.push(event.currentTarget === app);
+                    });
+                }
+            "#,
+                )
+                .unwrap();
+            let target = plugin
+                .state()
+                .dom
+                .children(plugin.state().dom.root())
+                .unwrap()[0];
+            let modifiers = Modifiers {
+                shift: true,
+                control: true,
+                command: true,
+                ..Modifiers::default()
+            };
+            for event_type in ["keydown", "keyup"] {
+                context
+                    .eval::<(), _>("keyCalls = []; keyChecks = []")
+                    .unwrap();
+                classes::dispatch_keyboard_event(
+                    &context,
+                    NativeKeyboardEvent {
+                        event_type,
+                        target,
+                        key: "A".into(),
+                        key_code: 0,
+                        repeat: event_type == "keydown",
+                        modifiers,
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    context.eval::<Vec<String>, _>("keyCalls").unwrap(),
+                    ["window", "app"]
+                );
+                assert!(context.eval::<bool, _>("keyChecks.every(Boolean)").unwrap());
+                let flags: Vec<bool> = context
+                    .eval("[lastKeyEvent.defaultPrevented, lastKeyEvent.currentTarget === null]")
+                    .unwrap();
+                assert_eq!(flags, [true, true]);
+            }
         });
     }
 

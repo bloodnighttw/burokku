@@ -1,5 +1,6 @@
 import type {
   BurokkuClickEvent,
+  BurokkuKeyboardEvent,
   BurokkuEventListener,
   BurokkuMouseEvent,
   BurokkuWheelEvent,
@@ -41,6 +42,21 @@ div.addEventListener("custom", event => {
 
 // @ts-expect-error Click listeners receive BurokkuClickEvent.
 div.addEventListener("click", (event: string) => void event);
+
+for (const type of ["keydown", "keyup"] as const) {
+  const listener: BurokkuEventListener<BurokkuKeyboardEvent<typeof type>> = event => {
+    const eventType: typeof type = event.type;
+    const key: string = event.key;
+    const keyCode: number = event.keyCode;
+    const repeat: boolean = event.repeat;
+    const modifiers: boolean[] = [event.shiftKey, event.ctrlKey, event.altKey, event.metaKey];
+    void [eventType, key, keyCode, repeat, modifiers];
+    // @ts-expect-error Keyboard payloads are read-only.
+    event.key = "x";
+  };
+  div.addEventListener(type, listener);
+  div.removeEventListener(type, listener);
+}
 
 for (const type of [
   "mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "mouseenter", "mouseleave",

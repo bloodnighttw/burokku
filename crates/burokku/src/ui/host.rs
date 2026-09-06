@@ -5,14 +5,14 @@ use std::rc::Rc;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use winit::{
-    application::ApplicationHandler, ActiveEventLoop, ElementState, MouseButton, PhysicalPosition,
-    PhysicalSize, WindowEvent, WindowId,
+    application::ApplicationHandler, ActiveEventLoop, ElementState, KeyEvent, MouseButton,
+    PhysicalPosition, PhysicalSize, WindowEvent, WindowId,
 };
 
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
-    dom_plugin::{NativeMouseEvent, SharedUiDom},
+    dom_plugin::{NativeKeyboardEvent, NativeMouseEvent, SharedUiDom},
     elements::{Dom, NodeId},
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
@@ -185,6 +185,29 @@ fn wheel_event_for_input(
             if precise { 0 } else { 1 },
         )),
     })
+}
+
+fn keyboard_key(key_code: u16, text: Option<String>) -> String {
+    match text.as_deref() {
+        Some("\r" | "\n" | "\u{3}") => "Enter".into(),
+        Some("\t") => "Tab".into(),
+        Some("\u{1b}") => "Escape".into(),
+        Some("\u{8}" | "\u{7f}") => "Backspace".into(),
+        Some("\u{f700}") => "ArrowUp".into(),
+        Some("\u{f701}") => "ArrowDown".into(),
+        Some("\u{f702}") => "ArrowLeft".into(),
+        Some("\u{f703}") => "ArrowRight".into(),
+        Some("\u{f728}") => "Delete".into(),
+        Some(text) => text.into(),
+        None => match key_code {
+            0x38 | 0x3c => "Shift".into(),
+            0x3b | 0x3e => "Control".into(),
+            0x3a | 0x3d => "Alt".into(),
+            0x36 | 0x37 => "Meta".into(),
+            0x39 => "CapsLock".into(),
+            _ => "Unidentified".into(),
+        },
+    }
 }
 
 fn hover_path(dom: &Dom, target: Option<NodeId>) -> Vec<NodeId> {
@@ -532,6 +555,38 @@ impl ApplicationHost {
             (frame.revision(), frame.plan.scale_factor()),
             event.into_iter().collect(),
         )
+    }
+
+    fn queue_keyboard_input(&self, event: KeyEvent) -> Result<(), HostError> {
+        let Some(target) = self.windows.current().map(|window| window.dom_id()) else {
+            return Ok(());
+        };
+        let KeyEvent {
+            key_code,
+            text,
+            state,
+            repeat,
+            modifiers,
+        } = event;
+        let event = NativeKeyboardEvent {
+            event_type: match state {
+                ElementState::Pressed => "keydown",
+                ElementState::Released => "keyup",
+            },
+            target,
+            key: keyboard_key(key_code, text),
+            key_code,
+            repeat,
+            modifiers,
+        };
+        let state = self
+            .dom
+            .try_borrow()
+            .map_err(|_| HostError::DomBorrowConflict)?;
+        if let Err(error) = state.enqueue_keyboard_event(event) {
+            eprintln!("Burokku warning: dropped keyboard input: {error}");
+        }
+        Ok(())
     }
 
     fn queue_hover_at_cursor(&mut self) -> Result<(), HostError> {
@@ -1291,10 +1346,14 @@ impl ApplicationHandler for ApplicationHost {
                     window.window().request_redraw();
                 }
             }
+            WindowEvent::KeyboardInput(event) => {
+                if let Err(error) = self.queue_keyboard_input(event) {
+                    self.fail(event_loop, error);
+                }
+            }
             WindowEvent::Focused(false) => self.pressed_target = None,
             WindowEvent::Focused(true)
             | WindowEvent::Occluded(true)
-            | WindowEvent::KeyboardInput(_)
             | WindowEvent::ModifiersChanged(_) => {}
         }
     }
@@ -1484,6 +1543,15 @@ mod tests {
     use crate::ui::elements::{Dom, Element, ElementTag};
 
     use super::*;
+
+    #[test]
+    fn keyboard_text_uses_dom_key_names() {
+        assert_eq!(keyboard_key(0, Some("a".into())), "a");
+        assert_eq!(keyboard_key(0, Some("\r".into())), "Enter");
+        assert_eq!(keyboard_key(0, Some("\u{f700}".into())), "ArrowUp");
+        assert_eq!(keyboard_key(0x38, None), "Shift");
+        assert_eq!(keyboard_key(0, None), "Unidentified");
+    }
 
     #[derive(Debug)]
     struct DropProbe {
