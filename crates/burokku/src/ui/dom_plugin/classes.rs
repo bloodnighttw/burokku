@@ -1082,10 +1082,7 @@ fn dispatch_mouse_event_inner(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Res
         return Ok(());
     };
     let state = app.borrow().state.clone();
-    let bubbles = !matches!(
-        mouse.event_type,
-        "mouseenter" | "mouseleave" | "pointerenter" | "pointerleave"
-    );
+    let bubbles = !matches!(mouse.event_type, "pointerenter" | "pointerleave");
     let (path, related_target) = {
         let state = borrow(context, &state)?;
         debug_assert!(mouse.presented_revision <= state.dom.revision());

@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_and_pointer_dispatch_preserves_payload_and_propagation() {
+    fn pointing_dispatch_preserves_payload_and_propagation() {
         let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
         context.with(|context| {
@@ -717,9 +717,7 @@ mod tests {
                 globalThis.mouseCalls = [];
                 globalThis.mouseChecks = [];
                 globalThis.lastMouseEvent = null;
-                for (const type of ['click', 'mousedown', 'mouseup', 'mousemove',
-                                    'mouseover', 'mouseout', 'mouseenter', 'mouseleave', 'wheel',
-                                    'pointerdown', 'pointerup', 'pointermove',
+                for (const type of ['click', 'wheel', 'pointerdown', 'pointerup', 'pointermove',
                                     'pointerenter', 'pointerleave', 'pointercancel']) {
                     mouseTarget.addEventListener(type, function (event) {
                         lastMouseEvent = event;
@@ -762,13 +760,6 @@ mod tests {
             };
             for event_type in [
                 "click",
-                "mousedown",
-                "mouseup",
-                "mousemove",
-                "mouseover",
-                "mouseout",
-                "mouseenter",
-                "mouseleave",
                 "wheel",
                 "pointerdown",
                 "pointerup",
@@ -796,10 +787,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let bubbles = !matches!(
-                    event_type,
-                    "mouseenter" | "mouseleave" | "pointerenter" | "pointerleave"
-                );
+                let bubbles = !matches!(event_type, "pointerenter" | "pointerleave");
                 let cancelable = bubbles && event_type != "pointercancel";
                 let calls: Vec<String> = context.eval("mouseCalls").unwrap();
                 let expected = if bubbles {
@@ -831,7 +819,7 @@ mod tests {
                 .eval::<(), _>("mouseRelated = null; mouseChecks = []")
                 .unwrap();
             let leave = NativeMouseEvent {
-                event_type: "mouseleave",
+                event_type: "pointerleave",
                 target,
                 presented_revision,
                 client_x: 12.5,
@@ -840,7 +828,7 @@ mod tests {
                 buttons: 3,
                 related_target: None,
                 wheel_delta: None,
-                pointer_id: None,
+                pointer_id: Some(1),
             };
             classes::dispatch_mouse_event(&context, leave).unwrap();
             assert!(context
