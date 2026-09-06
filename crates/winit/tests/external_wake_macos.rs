@@ -121,6 +121,7 @@ mod macos {
     struct MouseApp {
         window: Option<Window>,
         received: Vec<WindowEvent>,
+        expected: Vec<WindowEvent>,
     }
 
     impl ApplicationHandler for MouseApp {
@@ -138,7 +139,18 @@ mod macos {
             // Give the view deterministic geometry even without a WindowServer connection.
             view.setFrameSize(NSSize::new(200.0, 150.0));
             let native_window = view.window().unwrap();
-            for event_type in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            for event_type in [
+                NSEventType::LeftMouseDown,
+                NSEventType::LeftMouseDragged,
+                NSEventType::LeftMouseUp,
+                NSEventType::RightMouseDown,
+                NSEventType::RightMouseDragged,
+                NSEventType::RightMouseUp,
+                NSEventType::OtherMouseDown,
+                NSEventType::OtherMouseDragged,
+                NSEventType::OtherMouseUp,
+                NSEventType::MouseMoved,
+            ] {
                 let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                     event_type,
                     view.convertPoint_toView(NSPoint::new(25.0, 40.0), None),
@@ -150,11 +162,53 @@ mod macos {
                     1,
                     1.0,
                 ).unwrap();
+                let buttons = NSEvent::pressedMouseButtons() as u16;
+                let position = PhysicalPosition::new(
+                    25.0 * window.scale_factor(),
+                    110.0 * window.scale_factor(),
+                );
+                // This NSEvent factory always gives buttonNumber=0, including right/other
+                // event types. Numeric button mapping is covered by the backend unit test.
+                assert_eq!(event.buttonNumber(), 0);
+                let input = match event_type {
+                    NSEventType::LeftMouseDown
+                    | NSEventType::RightMouseDown
+                    | NSEventType::OtherMouseDown => {
+                        Some((ElementState::Pressed, MouseButton::Left, 1))
+                    }
+                    NSEventType::LeftMouseUp
+                    | NSEventType::RightMouseUp
+                    | NSEventType::OtherMouseUp => {
+                        Some((ElementState::Released, MouseButton::Left, 1))
+                    }
+                    _ => None,
+                };
+                self.expected.push(match input {
+                    Some((state, button, mask)) => WindowEvent::MouseInput {
+                        state,
+                        button,
+                        position,
+                        buttons: if state == ElementState::Pressed {
+                            buttons | mask
+                        } else {
+                            buttons & !mask
+                        },
+                    },
+                    None => WindowEvent::CursorMoved { position, buttons },
+                });
                 // Invoke AppKit's responder selectors without requiring OS input injection.
-                if event_type == NSEventType::LeftMouseDown {
-                    view.mouseDown(&event);
-                } else {
-                    view.mouseUp(&event);
+                match event_type {
+                    NSEventType::LeftMouseDown => view.mouseDown(&event),
+                    NSEventType::LeftMouseUp => view.mouseUp(&event),
+                    NSEventType::LeftMouseDragged => view.mouseDragged(&event),
+                    NSEventType::RightMouseDown => view.rightMouseDown(&event),
+                    NSEventType::RightMouseUp => view.rightMouseUp(&event),
+                    NSEventType::RightMouseDragged => view.rightMouseDragged(&event),
+                    NSEventType::OtherMouseDown => view.otherMouseDown(&event),
+                    NSEventType::OtherMouseUp => view.otherMouseUp(&event),
+                    NSEventType::OtherMouseDragged => view.otherMouseDragged(&event),
+                    NSEventType::MouseMoved => view.mouseMoved(&event),
+                    _ => unreachable!(),
                 }
             }
             self.window = Some(window);
@@ -166,10 +220,13 @@ mod macos {
             window_id: WindowId,
             event: WindowEvent,
         ) {
-            if matches!(event, WindowEvent::MouseInput { .. }) {
+            if matches!(
+                event,
+                WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. }
+            ) {
                 assert_eq!(window_id, self.window.as_ref().unwrap().id());
                 self.received.push(event);
-                if self.received.len() == 2 {
+                if self.received.len() == self.expected.len() {
                     event_loop.exit();
                 }
             }
@@ -181,15 +238,8 @@ mod macos {
             .unwrap()
             .run_app_external(MouseApp::default(), LocalSet::new())
             .unwrap();
-        let scale = app.window.as_ref().unwrap().scale_factor();
-        assert_eq!(
-            app.received,
-            [ElementState::Pressed, ElementState::Released].map(|state| WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                position: PhysicalPosition::new(25.0 * scale, 110.0 * scale),
-            })
-        );
+        assert_eq!(app.expected.len(), 10);
+        assert_eq!(app.received, app.expected);
     }
 
     fn panic_child() {

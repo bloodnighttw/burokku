@@ -49,11 +49,15 @@ pub enum WindowEvent {
     ModifiersChanged(Modifiers),
     CursorMoved {
         position: PhysicalPosition<f64>,
+        /// Pressed-button bitmask: left=1, right=2, middle=4, then extra buttons.
+        buttons: u16,
     },
     MouseInput {
         state: ElementState,
         button: MouseButton,
         position: PhysicalPosition<f64>,
+        /// Pressed-button bitmask after this transition; same layout as CursorMoved.
+        buttons: u16,
     },
     MouseWheel {
         delta_x: f64,

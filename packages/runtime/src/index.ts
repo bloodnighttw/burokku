@@ -13,15 +13,24 @@ export interface BurokkuEvent {
   stopImmediatePropagation(): void;
 }
 
-export interface BurokkuClickEvent extends BurokkuEvent {
-  readonly type: "click";
+export interface BurokkuMouseEvent<Type extends string = string> extends BurokkuEvent {
+  readonly type: Type;
   readonly clientX: number;
   readonly clientY: number;
+  /** Changed button: primary=0, middle=1, secondary=2; 0 for mousemove. */
   readonly button: number;
+  /** Pressed-button bitmask: primary=1, secondary=2, middle=4. */
+  readonly buttons: number;
+  readonly relatedTarget: BurokkuNode | null;
 }
+
+export interface BurokkuClickEvent extends BurokkuMouseEvent<"click"> {}
 
 export interface BurokkuEventMap {
   click: BurokkuClickEvent;
+  mousedown: BurokkuMouseEvent<"mousedown">;
+  mouseup: BurokkuMouseEvent<"mouseup">;
+  mousemove: BurokkuMouseEvent<"mousemove">;
 }
 
 export type BurokkuEventListener<Event extends BurokkuEvent = BurokkuEvent> = (

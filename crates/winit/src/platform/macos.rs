@@ -27,13 +27,14 @@ use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
     runtime::ProtocolObject,
-    sel, DefinedClass, MainThreadOnly,
+    sel, AnyThread, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventSubtype, NSEventTrackingRunLoopMode, NSEventType, NSView,
-    NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventSubtype, NSEventTrackingRunLoopMode, NSEventType, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSViewFrameDidChangeNotification,
+    NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint,
@@ -375,6 +376,46 @@ define_class!(
             self.send_mouse_input(event, ElementState::Released);
         }
 
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
         #[unsafe(method(frameDidChange:))]
         fn frame_did_change(&self, _notification: &NSNotification) {
             let scale_factor = self
@@ -431,6 +472,20 @@ impl ContentView {
 
         this.setWantsLayer(true);
         this.setPostsFrameChangedNotifications(true);
+        // InVisibleRect follows resizing automatically; the view owns the tracking area.
+        // SAFETY: ContentView implements mouseMoved: and outlives its tracking area.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                NSRect::default(),
+                NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&this),
+                None,
+            )
+        };
+        this.addTrackingArea(&tracking);
 
         let notification_center = NSNotificationCenter::defaultCenter();
         // SAFETY: frameDidChange: is implemented above with the notification
@@ -454,19 +509,37 @@ impl ContentView {
         });
     }
 
-    fn send_mouse_input(&self, event: &NSEvent, state: ElementState) {
+    fn mouse_position(&self, event: &NSEvent) -> PhysicalPosition<f64> {
         let point = self.convertPoint_fromView(event.locationInWindow(), None);
         let bounds = self.bounds();
         let scale = self.ivars().state.scale_factor();
         // AppKit's unflipped view uses bottom-left points; hit testing uses top-left pixels.
-        let position = PhysicalPosition::new(
+        PhysicalPosition::new(
             (point.x - bounds.origin.x) * scale,
             (bounds.origin.y + bounds.size.height - point.y) * scale,
-        );
+        )
+    }
+
+    fn send_mouse_input(&self, event: &NSEvent, state: ElementState) {
+        let Some((button, buttons)) = mouse_button_state(
+            event.buttonNumber(),
+            state,
+            NSEvent::pressedMouseButtons() as u16,
+        ) else {
+            return;
+        };
         self.send(WindowEvent::MouseInput {
             state,
-            button: MouseButton::Left,
-            position,
+            button,
+            position: self.mouse_position(event),
+            buttons,
+        });
+    }
+
+    fn send_cursor_moved(&self, event: &NSEvent) {
+        self.send(WindowEvent::CursorMoved {
+            position: self.mouse_position(event),
+            buttons: NSEvent::pressedMouseButtons() as u16,
         });
     }
 
@@ -484,6 +557,51 @@ impl ContentView {
                 sync_metal_layer(&layer, size);
             }
         }
+    }
+}
+
+fn mouse_button_state(
+    number: isize,
+    state: ElementState,
+    buttons: u16,
+) -> Option<(MouseButton, u16)> {
+    let number = u16::try_from(number).ok()?;
+    let button = match number {
+        0 => MouseButton::Left,
+        1 => MouseButton::Right,
+        2 => MouseButton::Middle,
+        other => MouseButton::Other(other),
+    };
+    let mask = 1u16.checked_shl(u32::from(number)).unwrap_or(0);
+    let buttons = match state {
+        ElementState::Pressed => buttons | mask,
+        ElementState::Released => buttons & !mask,
+    };
+    Some((button, buttons))
+}
+
+#[test]
+fn native_mouse_buttons_preserve_chords_and_validate_numbers() {
+    for (number, button, mask) in [
+        (0, MouseButton::Left, 1),
+        (1, MouseButton::Right, 2),
+        (2, MouseButton::Middle, 4),
+        (3, MouseButton::Other(3), 8),
+        (4, MouseButton::Other(4), 16),
+        (15, MouseButton::Other(15), 32768),
+        (16, MouseButton::Other(16), 0),
+    ] {
+        assert_eq!(
+            mouse_button_state(number, ElementState::Pressed, 5),
+            Some((button, 5 | mask))
+        );
+        assert_eq!(
+            mouse_button_state(number, ElementState::Released, 7),
+            Some((button, 7 & !mask))
+        );
+    }
+    for invalid in [-1, 65536] {
+        assert_eq!(mouse_button_state(invalid, ElementState::Pressed, 0), None);
     }
 }
 

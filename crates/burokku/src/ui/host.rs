@@ -5,8 +5,8 @@ use std::rc::Rc;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use winit::{
-    application::ApplicationHandler, ActiveEventLoop, ElementState, MouseButton, PhysicalSize,
-    WindowEvent, WindowId,
+    application::ApplicationHandler, ActiveEventLoop, ElementState, MouseButton, PhysicalPosition,
+    PhysicalSize, WindowEvent, WindowId,
 };
 
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
@@ -99,6 +99,60 @@ fn recognize_primary_click(
             .take()
             .filter(|pressed| Some(*pressed) == target),
     }
+}
+
+fn mouse_events_for_input(
+    plan: &ScenePlan,
+    pressed_target: &mut Option<NodeId>,
+    position: PhysicalPosition<f64>,
+    buttons: u16,
+    input: Option<(ElementState, MouseButton)>,
+) -> Vec<NativeMouseEvent> {
+    let target = plan.hit_test_physical(position.x, position.y);
+    let (event_type, button, click) = match input {
+        Some((state, button)) => {
+            let click = recognize_primary_click(pressed_target, state, button, target);
+            let event_type = match state {
+                ElementState::Pressed => "mousedown",
+                ElementState::Released => "mouseup",
+            };
+            let button = match button {
+                MouseButton::Left => 0,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+                MouseButton::Other(number) => number,
+            };
+            (event_type, button, click)
+        }
+        None => {
+            // A release outside this window must not leave an armed click behind.
+            if buttons & 1 == 0 {
+                *pressed_target = None;
+            }
+            ("mousemove", 0, None)
+        }
+    };
+    let Some(target) = target else {
+        return Vec::new();
+    };
+    let mouse = NativeMouseEvent {
+        event_type,
+        target,
+        presented_revision: plan.revision(),
+        client_x: position.x / plan.scale_factor(),
+        client_y: position.y / plan.scale_factor(),
+        button,
+        buttons,
+        related_target: None,
+    };
+    let mut events = vec![mouse];
+    if click.is_some() {
+        events.push(NativeMouseEvent {
+            event_type: "click",
+            ..mouse
+        });
+    }
+    events
 }
 
 fn accept_current_graphics_result<T, E>(
@@ -328,6 +382,37 @@ impl ApplicationHost {
             self.cursor_target = None;
             self.pressed_target = None;
         }
+    }
+
+    fn queue_mouse_input(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+        input: Option<(ElementState, MouseButton)>,
+    ) -> Result<(), HostError> {
+        self.discard_stale_presented_frame();
+        let Some(frame) = self.presented.as_ref() else {
+            return Ok(());
+        };
+        let events = mouse_events_for_input(
+            &frame.plan,
+            &mut self.pressed_target,
+            position,
+            buttons,
+            input,
+        );
+        self.cursor_target = events.first().map(|event| event.target);
+        if !events.is_empty() {
+            let state = self
+                .dom
+                .try_borrow()
+                .map_err(|_| HostError::DomBorrowConflict)?;
+            // Queue one native input atomically, keeping mouseup before its click.
+            if let Err(error) = state.enqueue_mouse_events(events) {
+                eprintln!("Burokku warning: dropped mouse input: {error}");
+            }
+        }
+        Ok(())
     }
 
     fn begin_graphics_initialization(
@@ -969,57 +1054,20 @@ impl ApplicationHandler for ApplicationHost {
                     }
                 }
             }
-            WindowEvent::CursorMoved { position } => {
-                self.discard_stale_presented_frame();
-                self.cursor_target = self
-                    .presented
-                    .as_ref()
-                    .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
+            WindowEvent::CursorMoved { position, buttons } => {
+                if let Err(error) = self.queue_mouse_input(position, buttons, None) {
+                    self.fail(event_loop, error);
+                }
             }
             WindowEvent::MouseInput {
                 state,
                 button,
                 position,
+                buttons,
             } => {
-                self.discard_stale_presented_frame();
-                self.cursor_target = self
-                    .presented
-                    .as_ref()
-                    .and_then(|frame| frame.plan.hit_test_physical(position.x, position.y));
-                if let Some(target) = recognize_primary_click(
-                    &mut self.pressed_target,
-                    state,
-                    button,
-                    self.cursor_target,
-                ) {
-                    let frame = self
-                        .presented
-                        .as_ref()
-                        .expect("a click target comes from the presented frame");
-                    let scale = frame.plan.scale_factor();
-                    let click = NativeMouseEvent {
-                        event_type: "click",
-                        target,
-                        presented_revision: frame.revision(),
-                        client_x: position.x / scale,
-                        client_y: position.y / scale,
-                        button: 0,
-                        buttons: 0,
-                        related_target: None,
-                    };
-                    let queued = self
-                        .dom
-                        .try_borrow()
-                        .map(|state| state.enqueue_mouse_event(click));
-                    match queued {
-                        Err(_) => {
-                            self.fail(event_loop, HostError::DomBorrowConflict);
-                        }
-                        Ok(Err(error)) => {
-                            eprintln!("Burokku warning: dropped click event: {error}");
-                        }
-                        Ok(Ok(())) => {}
-                    }
+                if let Err(error) = self.queue_mouse_input(position, buttons, Some((state, button)))
+                {
+                    self.fail(event_loop, error);
                 }
             }
             WindowEvent::Occluded(false) => {
@@ -1301,6 +1349,141 @@ mod tests {
             pending_window_status(window_a, Some(window_b)),
             PendingWindowStatus::Replaced
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mouse_input_reaches_dom_in_order_with_presented_coordinates() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+                let (runtime, driver) = runtime::Runtime::builder()
+                    .plugin(plugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                runtime
+                    .eval::<()>(
+                        r#"
+                globalThis.mouseWindow = app.createElement('window');
+                globalThis.mouseTarget = app.createElement('div');
+                mouseTarget.style.setProperty('width', '100px');
+                mouseTarget.style.setProperty('height', '100px');
+                mouseWindow.appendChild(mouseTarget);
+                app.appendChild(mouseWindow);
+                globalThis.inputLog = [];
+                for (const type of ['mousedown', 'mouseup', 'mousemove', 'click']) {
+                    mouseTarget.addEventListener(type, event => {
+                        inputLog.push(`${event.type}:${event.button}:${event.buttons}`);
+                        event.preventDefault();
+                    });
+                    mouseWindow.addEventListener(type, () => inputLog.push('bubble'));
+                }
+            "#,
+                    )
+                    .await
+                    .unwrap();
+                let (plan, target, window) = {
+                    let state = state.borrow();
+                    let window = state.dom.children(state.dom.root()).unwrap()[0];
+                    let target = state.dom.children(window).unwrap()[0];
+                    let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
+                    let computed = layout
+                        .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
+                        .unwrap();
+                    (
+                        ScenePlan::from_layout(
+                            &state.dom,
+                            computed,
+                            PhysicalSize::new(640, 480),
+                            2.0,
+                        )
+                        .unwrap(),
+                        target,
+                        window,
+                    )
+                };
+                let position = PhysicalPosition::new(25.0, 20.0);
+                let mut pressed = None;
+                for (input, buttons) in [
+                    (Some((ElementState::Pressed, MouseButton::Left)), 1),
+                    (None, 1),
+                    (Some((ElementState::Pressed, MouseButton::Right)), 3),
+                    (Some((ElementState::Released, MouseButton::Right)), 1),
+                    (Some((ElementState::Released, MouseButton::Left)), 0),
+                    (None, 0),
+                    (Some((ElementState::Pressed, MouseButton::Middle)), 4),
+                    (Some((ElementState::Released, MouseButton::Middle)), 0),
+                    (Some((ElementState::Pressed, MouseButton::Other(3))), 8),
+                    (Some((ElementState::Released, MouseButton::Other(3))), 0),
+                    (Some((ElementState::Pressed, MouseButton::Other(4))), 16),
+                    (Some((ElementState::Released, MouseButton::Other(4))), 0),
+                ] {
+                    let events =
+                        mouse_events_for_input(&plan, &mut pressed, position, buttons, input);
+                    for event in &events {
+                        assert_eq!(event.target, target);
+                        assert_eq!(event.presented_revision, plan.revision());
+                        assert_eq!((event.client_x, event.client_y), (12.5, 10.0));
+                        assert_eq!(event.buttons, buttons);
+                        assert_eq!(event.related_target, None);
+                    }
+                    state.borrow().enqueue_mouse_events(events).unwrap();
+                }
+                let log: Vec<String> = runtime.eval("inputLog").await.unwrap();
+                let expected: Vec<_> = [
+                    "mousedown:0:1",
+                    "mousemove:0:1",
+                    "mousedown:2:3",
+                    "mouseup:2:1",
+                    "mouseup:0:0",
+                    "click:0:0",
+                    "mousemove:0:0",
+                    "mousedown:1:4",
+                    "mouseup:1:0",
+                    "mousedown:3:8",
+                    "mouseup:3:0",
+                    "mousedown:4:16",
+                    "mouseup:4:0",
+                ]
+                .into_iter()
+                .flat_map(|event| [event, "bubble"])
+                .collect();
+                assert_eq!(log, expected);
+                assert_eq!(pressed, None);
+
+                let down = Some((ElementState::Pressed, MouseButton::Left));
+                let up = Some((ElementState::Released, MouseButton::Left));
+                mouse_events_for_input(&plan, &mut pressed, position, 1, down);
+                let outside = PhysicalPosition::new(-1.0, -1.0);
+                assert!(mouse_events_for_input(&plan, &mut pressed, outside, 0, up).is_empty());
+                assert_eq!(pressed, None);
+
+                mouse_events_for_input(&plan, &mut pressed, position, 1, down);
+                let events = mouse_events_for_input(
+                    &plan,
+                    &mut pressed,
+                    PhysicalPosition::new(400.0, 400.0),
+                    0,
+                    up,
+                );
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].target, window);
+                assert_eq!(events[0].event_type, "mouseup");
+
+                // Recover when a release was missed outside the window.
+                mouse_events_for_input(&plan, &mut pressed, position, 1, down);
+                mouse_events_for_input(&plan, &mut pressed, position, 0, None);
+                assert_eq!(pressed, None);
+                assert_eq!(
+                    mouse_events_for_input(&plan, &mut pressed, position, 0, up).len(),
+                    1
+                );
+
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 
     #[test]

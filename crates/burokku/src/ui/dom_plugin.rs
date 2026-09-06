@@ -51,14 +51,19 @@ impl UiDomState {
         self.presented_layout.replace(Some(computed));
     }
 
-    pub(crate) fn enqueue_mouse_event(
+    pub(crate) fn enqueue_mouse_events(
         &self,
-        event: NativeMouseEvent,
+        events: Vec<NativeMouseEvent>,
     ) -> Result<(), JsTaskQueueError> {
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(move |context| classes::dispatch_mouse_event(context, event))
+            .try_enqueue(move |context| {
+                for event in events {
+                    classes::dispatch_mouse_event(context, event)?;
+                }
+                Ok(())
+            })
     }
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
@@ -862,7 +867,7 @@ mod tests {
 
                 state
                     .borrow()
-                    .enqueue_mouse_event(NativeMouseEvent {
+                    .enqueue_mouse_events(vec![NativeMouseEvent {
                         event_type: "click",
                         target,
                         presented_revision,
@@ -871,11 +876,11 @@ mod tests {
                         button: 0,
                         buttons: 0,
                         related_target: None,
-                    })
+                    }])
                     .unwrap();
                 state
                     .borrow()
-                    .enqueue_mouse_event(NativeMouseEvent {
+                    .enqueue_mouse_events(vec![NativeMouseEvent {
                         event_type: "click",
                         target: immediate_target,
                         presented_revision,
@@ -884,7 +889,7 @@ mod tests {
                         button: 0,
                         buttons: 0,
                         related_target: None,
-                    })
+                    }])
                     .unwrap();
                 let result: Vec<String> = runtime
                     .eval(
