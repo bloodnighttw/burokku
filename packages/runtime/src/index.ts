@@ -55,13 +55,6 @@ export interface BurokkuEventMap {
   click: BurokkuClickEvent;
   keydown: BurokkuKeyboardEvent<"keydown">;
   keyup: BurokkuKeyboardEvent<"keyup">;
-  mousedown: BurokkuMouseEvent<"mousedown">;
-  mouseup: BurokkuMouseEvent<"mouseup">;
-  mousemove: BurokkuMouseEvent<"mousemove">;
-  mouseover: BurokkuMouseEvent<"mouseover">;
-  mouseout: BurokkuMouseEvent<"mouseout">;
-  mouseenter: BurokkuMouseEvent<"mouseenter">;
-  mouseleave: BurokkuMouseEvent<"mouseleave">;
   pointerdown: BurokkuPointerEvent<"pointerdown">;
   pointerup: BurokkuPointerEvent<"pointerup">;
   pointermove: BurokkuPointerEvent<"pointermove">;
