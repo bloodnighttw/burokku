@@ -17,7 +17,7 @@ export interface BurokkuMouseEvent<Type extends string = string> extends Burokku
   readonly type: Type;
   readonly clientX: number;
   readonly clientY: number;
-  /** Changed button: primary=0, middle=1, secondary=2; 0 for mousemove. */
+  /** Changed button: primary=0, middle=1, secondary=2; 0 for movement and hover. */
   readonly button: number;
   /** Pressed-button bitmask: primary=1, secondary=2, middle=4. */
   readonly buttons: number;
@@ -31,6 +31,10 @@ export interface BurokkuEventMap {
   mousedown: BurokkuMouseEvent<"mousedown">;
   mouseup: BurokkuMouseEvent<"mouseup">;
   mousemove: BurokkuMouseEvent<"mousemove">;
+  mouseover: BurokkuMouseEvent<"mouseover">;
+  mouseout: BurokkuMouseEvent<"mouseout">;
+  mouseenter: BurokkuMouseEvent<"mouseenter">;
+  mouseleave: BurokkuMouseEvent<"mouseleave">;
 }
 
 export type BurokkuEventListener<Event extends BurokkuEvent = BurokkuEvent> = (

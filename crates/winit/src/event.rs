@@ -47,6 +47,16 @@ pub enum WindowEvent {
     Occluded(bool),
     KeyboardInput(KeyEvent),
     ModifiersChanged(Modifiers),
+    /// The pointer entered the content area; coordinates may lie on its boundary.
+    CursorEntered {
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+    },
+    /// The pointer left the content area; coordinates may lie outside it.
+    CursorLeft {
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+    },
     CursorMoved {
         position: PhysicalPosition<f64>,
         /// Pressed-button bitmask: left=1, right=2, middle=4, then extra buttons.

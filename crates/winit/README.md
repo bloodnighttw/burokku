@@ -231,6 +231,8 @@ The current public event set is:
 - `RedrawRequested`;
 - `Focused(bool)` and `Occluded(bool)`;
 - `KeyboardInput(KeyEvent)` and `ModifiersChanged(Modifiers)`;
+- `CursorEntered { position, buttons }` and `CursorLeft { position, buttons }`
+  for content-area boundaries (also during dragging);
 - `CursorMoved { position, buttons }` (including movement while dragging);
 - `MouseInput { state, button, position, buttons }`;
 - `MouseWheel { delta_x, delta_y, precise, position }`.

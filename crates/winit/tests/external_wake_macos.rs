@@ -15,7 +15,9 @@ mod macos {
         ElementState, LogicalSize, MouseButton, PhysicalPosition, Window, WindowAttributes,
         WindowEvent, WindowId,
     };
-    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSView};
+    use objc2_app_kit::{
+        NSEvent, NSEventModifierFlags, NSEventType, NSTrackingAreaOptions, NSView,
+    };
     use objc2_foundation::{NSPoint, NSSize};
     use tokio::{sync::oneshot, task::LocalSet};
 
@@ -211,6 +213,40 @@ mod macos {
                     _ => unreachable!(),
                 }
             }
+            let areas = view.trackingAreas();
+            assert_eq!(areas.len(), 1);
+            assert!(areas.objectAtIndex(0).options().contains(
+                NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::InVisibleRect
+                    | NSTrackingAreaOptions::EnabledDuringMouseDrag,
+            ));
+            for (event_type, point) in [
+                (NSEventType::MouseEntered, NSPoint::new(25.0, 40.0)),
+                (NSEventType::MouseExited, NSPoint::new(-5.0, 40.0)),
+            ] {
+                // SAFETY: No user data is attached to these synthetic tracking events.
+                let event = unsafe {
+                    NSEvent::enterExitEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_trackingNumber_userData(
+                        event_type, view.convertPoint_toView(point, None), NSEventModifierFlags(0),
+                        0.0, native_window.windowNumber(), None, 0, 0, std::ptr::null_mut(),
+                    )
+                }.unwrap();
+                let position = PhysicalPosition::new(
+                    point.x * window.scale_factor(),
+                    110.0 * window.scale_factor(),
+                );
+                let buttons = NSEvent::pressedMouseButtons() as u16;
+                if event_type == NSEventType::MouseEntered {
+                    self.expected
+                        .push(WindowEvent::CursorEntered { position, buttons });
+                    view.mouseEntered(&event);
+                } else {
+                    self.expected
+                        .push(WindowEvent::CursorLeft { position, buttons });
+                    view.mouseExited(&event);
+                }
+            }
             self.window = Some(window);
         }
 
@@ -222,7 +258,10 @@ mod macos {
         ) {
             if matches!(
                 event,
-                WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. }
+                WindowEvent::MouseInput { .. }
+                    | WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
             ) {
                 assert_eq!(window_id, self.window.as_ref().unwrap().id());
                 self.received.push(event);
@@ -238,7 +277,7 @@ mod macos {
             .unwrap()
             .run_app_external(MouseApp::default(), LocalSet::new())
             .unwrap();
-        assert_eq!(app.expected.len(), 10);
+        assert_eq!(app.expected.len(), 12);
         assert_eq!(app.received, app.expected);
     }
 

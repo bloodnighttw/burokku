@@ -13,7 +13,7 @@ use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
     dom_plugin::{NativeMouseEvent, SharedUiDom},
-    elements::NodeId,
+    elements::{Dom, NodeId},
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
     scene::{BuiltScene, SceneError, ScenePlan},
@@ -151,6 +151,62 @@ fn mouse_events_for_input(
             event_type: "click",
             ..mouse
         });
+    }
+    events
+}
+
+fn hover_path(dom: &Dom, target: Option<NodeId>) -> Vec<NodeId> {
+    let mut path = Vec::new();
+    let mut current = target.filter(|id| dom.is_connected(*id).unwrap_or(false));
+    while let Some(id) = current {
+        path.push(id);
+        current = dom.parent_node(id).expect("hover path contains live nodes");
+    }
+    path
+}
+
+fn hover_events(
+    previous: &[NodeId],
+    next: &[NodeId],
+    position: PhysicalPosition<f64>,
+    buttons: u16,
+    presented: (u64, f64),
+) -> Vec<NativeMouseEvent> {
+    if previous == next {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let mut push = |event_type, target, related_target| {
+        events.push(NativeMouseEvent {
+            event_type,
+            target,
+            related_target,
+            presented_revision: presented.0,
+            client_x: position.x / presented.1,
+            client_y: position.y / presented.1,
+            button: 0,
+            buttons,
+        })
+    };
+    let old_target = previous.first().copied();
+    let new_target = next.first().copied();
+    if old_target != new_target {
+        if let Some(target) = old_target {
+            push("mouseout", target, new_target);
+        }
+    }
+    // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
+    // Comparing membership also handles a still-hovered subtree being reparented.
+    for &node in previous.iter().filter(|node| !next.contains(node)) {
+        push("mouseleave", node, new_target);
+    }
+    if old_target != new_target {
+        if let Some(target) = new_target {
+            push("mouseover", target, old_target);
+        }
+    }
+    for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
+        push("mouseenter", node, old_target);
     }
     events
 }
@@ -312,7 +368,9 @@ pub(crate) struct ApplicationHost {
     layout: LayoutEngine<TextEngine>,
     presented: Option<PresentedFrame>,
     last_frame_failure: Option<FrameFailure>,
-    cursor_target: Option<NodeId>,
+    hover_path: Vec<NodeId>,
+    hover_window: Option<WindowId>,
+    cursor: Option<(PhysicalPosition<f64>, u16)>,
     pressed_target: Option<NodeId>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
@@ -335,7 +393,9 @@ impl ApplicationHost {
             layout: LayoutEngine::new(text),
             presented: None,
             last_frame_failure: None,
-            cursor_target: None,
+            hover_path: Vec::new(),
+            hover_window: None,
+            cursor: None,
             pressed_target: None,
             ever_had_window: false,
             fatal_error: None,
@@ -377,9 +437,15 @@ impl ApplicationHost {
     }
 
     fn discard_stale_presented_frame(&mut self) {
+        let window = self.windows.current().map(|window| window.id());
+        if self.hover_window != window {
+            self.hover_path.clear();
+            self.cursor = None;
+            self.pressed_target = None;
+            self.hover_window = window;
+        }
         if !self.has_usable_presented_frame() {
             self.presented = None;
-            self.cursor_target = None;
             self.pressed_target = None;
         }
     }
@@ -391,6 +457,7 @@ impl ApplicationHost {
         input: Option<(ElementState, MouseButton)>,
     ) -> Result<(), HostError> {
         self.discard_stale_presented_frame();
+        self.cursor = Some((position, buttons));
         let Some(frame) = self.presented.as_ref() else {
             return Ok(());
         };
@@ -401,17 +468,82 @@ impl ApplicationHost {
             buttons,
             input,
         );
-        self.cursor_target = events.first().map(|event| event.target);
-        if !events.is_empty() {
-            let state = self
-                .dom
-                .try_borrow()
-                .map_err(|_| HostError::DomBorrowConflict)?;
-            // Queue one native input atomically, keeping mouseup before its click.
-            if let Err(error) = state.enqueue_mouse_events(events) {
+        self.queue_hover_and_mouse(
+            events.first().map(|event| event.target),
+            position,
+            buttons,
+            (frame.revision(), frame.plan.scale_factor()),
+            events,
+        )
+    }
+
+    fn queue_hover_at_cursor(&mut self) -> Result<(), HostError> {
+        self.discard_stale_presented_frame();
+        let (Some((position, buttons)), Some(frame)) = (self.cursor, self.presented.as_ref())
+        else {
+            return Ok(());
+        };
+        self.queue_hover_and_mouse(
+            frame.plan.hit_test_physical(position.x, position.y),
+            position,
+            buttons,
+            (frame.revision(), frame.plan.scale_factor()),
+            Vec::new(),
+        )
+    }
+
+    fn queue_cursor_exit(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+    ) -> Result<(), HostError> {
+        self.cursor = None;
+        self.pressed_target = None;
+        let scale = self
+            .windows
+            .current()
+            .ok_or(HostError::MissingNativeWindow)?
+            .window()
+            .scale_factor();
+        let revision = self
+            .dom
+            .try_borrow()
+            .map_err(|_| HostError::DomBorrowConflict)?
+            .dom
+            .revision();
+        self.queue_hover_and_mouse(None, position, buttons, (revision, scale), Vec::new())
+    }
+
+    fn queue_hover_and_mouse(
+        &mut self,
+        target: Option<NodeId>,
+        position: PhysicalPosition<f64>,
+        buttons: u16,
+        presented: (u64, f64),
+        events: Vec<NativeMouseEvent>,
+    ) -> Result<(), HostError> {
+        if !position.x.is_finite() || !position.y.is_finite() {
+            return Ok(());
+        }
+        if !presented.1.is_finite() || presented.1 <= 0.0 {
+            return Err(HostError::InvalidScaleFactor(presented.1));
+        }
+        let state = self
+            .dom
+            .try_borrow()
+            .map_err(|_| HostError::DomBorrowConflict)?;
+        let next_path = hover_path(&state.dom, target);
+        let mut batch = hover_events(&self.hover_path, &next_path, position, buttons, presented);
+        batch.extend(events);
+        if !batch.is_empty() {
+            // Boundary events precede input; mouseup and click remain in the same task.
+            if let Err(error) = state.enqueue_mouse_events(batch) {
                 eprintln!("Burokku warning: dropped mouse input: {error}");
+                return Ok(());
             }
         }
+        // Do not advance hover state if the queue rejected the transition.
+        self.hover_path = next_path;
         Ok(())
     }
 
@@ -771,7 +903,8 @@ impl ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.cursor_target = None;
+                self.hover_path.clear();
+                self.cursor = None;
                 if self.ever_had_window {
                     self.request_exit();
                 }
@@ -829,7 +962,6 @@ impl ApplicationHost {
         );
         if !presentation.usable_frame {
             self.presented = None;
-            self.cursor_target = None;
         }
         let mut revision = self
             .dom
@@ -918,7 +1050,8 @@ impl ApplicationHost {
                 frame.plan().clone(),
                 surface,
             );
-            self.cursor_target = None;
+            // Recheck stationary pointers against newly presented geometry, not candidate layouts.
+            self.queue_hover_at_cursor().map_err(RedrawFailure::Fatal)?;
         }
         Ok(outcome)
     }
@@ -959,7 +1092,8 @@ impl ApplicationHandler for ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.cursor_target = None;
+                self.hover_path.clear();
+                self.cursor = None;
                 self.windows.close();
                 self.request_exit();
             }
@@ -1002,7 +1136,6 @@ impl ApplicationHandler for ApplicationHost {
                 );
                 if !presentation.usable_frame {
                     self.presented = None;
-                    self.cursor_target = None;
                 }
                 if let Err(error) = resize_result {
                     let failure = classify_resize_failure(
@@ -1052,6 +1185,18 @@ impl ApplicationHandler for ApplicationHost {
                         // immediate retry for the unchanged revision/viewport.
                         self.handle_redraw_failure(event_loop, failure);
                     }
+                }
+            }
+            WindowEvent::CursorEntered { position, buttons } => {
+                self.discard_stale_presented_frame();
+                self.cursor = Some((position, buttons));
+                if let Err(error) = self.queue_hover_at_cursor() {
+                    self.fail(event_loop, error);
+                }
+            }
+            WindowEvent::CursorLeft { position, buttons } => {
+                if let Err(error) = self.queue_cursor_exit(position, buttons) {
+                    self.fail(event_loop, error);
                 }
             }
             WindowEvent::CursorMoved { position, buttons } => {
@@ -1352,6 +1497,103 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn hover_transitions_handle_ancestors_reparenting_and_detachment() {
+        tokio::task::LocalSet::new().run_until(async {
+            let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+            let (runtime, driver) = runtime::Runtime::builder().plugin(plugin).build_driven().await.unwrap();
+            let driver = tokio::task::spawn_local(driver.run());
+            let mut host = ApplicationHost::new(
+                state.clone(), TextEngine::without_system_fonts(), RuntimeLifecycle::for_test(),
+            );
+            runtime.eval::<()>(r#"
+                globalThis.w = app.createElement('window');
+                globalThis.p = app.createElement('div');
+                globalThis.q = app.createElement('div');
+                globalThis.a = app.createElement('div');
+                globalThis.b = app.createElement('div');
+                app.appendChild(w); w.appendChild(p); w.appendChild(q);
+                p.appendChild(a); p.appendChild(b);
+                globalThis.hoverLog = []; globalThis.hoverChecks = []; globalThis.bubbleLog = [];
+                for (const [name, node] of Object.entries({app, w, p, q, a, b})) {
+                    node.testName = name;
+                    for (const type of ['mouseover', 'mouseout', 'mouseenter', 'mouseleave']) {
+                        node.addEventListener(type, function (event) {
+                            const boundary = type === 'mouseenter' || type === 'mouseleave';
+                            hoverChecks.push(event.currentTarget === this, event.type === type,
+                                event.clientX === 12.5, event.clientY === 20, event.button === 0,
+                                event.buttons === 1, event.bubbles === !boundary, event.cancelable === !boundary);
+                            if (boundary) hoverChecks.push(event.target === this);
+                            else bubbleLog.push(`${type}:${name}`);
+                            if (event.target === this) {
+                                hoverLog.push(`${type}:${name}:${event.relatedTarget?.testName ?? '-'}`);
+                            }
+                            event.preventDefault();
+                            hoverChecks.push(event.defaultPrevented === !boundary);
+                        });
+                    }
+                }
+            "#).await.unwrap();
+            let (p, q, a, b, revision) = {
+                let state = state.borrow();
+                let w = state.dom.children(state.dom.root()).unwrap()[0];
+                let parents = state.dom.children(w).unwrap();
+                let children = state.dom.children(parents[0]).unwrap();
+                (parents[0], parents[1], children[0], children[1], state.dom.revision())
+            };
+            let position = PhysicalPosition::new(25.0, 40.0);
+            for (target, expected) in [
+                (Some(a), vec!["mouseover:a:-", "mouseenter:app:-", "mouseenter:w:-", "mouseenter:p:-", "mouseenter:a:-"]),
+                (Some(a), vec![]), // Same target after movement or a repaint.
+                (Some(b), vec!["mouseout:a:b", "mouseleave:a:b", "mouseover:b:a", "mouseenter:b:a"]),
+                (Some(p), vec!["mouseout:b:p", "mouseleave:b:p", "mouseover:p:b"]),
+                (Some(a), vec!["mouseout:p:a", "mouseover:a:p", "mouseenter:a:p"]),
+                (None, vec!["mouseout:a:-", "mouseleave:a:-", "mouseleave:p:-", "mouseleave:w:-", "mouseleave:app:-"]),
+                (None, vec![]), // Repeated native exit is a no-op.
+                (Some(b), vec!["mouseover:b:-", "mouseenter:app:-", "mouseenter:w:-", "mouseenter:p:-", "mouseenter:b:-"]),
+            ] {
+                runtime.eval::<()>("hoverLog = []; bubbleLog = []").await.unwrap();
+                host.queue_hover_and_mouse(target, position, 1, (revision, 2.0), Vec::new()).unwrap();
+                let log: Vec<String> = runtime.eval("hoverLog").await.unwrap();
+                assert_eq!(log, expected);
+                assert!(runtime.eval::<bool>("hoverChecks.every(Boolean)").await.unwrap());
+                if expected.first() == Some(&"mouseover:a:-") {
+                    let bubbles: Vec<String> = runtime.eval("bubbleLog").await.unwrap();
+                    assert_eq!(bubbles, ["mouseover:a", "mouseover:p", "mouseover:w", "mouseover:app"]);
+                }
+            }
+            // Keep the same leaf hovered but change its ancestry.
+            runtime.eval::<()>("q.appendChild(b); hoverLog = []").await.unwrap();
+            host.queue_hover_and_mouse(Some(b), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            assert_eq!(runtime.eval::<Vec<String>>("hoverLog").await.unwrap(), ["mouseleave:p:b", "mouseenter:q:b"]);
+
+            // A queued transition must skip disconnected targets, not their live ancestors.
+            host.queue_hover_and_mouse(None, position, 1, (revision, 2.0), Vec::new()).unwrap();
+            runtime.eval::<()>("hoverLog = []").await.unwrap();
+            host.queue_hover_and_mouse(Some(b), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            runtime.eval::<()>("q.removeChild(b); hoverLog = []").await.unwrap();
+            host.queue_hover_and_mouse(Some(q), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            assert_eq!(runtime.eval::<Vec<String>>("hoverLog").await.unwrap(), ["mouseover:q:b"]);
+            runtime.eval::<()>("w.removeChild(q); hoverLog = []").await.unwrap();
+            host.queue_hover_and_mouse(None, position, 1, (revision, 2.0), Vec::new()).unwrap();
+            assert_eq!(runtime.eval::<Vec<String>>("hoverLog").await.unwrap(), ["mouseleave:w:-", "mouseleave:app:-"]);
+            assert!(runtime.eval::<bool>("hoverChecks.every(Boolean)").await.unwrap());
+            assert!(hover_path(&state.borrow().dom, Some(b)).is_empty());
+
+            // Invalid input and rejected queues must not advance the hover path.
+            host.queue_hover_and_mouse(Some(a), PhysicalPosition::new(f64::NAN, 0.0), 1, (revision, 2.0), Vec::new()).unwrap();
+            assert!(host.hover_path.is_empty());
+            assert!(matches!(
+                host.queue_hover_and_mouse(Some(a), position, 1, (revision, 0.0), Vec::new()),
+                Err(HostError::InvalidScaleFactor(0.0))
+            ));
+            runtime.shutdown().await.unwrap();
+            driver.await.unwrap();
+            host.queue_hover_and_mouse(Some(a), position, 1, (revision, 2.0), Vec::new()).unwrap();
+            assert!(host.hover_path.is_empty());
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn mouse_input_reaches_dom_in_order_with_presented_coordinates() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1362,6 +1604,11 @@ mod tests {
                     .await
                     .unwrap();
                 let driver = tokio::task::spawn_local(driver.run());
+                let mut host = ApplicationHost::new(
+                    state.clone(),
+                    TextEngine::without_system_fonts(),
+                    RuntimeLifecycle::for_test(),
+                );
                 runtime
                     .eval::<()>(
                         r#"
@@ -1372,6 +1619,7 @@ mod tests {
                 mouseWindow.appendChild(mouseTarget);
                 app.appendChild(mouseWindow);
                 globalThis.inputLog = [];
+                mouseTarget.addEventListener('mouseenter', () => inputLog.push('enter'));
                 for (const type of ['mousedown', 'mouseup', 'mousemove', 'click']) {
                     mouseTarget.addEventListener(type, event => {
                         inputLog.push(`${event.type}:${event.button}:${event.buttons}`);
@@ -1428,27 +1676,37 @@ mod tests {
                         assert_eq!(event.buttons, buttons);
                         assert_eq!(event.related_target, None);
                     }
-                    state.borrow().enqueue_mouse_events(events).unwrap();
+                    host.queue_hover_and_mouse(
+                        Some(target),
+                        position,
+                        buttons,
+                        (plan.revision(), plan.scale_factor()),
+                        events,
+                    )
+                    .unwrap();
                 }
                 let log: Vec<String> = runtime.eval("inputLog").await.unwrap();
-                let expected: Vec<_> = [
-                    "mousedown:0:1",
-                    "mousemove:0:1",
-                    "mousedown:2:3",
-                    "mouseup:2:1",
-                    "mouseup:0:0",
-                    "click:0:0",
-                    "mousemove:0:0",
-                    "mousedown:1:4",
-                    "mouseup:1:0",
-                    "mousedown:3:8",
-                    "mouseup:3:0",
-                    "mousedown:4:16",
-                    "mouseup:4:0",
-                ]
-                .into_iter()
-                .flat_map(|event| [event, "bubble"])
-                .collect();
+                let expected: Vec<_> = std::iter::once("enter")
+                    .chain(
+                        [
+                            "mousedown:0:1",
+                            "mousemove:0:1",
+                            "mousedown:2:3",
+                            "mouseup:2:1",
+                            "mouseup:0:0",
+                            "click:0:0",
+                            "mousemove:0:0",
+                            "mousedown:1:4",
+                            "mouseup:1:0",
+                            "mousedown:3:8",
+                            "mouseup:3:0",
+                            "mousedown:4:16",
+                            "mouseup:4:0",
+                        ]
+                        .into_iter()
+                        .flat_map(|event| [event, "bubble"]),
+                    )
+                    .collect();
                 assert_eq!(log, expected);
                 assert_eq!(pressed, None);
 

@@ -396,6 +396,22 @@ define_class!(
             self.send_mouse_input(event, ElementState::Released);
         }
 
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            self.send(WindowEvent::CursorEntered {
+                position: self.mouse_position(event),
+                buttons: NSEvent::pressedMouseButtons() as u16,
+            });
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            self.send(WindowEvent::CursorLeft {
+                position: self.mouse_position(event),
+                buttons: NSEvent::pressedMouseButtons() as u16,
+            });
+        }
+
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.send_cursor_moved(event);
@@ -473,12 +489,14 @@ impl ContentView {
         this.setWantsLayer(true);
         this.setPostsFrameChangedNotifications(true);
         // InVisibleRect follows resizing automatically; the view owns the tracking area.
-        // SAFETY: ContentView implements mouseMoved: and outlives its tracking area.
+        // SAFETY: ContentView implements the requested mouse selectors and owns the area.
         let tracking = unsafe {
             NSTrackingArea::initWithRect_options_owner_userInfo(
                 NSTrackingArea::alloc(),
                 NSRect::default(),
                 NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::EnabledDuringMouseDrag
                     | NSTrackingAreaOptions::ActiveAlways
                     | NSTrackingAreaOptions::InVisibleRect,
                 Some(&this),

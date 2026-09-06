@@ -41,7 +41,9 @@ div.addEventListener("custom", event => {
 // @ts-expect-error Click listeners receive BurokkuClickEvent.
 div.addEventListener("click", (event: string) => void event);
 
-for (const type of ["mousedown", "mouseup", "mousemove"] as const) {
+for (const type of [
+  "mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "mouseenter", "mouseleave",
+] as const) {
   const listener: BurokkuEventListener<BurokkuMouseEvent<typeof type>> = function (event) {
     const eventType: typeof type = event.type;
     const buttons: number = event.buttons;
@@ -75,3 +77,23 @@ div.addEventListener("mousemove", event => {
 div.addEventListener("mousedown", (event: string) => void event);
 // @ts-expect-error A click-only listener cannot handle mouse movement.
 div.addEventListener("mousemove", clickListener);
+
+div.addEventListener("mouseenter", event => {
+  const type: "mouseenter" = event.type;
+  const related: BurokkuNode | null = event.relatedTarget;
+  void [type, related];
+});
+div.addEventListener("mouseleave", event => {
+  const type: "mouseleave" = event.type;
+  void type;
+});
+div.addEventListener("mouseover", event => {
+  const type: "mouseover" = event.type;
+  void type;
+});
+div.addEventListener("mouseout", event => {
+  const type: "mouseout" = event.type;
+  void type;
+});
+// @ts-expect-error Hover events are not clicks.
+div.addEventListener("mouseenter", clickListener);
