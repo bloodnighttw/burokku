@@ -107,35 +107,43 @@ fn mouse_events_for_input(
     position: PhysicalPosition<f64>,
     buttons: u16,
     input: Option<(ElementState, MouseButton)>,
-) -> Vec<NativeMouseEvent> {
-    let target = plan.hit_test_physical(position.x, position.y);
-    let (event_type, button, click) = match input {
-        Some((state, button)) => {
-            let click = recognize_primary_click(pressed_target, state, button, target);
+    captured_target: Option<NodeId>,
+) -> (Option<NodeId>, Vec<NativeMouseEvent>) {
+    let hit_target = plan.hit_test_physical(position.x, position.y);
+    let (event_type, button, click, emit_pointer) = match input {
+        Some((state, mouse_button)) => {
+            let click = recognize_primary_click(pressed_target, state, mouse_button, hit_target);
             let event_type = match state {
                 ElementState::Pressed => "mousedown",
                 ElementState::Released => "mouseup",
             };
-            let button = match button {
+            let button = match mouse_button {
                 MouseButton::Left => 0,
                 MouseButton::Middle => 1,
                 MouseButton::Right => 2,
                 MouseButton::Other(number) => number,
             };
-            (event_type, button, click)
+            let changed_button = match mouse_button {
+                MouseButton::Left => 1,
+                MouseButton::Right => 2,
+                MouseButton::Middle => 4,
+                MouseButton::Other(number) => 1_u16.checked_shl(u32::from(number)).unwrap_or(0),
+            };
+            let emit_pointer = match state {
+                ElementState::Pressed => changed_button != 0 && buttons == changed_button,
+                ElementState::Released => buttons == 0,
+            };
+            (event_type, button, click, emit_pointer)
         }
         None => {
             // A release outside this window must not leave an armed click behind.
             if buttons & 1 == 0 {
                 *pressed_target = None;
             }
-            ("mousemove", 0, None)
+            ("mousemove", 0, None, true)
         }
     };
-    let Some(target) = target else {
-        return Vec::new();
-    };
-    let mouse = NativeMouseEvent {
+    let event = |event_type, target, pointer_id| NativeMouseEvent {
         event_type,
         target,
         presented_revision: plan.revision(),
@@ -145,26 +153,31 @@ fn mouse_events_for_input(
         buttons,
         related_target: None,
         wheel_delta: None,
-        pointer_id: None,
+        pointer_id,
     };
-    let pointer = NativeMouseEvent {
-        event_type: match event_type {
-            "mousedown" => "pointerdown",
-            "mouseup" => "pointerup",
-            "mousemove" => "pointermove",
-            _ => unreachable!(),
-        },
-        pointer_id: Some(1),
-        ..mouse
-    };
-    let mut events = vec![pointer, mouse];
-    if click.is_some() {
-        events.push(NativeMouseEvent {
-            event_type: "click",
-            ..mouse
-        });
+    let mut events = Vec::new();
+    if emit_pointer {
+        if let Some(target) = hit_target.or(captured_target) {
+            let event_type = match event_type {
+                "mousedown" => "pointerdown",
+                "mouseup" => "pointerup",
+                "mousemove" => "pointermove",
+                _ => unreachable!(),
+            };
+            events.push(event(event_type, target, Some(1)));
+        }
     }
-    events
+    if let Some(target) = hit_target {
+        let mouse = event(event_type, target, None);
+        events.push(mouse);
+        if click.is_some() {
+            events.push(NativeMouseEvent {
+                event_type: "click",
+                ..mouse
+            });
+        }
+    }
+    (hit_target, events)
 }
 
 fn wheel_event_for_input(
@@ -440,6 +453,7 @@ pub(crate) struct ApplicationHost {
     presented: Option<PresentedFrame>,
     last_frame_failure: Option<FrameFailure>,
     hover_path: Vec<NodeId>,
+    pointer_hover_path: Vec<NodeId>,
     hover_window: Option<WindowId>,
     cursor: Option<(PhysicalPosition<f64>, u16)>,
     pressed_target: Option<NodeId>,
@@ -466,6 +480,7 @@ impl ApplicationHost {
             presented: None,
             last_frame_failure: None,
             hover_path: Vec::new(),
+            pointer_hover_path: Vec::new(),
             hover_window: None,
             cursor: None,
             pressed_target: None,
@@ -513,6 +528,7 @@ impl ApplicationHost {
         let window = self.windows.current().map(|window| window.id());
         if self.hover_window != window {
             self.hover_path.clear();
+            self.pointer_hover_path.clear();
             self.cursor = None;
             self.pressed_target = None;
             self.active_pointer = None;
@@ -538,27 +554,29 @@ impl ApplicationHost {
             }
             return Ok(());
         };
-        let starts_pointer = matches!(input, Some((ElementState::Pressed, _)));
-        let events = mouse_events_for_input(
+        let captured_target = self
+            .dom
+            .try_borrow()
+            .map_err(|_| HostError::DomBorrowConflict)?
+            .pointer_capture_target();
+        let (hit_target, events) = mouse_events_for_input(
             &frame.plan,
             &mut self.pressed_target,
             position,
             buttons,
             input,
+            captured_target,
         );
         let presented = (frame.revision(), frame.plan.scale_factor());
-        if starts_pointer && self.active_pointer.is_none() {
-            self.active_pointer = events.first().map(|event| (event.target, position));
+        if let Some(event) = events
+            .iter()
+            .find(|event| event.event_type == "pointerdown")
+        {
+            self.active_pointer = Some((event.target, position));
         } else if let Some((_, active_position)) = self.active_pointer.as_mut() {
             *active_position = position;
         }
-        let result = self.queue_hover_and_mouse(
-            events.first().map(|event| event.target),
-            position,
-            buttons,
-            presented,
-            events,
-        );
+        let result = self.queue_hover_and_mouse(hit_target, position, buttons, presented, events);
         if buttons == 0 {
             self.active_pointer = None;
         }
@@ -715,7 +733,22 @@ impl ApplicationHost {
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
         let next_path = hover_path(&state.dom, target);
+        let capture_active = state.pointer_capture_target().is_some();
         let mut batch = hover_events(&self.hover_path, &next_path, position, buttons, presented);
+        if capture_active {
+            batch.retain(|event| !event.event_type.starts_with("pointer"));
+        } else if self.pointer_hover_path != self.hover_path {
+            batch.retain(|event| !event.event_type.starts_with("pointer"));
+            let mut pointer_events = hover_events(
+                &self.pointer_hover_path,
+                &next_path,
+                position,
+                buttons,
+                presented,
+            );
+            pointer_events.retain(|event| event.event_type.starts_with("pointer"));
+            batch.extend(pointer_events);
+        }
         batch.extend(events);
         if !batch.is_empty() {
             // Boundary events precede input; mouseup and click remain in the same task.
@@ -725,7 +758,10 @@ impl ApplicationHost {
             }
         }
         // Do not advance hover state if the queue rejected the transition.
-        self.hover_path = next_path;
+        self.hover_path = next_path.clone();
+        if !capture_active {
+            self.pointer_hover_path = next_path;
+        }
         Ok(())
     }
 
@@ -1092,6 +1128,7 @@ impl ApplicationHost {
                 self.renderer = None;
                 self.presented = None;
                 self.hover_path.clear();
+                self.pointer_hover_path.clear();
                 self.cursor = None;
                 if self.ever_had_window {
                     self.request_exit();
@@ -1285,6 +1322,7 @@ impl ApplicationHandler for ApplicationHost {
                 self.renderer = None;
                 self.presented = None;
                 self.hover_path.clear();
+                self.pointer_hover_path.clear();
                 self.cursor = None;
                 self.windows.close();
                 self.request_exit();
@@ -1839,6 +1877,102 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn pointer_capture_suppresses_and_reconciles_boundaries() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+                let (runtime, driver) = runtime::Runtime::builder()
+                    .plugin(plugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+                let mut host = ApplicationHost::new(
+                    state.clone(),
+                    TextEngine::without_system_fonts(),
+                    RuntimeLifecycle::for_test(),
+                );
+                runtime
+                    .eval::<()>(
+                        r#"
+                        globalThis.captureWindow = app.createElement('window');
+                        globalThis.captureA = app.createElement('div');
+                        globalThis.captureB = app.createElement('div');
+                        captureWindow.appendChild(captureA);
+                        captureWindow.appendChild(captureB);
+                        app.appendChild(captureWindow);
+                        globalThis.pointerBoundaryLog = [];
+                        captureA.addEventListener('pointerdown', event =>
+                            captureA.setPointerCapture(event.pointerId));
+                        captureA.addEventListener('pointerleave', () =>
+                            pointerBoundaryLog.push('leave:a'));
+                        captureB.addEventListener('pointerenter', () =>
+                            pointerBoundaryLog.push('enter:b'));
+                        "#,
+                    )
+                    .await
+                    .unwrap();
+                let (a, b, revision) = {
+                    let state = state.borrow();
+                    let window = state.dom.children(state.dom.root()).unwrap()[0];
+                    let children = state.dom.children(window).unwrap();
+                    (children[0], children[1], state.dom.revision())
+                };
+                let position = PhysicalPosition::new(10.0, 10.0);
+                let pointer = |event_type, target, buttons| NativeMouseEvent {
+                    event_type,
+                    target,
+                    presented_revision: revision,
+                    client_x: 10.0,
+                    client_y: 10.0,
+                    button: 0,
+                    buttons,
+                    related_target: None,
+                    wheel_delta: None,
+                    pointer_id: Some(1),
+                };
+                host.queue_hover_and_mouse(
+                    Some(a),
+                    position,
+                    1,
+                    (revision, 1.0),
+                    vec![pointer("pointerdown", a, 1)],
+                )
+                .unwrap();
+                runtime.eval::<()>("pointerBoundaryLog = []").await.unwrap();
+                assert_eq!(state.borrow().pointer_capture_target(), Some(a));
+
+                host.queue_hover_and_mouse(
+                    Some(b),
+                    position,
+                    0,
+                    (revision, 1.0),
+                    vec![pointer("pointerup", b, 0)],
+                )
+                .unwrap();
+                assert!(runtime
+                    .eval::<bool>("pointerBoundaryLog.length === 0")
+                    .await
+                    .unwrap());
+                assert_eq!(state.borrow().pointer_capture_target(), None);
+
+                host.queue_hover_and_mouse(Some(b), position, 0, (revision, 1.0), Vec::new())
+                    .unwrap();
+                assert_eq!(
+                    runtime
+                        .eval::<Vec<String>>("pointerBoundaryLog")
+                        .await
+                        .unwrap(),
+                    ["leave:a", "enter:b"]
+                );
+
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn mouse_input_reaches_dom_in_order_with_presented_coordinates() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1898,32 +2032,61 @@ mod tests {
                 };
                 let position = PhysicalPosition::new(25.0, 20.0);
                 let mut pressed = None;
-                for (input, buttons) in [
-                    (Some((ElementState::Pressed, MouseButton::Left)), 1),
-                    (None, 1),
-                    (Some((ElementState::Pressed, MouseButton::Right)), 3),
-                    (Some((ElementState::Released, MouseButton::Right)), 1),
-                    (Some((ElementState::Released, MouseButton::Left)), 0),
-                    (None, 0),
-                    (Some((ElementState::Pressed, MouseButton::Middle)), 4),
-                    (Some((ElementState::Released, MouseButton::Middle)), 0),
-                    (Some((ElementState::Pressed, MouseButton::Other(3))), 8),
-                    (Some((ElementState::Released, MouseButton::Other(3))), 0),
-                    (Some((ElementState::Pressed, MouseButton::Other(4))), 16),
-                    (Some((ElementState::Released, MouseButton::Other(4))), 0),
+                for (input, buttons, expected_pointer) in [
+                    (
+                        Some((ElementState::Pressed, MouseButton::Left)),
+                        1,
+                        Some("pointerdown"),
+                    ),
+                    (None, 1, Some("pointermove")),
+                    (Some((ElementState::Pressed, MouseButton::Right)), 3, None),
+                    (Some((ElementState::Released, MouseButton::Right)), 1, None),
+                    (
+                        Some((ElementState::Released, MouseButton::Left)),
+                        0,
+                        Some("pointerup"),
+                    ),
+                    (None, 0, Some("pointermove")),
+                    (
+                        Some((ElementState::Pressed, MouseButton::Middle)),
+                        4,
+                        Some("pointerdown"),
+                    ),
+                    (
+                        Some((ElementState::Released, MouseButton::Middle)),
+                        0,
+                        Some("pointerup"),
+                    ),
+                    (
+                        Some((ElementState::Pressed, MouseButton::Other(3))),
+                        8,
+                        Some("pointerdown"),
+                    ),
+                    (
+                        Some((ElementState::Released, MouseButton::Other(3))),
+                        0,
+                        Some("pointerup"),
+                    ),
+                    (
+                        Some((ElementState::Pressed, MouseButton::Other(4))),
+                        16,
+                        Some("pointerdown"),
+                    ),
+                    (
+                        Some((ElementState::Released, MouseButton::Other(4))),
+                        0,
+                        Some("pointerup"),
+                    ),
                 ] {
-                    let events =
-                        mouse_events_for_input(&plan, &mut pressed, position, buttons, input);
-                    assert_eq!(events[0].pointer_id, Some(1));
-                    assert_eq!(events[1].pointer_id, None);
+                    let (hit_target, events) =
+                        mouse_events_for_input(&plan, &mut pressed, position, buttons, input, None);
+                    assert_eq!(hit_target, Some(target));
                     assert_eq!(
-                        events[0].event_type,
-                        match events[1].event_type {
-                            "mousedown" => "pointerdown",
-                            "mouseup" => "pointerup",
-                            "mousemove" => "pointermove",
-                            _ => unreachable!(),
-                        }
+                        events
+                            .iter()
+                            .find(|event| event.pointer_id.is_some())
+                            .map(|event| event.event_type),
+                        expected_pointer
                     );
                     for event in &events {
                         assert_eq!(event.target, target);
@@ -1986,18 +2149,34 @@ mod tests {
 
                 let down = Some((ElementState::Pressed, MouseButton::Left));
                 let up = Some((ElementState::Released, MouseButton::Left));
-                mouse_events_for_input(&plan, &mut pressed, position, 1, down);
+                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
                 let outside = PhysicalPosition::new(-1.0, -1.0);
-                assert!(mouse_events_for_input(&plan, &mut pressed, outside, 0, up).is_empty());
+                let (_, events) = mouse_events_for_input(&plan, &mut pressed, outside, 0, up, None);
+                assert!(events.is_empty());
                 assert_eq!(pressed, None);
 
-                mouse_events_for_input(&plan, &mut pressed, position, 1, down);
-                let events = mouse_events_for_input(
+                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let (hit_target, events) =
+                    mouse_events_for_input(&plan, &mut pressed, outside, 1, None, Some(target));
+                assert_eq!(hit_target, None);
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event_type, "pointermove");
+                assert_eq!(events[0].target, target);
+                let (hit_target, events) =
+                    mouse_events_for_input(&plan, &mut pressed, outside, 0, up, Some(target));
+                assert_eq!(hit_target, None);
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event_type, "pointerup");
+                assert_eq!(events[0].target, target);
+
+                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let (_, events) = mouse_events_for_input(
                     &plan,
                     &mut pressed,
                     PhysicalPosition::new(400.0, 400.0),
                     0,
                     up,
+                    None,
                 );
                 assert_eq!(events.len(), 2);
                 assert!(events.iter().all(|event| event.target == window));
@@ -2005,11 +2184,13 @@ mod tests {
                 assert_eq!(events[1].event_type, "mouseup");
 
                 // Recover when a release was missed outside the window.
-                mouse_events_for_input(&plan, &mut pressed, position, 1, down);
-                mouse_events_for_input(&plan, &mut pressed, position, 0, None);
+                let _ = mouse_events_for_input(&plan, &mut pressed, position, 1, down, None);
+                let _ = mouse_events_for_input(&plan, &mut pressed, position, 0, None, None);
                 assert_eq!(pressed, None);
                 assert_eq!(
-                    mouse_events_for_input(&plan, &mut pressed, position, 0, up).len(),
+                    mouse_events_for_input(&plan, &mut pressed, position, 0, up, None)
+                        .1
+                        .len(),
                     2
                 );
 
