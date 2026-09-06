@@ -1616,6 +1616,12 @@ mod tests {
         assert_eq!(keyboard_key(0, None), "Unidentified");
     }
 
+    #[test]
+    fn control_c_is_not_mistaken_for_enter() {
+        // AppKit reports Control+C as U+0003 from NSEvent.characters().
+        assert_eq!(keyboard_key(0x08, Some("\u{3}".into())), "c");
+    }
+
     #[derive(Debug)]
     struct DropProbe {
         name: &'static str,
