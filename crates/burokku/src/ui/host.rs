@@ -254,7 +254,7 @@ fn hover_events(
             button: 0,
             buttons,
             wheel_delta: None,
-            pointer_id: None,
+            pointer_id: event_type.starts_with("pointer").then_some(1),
         })
     };
     let old_target = previous.first().copied();
@@ -267,6 +267,7 @@ fn hover_events(
     // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
     // Comparing membership also handles a still-hovered subtree being reparented.
     for &node in previous.iter().filter(|node| !next.contains(node)) {
+        push("pointerleave", node, new_target);
         push("mouseleave", node, new_target);
     }
     if old_target != new_target {
@@ -275,6 +276,7 @@ fn hover_events(
         }
     }
     for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
+        push("pointerenter", node, old_target);
         push("mouseenter", node, old_target);
     }
     events
@@ -1688,6 +1690,32 @@ mod tests {
                 (parents[0], parents[1], children[0], children[1], state.dom.revision())
             };
             let position = PhysicalPosition::new(25.0, 40.0);
+            let a_path = hover_path(&state.borrow().dom, Some(a));
+            let enter = hover_events(&[], &a_path, position, 1, (revision, 2.0));
+            assert_eq!(
+                enter.iter().map(|event| event.event_type).collect::<Vec<_>>(),
+                [
+                    "mouseover",
+                    "pointerenter", "mouseenter",
+                    "pointerenter", "mouseenter",
+                    "pointerenter", "mouseenter",
+                    "pointerenter", "mouseenter",
+                ]
+            );
+            let leave = hover_events(&a_path, &[], position, 1, (revision, 2.0));
+            assert_eq!(
+                leave.iter().map(|event| event.event_type).collect::<Vec<_>>(),
+                [
+                    "mouseout",
+                    "pointerleave", "mouseleave",
+                    "pointerleave", "mouseleave",
+                    "pointerleave", "mouseleave",
+                    "pointerleave", "mouseleave",
+                ]
+            );
+            assert!(enter.iter().chain(&leave).all(|event|
+                event.pointer_id == event.event_type.starts_with("pointer").then_some(1)
+            ));
             for (target, expected) in [
                 (Some(a), vec!["mouseover:a:-", "mouseenter:app:-", "mouseenter:w:-", "mouseenter:p:-", "mouseenter:a:-"]),
                 (Some(a), vec![]), // Same target after movement or a repaint.

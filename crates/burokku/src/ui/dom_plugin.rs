@@ -702,7 +702,8 @@ mod tests {
                 globalThis.lastMouseEvent = null;
                 for (const type of ['click', 'mousedown', 'mouseup', 'mousemove',
                                     'mouseover', 'mouseout', 'mouseenter', 'mouseleave', 'wheel',
-                                    'pointerdown', 'pointerup', 'pointermove']) {
+                                    'pointerdown', 'pointerup', 'pointermove',
+                                    'pointerenter', 'pointerleave']) {
                     mouseTarget.addEventListener(type, function (event) {
                         lastMouseEvent = event;
                         mouseCalls.push('target');
@@ -755,6 +756,8 @@ mod tests {
                 "pointerdown",
                 "pointerup",
                 "pointermove",
+                "pointerenter",
+                "pointerleave",
             ] {
                 context
                     .eval::<(), _>("mouseCalls = []; mouseChecks = []")
@@ -775,7 +778,10 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let bubbles = !matches!(event_type, "mouseenter" | "mouseleave");
+                let bubbles = !matches!(
+                    event_type,
+                    "mouseenter" | "mouseleave" | "pointerenter" | "pointerleave"
+                );
                 let calls: Vec<String> = context.eval("mouseCalls").unwrap();
                 let expected = if bubbles {
                     vec!["target", "window", "app"]

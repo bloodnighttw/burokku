@@ -77,7 +77,9 @@ for (const type of [
   div.removeEventListener(type, listener);
 }
 
-for (const type of ["pointerdown", "pointerup", "pointermove"] as const) {
+for (const type of [
+  "pointerdown", "pointerup", "pointermove", "pointerenter", "pointerleave",
+] as const) {
   const listener: BurokkuEventListener<BurokkuPointerEvent<typeof type>> = event => {
     const eventType: typeof type = event.type;
     const pointerId: number = event.pointerId;
