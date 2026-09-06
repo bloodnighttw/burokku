@@ -240,6 +240,8 @@ The current public event set is:
 Keyboard input contains the platform virtual key code, layout-resolved text when
 available, pressed/released state, repeat status, and modifier snapshot. Mouse
 coordinates and sizes reported by events are physical pixels.
+Precise wheel deltas are physical pixels; non-precise deltas are lines. Positive
+wheel deltas move content right or down.
 `buttons` snapshots the pressed buttons after each event: left=1, right=2,
 middle=4, then extra buttons in successive bits (up to 16 buttons).
 

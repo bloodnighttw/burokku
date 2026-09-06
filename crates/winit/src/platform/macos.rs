@@ -396,6 +396,23 @@ define_class!(
             self.send_mouse_input(event, ElementState::Released);
         }
 
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let precise = event.hasPreciseScrollingDeltas();
+            let (delta_x, delta_y) = wheel_delta(
+                event.scrollingDeltaX(),
+                event.scrollingDeltaY(),
+                precise,
+                self.ivars().state.scale_factor(),
+            );
+            self.send(WindowEvent::MouseWheel {
+                delta_x,
+                delta_y,
+                precise,
+                position: self.mouse_position(event),
+            });
+        }
+
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, event: &NSEvent) {
             self.send(WindowEvent::CursorEntered {
@@ -578,6 +595,10 @@ impl ContentView {
     }
 }
 
+fn wheel_delta(delta_x: f64, delta_y: f64, precise: bool, scale_factor: f64) -> (f64, f64) {
+    let scale = if precise { scale_factor } else { 1.0 };
+    (delta_x * scale, delta_y * scale)
+}
 fn mouse_button_state(
     number: isize,
     state: ElementState,
@@ -1074,5 +1095,11 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn precise_wheel_deltas_are_physical_pixels() {
+        assert_eq!(wheel_delta(2.0, -3.0, true, 2.0), (4.0, -6.0));
+        assert_eq!(wheel_delta(2.0, -3.0, false, 2.0), (2.0, -3.0));
     }
 }
