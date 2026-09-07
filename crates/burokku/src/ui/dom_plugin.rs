@@ -2,7 +2,8 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use runtime::{rquickjs::Ctx, Plugin};
+use runtime::{rquickjs::Ctx, JsTaskQueue, JsTaskQueueError, Plugin};
+use winit::Modifiers;
 
 use super::{
     elements::{Dom, DomError, NodeId, ReclaimReport},
@@ -17,6 +18,83 @@ use lifetime::SharedWrapperRoots;
 
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Button(Option<u16>);
+
+impl Button {
+    pub(crate) const NONE: Self = Self(None);
+    pub(crate) const PRIMARY: Self = Self(Some(0));
+    pub(crate) const AUXILIARY: Self = Self(Some(1));
+    pub(crate) const SECONDARY: Self = Self(Some(2));
+    pub(crate) const BACK: Self = Self(Some(3));
+    pub(crate) const FORWARD: Self = Self(Some(4));
+
+    pub(crate) const fn from_code(code: u16) -> Self {
+        Self(Some(code))
+    }
+
+    pub(crate) fn code(self) -> i32 {
+        self.0.map_or(-1, i32::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Buttons(u16);
+
+impl Buttons {
+    pub(crate) const NONE: Self = Self(0);
+
+    pub(crate) const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub(crate) const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NativeMouseEvent {
+    pub(crate) event_type: &'static str,
+    pub(crate) target: NodeId,
+    pub(crate) presented_revision: u64,
+    pub(crate) client_x: f64,
+    pub(crate) client_y: f64,
+    pub(crate) button: Button,
+    pub(crate) buttons: Buttons,
+    pub(crate) related_target: Option<NodeId>,
+    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
+    pub(crate) pointer_id: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NativeMouseInput {
+    pub(crate) hit_target: Option<NodeId>,
+    pub(crate) event_type: Option<&'static str>,
+    pub(crate) click_target: Option<NodeId>,
+    pub(crate) presented_revision: u64,
+    pub(crate) client_x: f64,
+    pub(crate) client_y: f64,
+    pub(crate) button: Button,
+    pub(crate) buttons: Buttons,
+    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
+    pub(crate) pointer_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeKeyboardEvent {
+    pub(crate) event_type: &'static str,
+    pub(crate) target: NodeId,
+    pub(crate) key: String,
+    pub(crate) key_code: u16,
+    pub(crate) repeat: bool,
+    pub(crate) modifiers: Modifiers,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutRect {
     pub(crate) x: f32,
@@ -30,20 +108,90 @@ pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
     wrapper_roots: SharedWrapperRoots,
     pub(crate) last_reclaim: ReclaimReport,
-    layout: RefCell<Option<Rc<ComputedLayout>>>,
+    task_queue: Option<JsTaskQueue>,
+    presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
+    pointer_active: bool,
+    pointer_capture: Option<NodeId>,
+    announced_pointer_capture: Option<NodeId>,
+    pub(crate) hover_path: Vec<NodeId>,
 }
 
 impl UiDomState {
-    pub(crate) fn publish_layout(&self, computed: Rc<ComputedLayout>) {
-        self.layout.replace(Some(computed));
+    pub(crate) fn publish_presented_layout(&self, computed: Rc<ComputedLayout>) {
+        self.presented_layout.replace(Some(computed));
+    }
+
+    pub(crate) fn pointer_capture_target(&self) -> Option<NodeId> {
+        self.pointer_capture
+            .filter(|target| self.dom.is_connected(*target).unwrap_or(false))
+    }
+
+    fn clear_disconnected_pointer_capture(&mut self) {
+        if self.pointer_capture_target().is_none() {
+            self.pointer_capture = None;
+        }
+    }
+
+    pub(crate) fn enqueue_mouse_events(
+        &self,
+        events: Vec<NativeMouseEvent>,
+    ) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(move |context| {
+                for event in events {
+                    classes::dispatch_mouse_event(context, event)?;
+                }
+                Ok(())
+            })
+    }
+
+    pub(crate) fn enqueue_mouse_event_when_ready(
+        &self,
+        event: NativeMouseEvent,
+    ) -> Result<(), JsTaskQueueError> {
+        let queue = self
+            .task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .clone();
+        tokio::task::spawn_local(async move {
+            if let Err(error) = queue
+                .enqueue(move |context| classes::dispatch_mouse_event(context, event))
+                .await
+            {
+                eprintln!("Burokku warning: pointer cancellation stopped: {error}");
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn enqueue_mouse_input(
+        &self,
+        input: NativeMouseInput,
+    ) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(move |context| classes::dispatch_mouse_input(context, input))
+    }
+
+    pub(crate) fn enqueue_keyboard_event(
+        &self,
+        event: NativeKeyboardEvent,
+    ) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(move |context| classes::dispatch_keyboard_event(context, event))
     }
 
     pub(crate) fn layout_rect(&self, id: NodeId) -> Result<Option<LayoutRect>, DomError> {
         self.dom.element_tag(id)?;
-        let layout = self.layout.borrow();
+        let layout = self.presented_layout.borrow();
         Ok(layout
             .as_deref()
-            .filter(|layout| layout.revision() == self.dom.revision())
             .and_then(|layout| layout.box_for(id))
             .map(|computed_box| {
                 let origin = computed_box.border_origin();
@@ -69,7 +217,12 @@ impl DomPlugin {
             dom: Dom::new(),
             wrapper_roots: SharedWrapperRoots::default(),
             last_reclaim: ReclaimReport::default(),
-            layout: RefCell::new(None),
+            task_queue: None,
+            presented_layout: RefCell::new(None),
+            pointer_active: false,
+            pointer_capture: None,
+            announced_pointer_capture: None,
+            hover_path: Vec::new(),
         }));
         (
             Self {
@@ -103,6 +256,10 @@ impl Plugin for DomPlugin {
     }
 
     fn install<'js>(&self, context: &Ctx<'js>) -> runtime::Result<()> {
+        self.state
+            .try_borrow_mut()
+            .map_err(|_| runtime::rquickjs::Error::Unknown)?
+            .task_queue = JsTaskQueue::from_context(context).ok();
         classes::install(context, Rc::clone(&self.state))
     }
 }
@@ -233,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn element_exposes_only_current_read_only_layout_rects() {
+    fn element_exposes_last_presented_read_only_layout_rects() {
         let (plugin, state) = DomPlugin::new();
         let (_runtime, context) = context();
 
@@ -259,9 +416,9 @@ mod tests {
                 .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
                 .unwrap();
             let computed = layout.current_shared().unwrap();
-            state.publish_layout(Rc::clone(&computed));
+            state.publish_presented_layout(Rc::clone(&computed));
             assert!(Rc::ptr_eq(
-                state.layout.borrow().as_ref().unwrap(),
+                state.presented_layout.borrow().as_ref().unwrap(),
                 &computed
             ));
         }
@@ -288,7 +445,7 @@ mod tests {
             assert!(context
                 .eval::<bool, _>(
                     "layoutDiv.style.setProperty('width', '30px');\
-                     layoutDiv.getBoundingClientRect() === null",
+                     layoutDiv.getBoundingClientRect().width === 20",
                 )
                 .unwrap());
         });
@@ -298,7 +455,7 @@ mod tests {
             layout
                 .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
                 .unwrap();
-            state.publish_layout(layout.current_shared().unwrap());
+            state.publish_presented_layout(layout.current_shared().unwrap());
         }
         context.with(|context| {
             assert_eq!(
@@ -540,6 +697,576 @@ mod tests {
                 .eval::<bool, _>("listenerCycleWeakRef.deref() === undefined")
                 .unwrap());
         });
+    }
+
+    #[test]
+    fn connected_listener_wrapper_is_rooted_only_while_attached() {
+        let (plugin, _) = DomPlugin::new();
+        let (runtime, context) = context();
+
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    "globalThis.connectedListenerCalls = 0;\
+                     globalThis.weakRefDeref = WeakRef.prototype.deref;\
+                     WeakRef.prototype.deref = () => { throw new Error('overridden deref') };\
+                     (() => {\
+                       const windowNode = app.createElement('window');\
+                       const beforeAttach = app.createElement('div');\
+                       const afterAttach = app.createElement('div');\
+                       beforeAttach.addEventListener('click',\
+                         () => connectedListenerCalls++);\
+                       globalThis.beforeAttachWeakRef = new WeakRef(beforeAttach);\
+                       globalThis.afterAttachWeakRef = new WeakRef(afterAttach);\
+                       windowNode.appendChild(beforeAttach);\
+                       windowNode.appendChild(afterAttach);\
+                       app.appendChild(windowNode);\
+                       afterAttach.addEventListener('click',\
+                         () => connectedListenerCalls++);\
+                     })()",
+                )
+                .unwrap();
+        });
+        let (targets, presented_revision) = {
+            let state = plugin.state();
+            let window = state.dom.children(state.dom.root()).unwrap()[0];
+            (
+                state.dom.children(window).unwrap().to_vec(),
+                state.dom.revision(),
+            )
+        };
+
+        collect_garbage(&runtime, &context);
+        context.with(|context| {
+            assert!(context
+                .eval::<bool, _>(
+                    "weakRefDeref.call(beforeAttachWeakRef) !== undefined\
+                       && weakRefDeref.call(afterAttachWeakRef) !== undefined",
+                )
+                .unwrap());
+            for target in targets.iter().copied() {
+                classes::dispatch_mouse_event(
+                    &context,
+                    NativeMouseEvent {
+                        event_type: "click",
+                        target,
+                        presented_revision,
+                        client_x: 0.0,
+                        client_y: 0.0,
+                        button: Button::PRIMARY,
+                        buttons: Buttons::NONE,
+                        related_target: None,
+                        wheel_delta: None,
+                        pointer_id: None,
+                    },
+                )
+                .unwrap();
+            }
+            assert_eq!(context.eval::<u32, _>("connectedListenerCalls").unwrap(), 2);
+            context
+                .eval::<(), _>("app.removeChild(app.firstChild)")
+                .unwrap();
+        });
+
+        collect_garbage(&runtime, &context);
+        context.with(|context| {
+            assert!(context
+                .eval::<bool, _>(
+                    "weakRefDeref.call(beforeAttachWeakRef) === undefined\
+                       && weakRefDeref.call(afterAttachWeakRef) === undefined",
+                )
+                .unwrap());
+        });
+        plugin.reclaim_for_test();
+        assert!(targets
+            .into_iter()
+            .all(|target| plugin.state().dom.node(target).is_none()));
+    }
+
+    #[test]
+    fn pointing_dispatch_preserves_payload_and_propagation() {
+        let (plugin, _) = DomPlugin::new();
+        let (_runtime, context) = context();
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    r#"
+                globalThis.mouseWindow = app.createElement('window');
+                globalThis.mouseTarget = app.createElement('div');
+                globalThis.mouseRelated = app.createElement('div');
+                mouseWindow.appendChild(mouseTarget);
+                mouseWindow.appendChild(mouseRelated);
+                app.appendChild(mouseWindow);
+                globalThis.mouseCalls = [];
+                globalThis.mouseChecks = [];
+                globalThis.lastMouseEvent = null;
+                for (const type of ['click', 'wheel', 'pointerdown', 'pointerup', 'pointermove',
+                                    'pointerenter', 'pointerleave', 'pointercancel']) {
+                    mouseTarget.addEventListener(type, function (event) {
+                        lastMouseEvent = event;
+                        mouseCalls.push('target');
+                        mouseChecks.push(event.type === type,
+                            event.target === mouseTarget,
+                            event.currentTarget === mouseTarget, this === mouseTarget,
+                            event.clientX === 12.5, event.clientY === 8.25,
+                            event.button === 2, event.buttons === 3,
+                            event.relatedTarget === mouseRelated,
+                            type !== 'wheel' || (event.deltaX === 4.5 &&
+                                event.deltaY === -6.25 && event.deltaMode === 1),
+                            !type.startsWith('pointer') || (event.pointerId === 1 &&
+                                event.pointerType === 'mouse' && event.isPrimary));
+                        try { event.buttons = 99; } catch {}
+                        try { event.relatedTarget = mouseTarget; } catch {}
+                        try { event.deltaY = 99; } catch {}
+                        try { event.pointerId = 2; } catch {}
+                        mouseChecks.push(event.buttons === 3,
+                            event.relatedTarget === mouseRelated,
+                            type !== 'wheel' || event.deltaY === -6.25,
+                            !type.startsWith('pointer') || event.pointerId === 1);
+                        event.preventDefault();
+                    });
+                    mouseWindow.addEventListener(type, function (event) {
+                        mouseCalls.push('window');
+                        mouseChecks.push(event.currentTarget === mouseWindow,
+                            this === mouseWindow, event.target === mouseTarget);
+                    });
+                    app.addEventListener(type, () => mouseCalls.push('app'));
+                }
+            "#,
+                )
+                .unwrap();
+            let (target, related_target, presented_revision) = {
+                let state = plugin.state();
+                let window = state.dom.children(state.dom.root()).unwrap()[0];
+                let children = state.dom.children(window).unwrap();
+                (children[0], children[1], state.dom.revision())
+            };
+            for event_type in [
+                "click",
+                "wheel",
+                "pointerdown",
+                "pointerup",
+                "pointermove",
+                "pointerenter",
+                "pointerleave",
+                "pointercancel",
+            ] {
+                context
+                    .eval::<(), _>("mouseCalls = []; mouseChecks = []")
+                    .unwrap();
+                classes::dispatch_mouse_event(
+                    &context,
+                    NativeMouseEvent {
+                        event_type,
+                        target,
+                        presented_revision,
+                        client_x: 12.5,
+                        client_y: 8.25,
+                        button: Button::SECONDARY,
+                        buttons: Buttons::from_bits(3),
+                        related_target: Some(related_target),
+                        wheel_delta: (event_type == "wheel").then_some((4.5, -6.25, 1)),
+                        pointer_id: event_type.starts_with("pointer").then_some(1),
+                    },
+                )
+                .unwrap();
+                let bubbles = !matches!(event_type, "pointerenter" | "pointerleave");
+                let cancelable = bubbles && event_type != "pointercancel";
+                let calls: Vec<String> = context.eval("mouseCalls").unwrap();
+                let expected = if bubbles {
+                    vec!["target", "window", "app"]
+                } else {
+                    vec!["target"]
+                };
+                assert_eq!(calls, expected, "{event_type}");
+                assert!(
+                    context
+                        .eval::<bool, _>("mouseChecks.every(Boolean)")
+                        .unwrap(),
+                    "{event_type}"
+                );
+                let flags: Vec<bool> = context
+                    .eval(
+                        "[lastMouseEvent.bubbles, lastMouseEvent.cancelable,
+                      lastMouseEvent.defaultPrevented, lastMouseEvent.currentTarget === null]",
+                    )
+                    .unwrap();
+                assert_eq!(
+                    flags,
+                    [bubbles, cancelable, cancelable, true],
+                    "{event_type}"
+                );
+            }
+            // Leaving the window has no related node.
+            context
+                .eval::<(), _>("mouseRelated = null; mouseChecks = []")
+                .unwrap();
+            let leave = NativeMouseEvent {
+                event_type: "pointerleave",
+                target,
+                presented_revision,
+                client_x: 12.5,
+                client_y: 8.25,
+                button: Button::SECONDARY,
+                buttons: Buttons::from_bits(3),
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: Some(1),
+            };
+            classes::dispatch_mouse_event(&context, leave).unwrap();
+            assert!(context
+                .eval::<bool, _>("mouseChecks.every(Boolean)")
+                .unwrap());
+
+            // A queued event must not reach a target detached before dispatch.
+            context
+                .eval::<(), _>("mouseWindow.removeChild(mouseTarget); mouseCalls = []")
+                .unwrap();
+            classes::dispatch_mouse_event(&context, leave).unwrap();
+            assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
+        });
+    }
+
+    #[test]
+    fn pointer_capture_retargets_and_releases() {
+        let (plugin, _) = DomPlugin::new();
+        let (_runtime, context) = context();
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    r#"
+                globalThis.captureWindow = app.createElement('window');
+                globalThis.hitTarget = app.createElement('div');
+                globalThis.captureTarget = app.createElement('div');
+                captureWindow.appendChild(hitTarget);
+                captureWindow.appendChild(captureTarget);
+                app.appendChild(captureWindow);
+                globalThis.captureLog = [];
+                hitTarget.addEventListener('pointerdown', event => {
+                    captureLog.push('down:hit');
+                    captureTarget.setPointerCapture(event.pointerId);
+                    captureLog.push(`set:${captureTarget.hasPointerCapture(1)}`);
+                });
+                captureTarget.addEventListener('gotpointercapture', event => {
+                    event.preventDefault();
+                    captureLog.push(`got:${event.target === captureTarget}:${event.cancelable}:${event.defaultPrevented}`);
+                });
+                captureTarget.addEventListener('pointermove', event => {
+                    captureLog.push(`move:capture`);
+                    captureTarget.releasePointerCapture(event.pointerId);
+                    captureLog.push(`release:${captureTarget.hasPointerCapture(1)}`);
+                });
+                captureTarget.addEventListener('lostpointercapture', event => {
+                    event.preventDefault();
+                    captureLog.push(`lost:${event.target === captureTarget}:${captureTarget.hasPointerCapture(1)}:${event.defaultPrevented}`);
+                });
+                hitTarget.addEventListener('pointermove', event => {
+                    captureLog.push('move:hit');
+                    captureTarget.setPointerCapture(event.pointerId);
+                });
+                captureTarget.addEventListener('pointerup', () => {
+                    captureLog.push(`up:${captureTarget.hasPointerCapture(1)}`);
+                });
+            "#,
+                )
+                .unwrap();
+            let (hit_target, capture_target, revision) = {
+                let state = plugin.state();
+                let window = state.dom.children(state.dom.root()).unwrap()[0];
+                let children = state.dom.children(window).unwrap();
+                (children[0], children[1], state.dom.revision())
+            };
+            let pointer = |event_type, buttons| NativeMouseEvent {
+                event_type,
+                target: hit_target,
+                presented_revision: revision,
+                client_x: 10.0,
+                client_y: 20.0,
+                button: Button::PRIMARY,
+                buttons: Buttons::from_bits(buttons),
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: Some(1),
+            };
+            for event in [
+                pointer("pointerdown", 1),
+                pointer("pointermove", 1),
+                pointer("pointermove", 1),
+                pointer("pointerup", 0),
+            ] {
+                classes::dispatch_mouse_event(&context, event).unwrap();
+            }
+            assert_eq!(
+                context.eval::<Vec<String>, _>("captureLog").unwrap(),
+                [
+                    "down:hit",
+                    "set:true",
+                    "got:true:false:false",
+                    "move:capture",
+                    "release:false",
+                    "lost:true:false:false",
+                    "move:hit",
+                    "got:true:false:false",
+                    "up:true",
+                    "lost:true:false:false",
+                ]
+            );
+            assert_eq!(
+                context
+                    .eval::<Vec<String>, _>(
+                        r#"[
+                            (() => {
+                                try { captureTarget.setPointerCapture(2); return 'none'; }
+                                catch (error) { return error.name; }
+                            })(),
+                            (() => {
+                                try { captureTarget.releasePointerCapture(2); return 'none'; }
+                                catch (error) { return error.name; }
+                            })(),
+                        ]"#,
+                    )
+                    .unwrap(),
+                ["NotFoundError", "NotFoundError"]
+            );
+            classes::dispatch_mouse_event(&context, pointer("pointerdown", 1)).unwrap();
+            assert!(context
+                .eval::<bool, _>(
+                    "captureWindow.removeChild(captureTarget); \
+                     captureTarget.hasPointerCapture(1) === false",
+                )
+                .unwrap());
+            classes::dispatch_mouse_event(&context, pointer("pointerup", 0)).unwrap();
+            assert_ne!(hit_target, capture_target);
+        });
+    }
+
+    #[test]
+    fn keyboard_dispatch_preserves_payload_and_bubbles() {
+        let (plugin, _) = DomPlugin::new();
+        let (_runtime, context) = context();
+        context.with(|context| {
+            plugin.install(&context).unwrap();
+            context
+                .eval::<(), _>(
+                    r#"
+                globalThis.keyWindow = app.createElement('window');
+                app.appendChild(keyWindow);
+                globalThis.keyCalls = [];
+                globalThis.keyChecks = [];
+                globalThis.lastKeyEvent = null;
+                for (const type of ['keydown', 'keyup']) {
+                    keyWindow.addEventListener(type, function (event) {
+                        lastKeyEvent = event;
+                        keyCalls.push('window');
+                        keyChecks.push(event.type === type, event.target === keyWindow,
+                            event.currentTarget === keyWindow, this === keyWindow,
+                            event.key === 'A', event.keyCode === 0,
+                            event.repeat === (type === 'keydown'),
+                            event.shiftKey, event.ctrlKey, !event.altKey, event.metaKey,
+                            event.bubbles, event.cancelable);
+                        try { event.key = 'B'; } catch {}
+                        keyChecks.push(event.key === 'A');
+                        event.preventDefault();
+                    });
+                    app.addEventListener(type, event => {
+                        keyCalls.push('app');
+                        keyChecks.push(event.currentTarget === app);
+                    });
+                }
+            "#,
+                )
+                .unwrap();
+            let target = plugin
+                .state()
+                .dom
+                .children(plugin.state().dom.root())
+                .unwrap()[0];
+            let modifiers = Modifiers {
+                shift: true,
+                control: true,
+                command: true,
+                ..Modifiers::default()
+            };
+            for event_type in ["keydown", "keyup"] {
+                context
+                    .eval::<(), _>("keyCalls = []; keyChecks = []")
+                    .unwrap();
+                classes::dispatch_keyboard_event(
+                    &context,
+                    NativeKeyboardEvent {
+                        event_type,
+                        target,
+                        key: "A".into(),
+                        key_code: 0,
+                        repeat: event_type == "keydown",
+                        modifiers,
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    context.eval::<Vec<String>, _>("keyCalls").unwrap(),
+                    ["window", "app"]
+                );
+                assert!(context.eval::<bool, _>("keyChecks.every(Boolean)").unwrap());
+                let flags: Vec<bool> = context
+                    .eval("[lastKeyEvent.defaultPrevented, lastKeyEvent.currentTarget === null]")
+                    .unwrap();
+                assert_eq!(flags, [true, true]);
+            }
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_click_bubbles_and_honors_dispatch_controls() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (plugin, state) = DomPlugin::new();
+                let (runtime, driver) = runtime::Runtime::builder()
+                    .plugin(plugin)
+                    .build_driven()
+                    .await
+                    .unwrap();
+                let driver = tokio::task::spawn_local(driver.run());
+
+                runtime
+                    .eval::<()>(
+                        "globalThis.clickResult = [];\n\
+                         globalThis.clickEvent = null;\n\
+                         globalThis.immediateEvent = null;\n\
+                         globalThis.clickWindow = app.createElement('window');\n\
+                         globalThis.clickTarget = app.createElement('div');\n\
+                         globalThis.immediateTarget = app.createElement('div');\n\
+                         clickTarget.style.setProperty('width', '20px');\n\
+                         clickTarget.style.setProperty('height', '10px');\n\
+                         const removed = () => clickResult.push('removed');\n\
+                         clickTarget.addEventListener('click', function (event) {\n\
+                           globalThis.clickEvent = event;\n\
+                           clickResult.push(event.type,\n\
+                             String(event.target === clickTarget),\n\
+                             String(event.currentTarget === clickTarget),\n\
+                             String(this === clickTarget),\n\
+                             String(event.clientX), String(event.clientY),\n\
+                             String(event.button),\n\
+                             String(event.target.getBoundingClientRect().width));\n\
+                           event.preventDefault();\n\
+                           clickTarget.removeEventListener('click', removed);\n\
+                         });\n\
+                         clickTarget.addEventListener('click', removed);\n\
+                         clickTarget.addEventListener('click',\n\
+                           () => clickResult.push('target-2'));\n\
+                         clickTarget.addEventListener('click', () => {\n\
+                           throw new Error('expected listener failure');\n\
+                         });\n\
+                         clickTarget.addEventListener('click',\n\
+                           () => clickResult.push('after-error'));\n\
+                         clickWindow.addEventListener('click', function (event) {\n\
+                           clickResult.push(event.currentTarget === clickWindow\n\
+                             && this === clickWindow ? 'window' : 'wrong-window');\n\
+                           event.stopPropagation();\n\
+                         });\n\
+                         app.addEventListener('click', () => clickResult.push('app'));\n\
+                         immediateTarget.addEventListener('click', event => {\n\
+                           globalThis.immediateEvent = event;\n\
+                           clickResult.push('immediate');\n\
+                           event.stopImmediatePropagation();\n\
+                         });\n\
+                         immediateTarget.addEventListener('click',\n\
+                           () => clickResult.push('skipped'));\n\
+                         clickWindow.appendChild(clickTarget);\n\
+                         clickWindow.appendChild(immediateTarget);\n\
+                         app.appendChild(clickWindow);",
+                    )
+                    .await
+                    .unwrap();
+                let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
+                let (target, immediate_target, presented_revision) = {
+                    let state = state.borrow();
+                    layout
+                        .compute(&state.dom, LogicalViewport::new(320.0, 240.0).unwrap())
+                        .unwrap();
+                    let presented_revision = state.dom.revision();
+                    state.publish_presented_layout(layout.current_shared().unwrap());
+                    let window = state.dom.children(state.dom.root()).unwrap()[0];
+                    let children = state.dom.children(window).unwrap();
+                    (children[0], children[1], presented_revision)
+                };
+                runtime
+                    .eval::<()>("clickTarget.style.setProperty('width', '30px')")
+                    .await
+                    .unwrap();
+                assert!(state.borrow().dom.revision() > presented_revision);
+
+                state
+                    .borrow()
+                    .enqueue_mouse_events(vec![NativeMouseEvent {
+                        event_type: "click",
+                        target,
+                        presented_revision,
+                        client_x: 12.5,
+                        client_y: 8.25,
+                        button: Button::PRIMARY,
+                        buttons: Buttons::NONE,
+                        related_target: None,
+                        wheel_delta: None,
+                        pointer_id: None,
+                    }])
+                    .unwrap();
+                state
+                    .borrow()
+                    .enqueue_mouse_events(vec![NativeMouseEvent {
+                        event_type: "click",
+                        target: immediate_target,
+                        presented_revision,
+                        client_x: 20.0,
+                        client_y: 10.0,
+                        button: Button::PRIMARY,
+                        buttons: Buttons::NONE,
+                        related_target: None,
+                        wheel_delta: None,
+                        pointer_id: None,
+                    }])
+                    .unwrap();
+                let result: Vec<String> = runtime
+                    .eval(
+                        "[...clickResult,\n\
+                         String(clickEvent.defaultPrevented),\n\
+                         String(clickEvent.currentTarget === null),\n\
+                         String(clickEvent.bubbles),\n\
+                         String(clickEvent.cancelable),\n\
+                         String(immediateEvent.currentTarget === null)]",
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result,
+                    [
+                        "click",
+                        "true",
+                        "true",
+                        "true",
+                        "12.5",
+                        "8.25",
+                        "0",
+                        "20",
+                        "target-2",
+                        "after-error",
+                        "window",
+                        "immediate",
+                        "true",
+                        "true",
+                        "true",
+                        "true",
+                        "true",
+                    ]
+                );
+
+                runtime.shutdown().await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
     }
 
     #[test]

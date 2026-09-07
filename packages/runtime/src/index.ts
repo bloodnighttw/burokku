@@ -1,6 +1,75 @@
 export type BurokkuTagName = "div" | "flex" | "grid" | "text" | "window";
 
-export type BurokkuEventListener = (event: unknown) => void;
+export interface BurokkuEvent {
+  readonly type: string;
+  readonly target: BurokkuNode;
+  readonly currentTarget: BurokkuNode | null;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+
+  preventDefault(): void;
+  stopPropagation(): void;
+  stopImmediatePropagation(): void;
+}
+
+export interface BurokkuMouseEvent<Type extends string = string> extends BurokkuEvent {
+  readonly type: Type;
+  readonly clientX: number;
+  readonly clientY: number;
+  /** Changed button: primary=0, middle=1, secondary=2; 0 for movement and hover. */
+  readonly button: number;
+  /** Pressed-button bitmask: primary=1, secondary=2, middle=4. */
+  readonly buttons: number;
+  readonly relatedTarget: BurokkuNode | null;
+}
+
+export interface BurokkuClickEvent extends BurokkuMouseEvent<"click"> {}
+
+export interface BurokkuWheelEvent extends BurokkuMouseEvent<"wheel"> {
+  readonly deltaX: number;
+  readonly deltaY: number;
+  /** 0 for pixels, 1 for lines. */
+  readonly deltaMode: 0 | 1;
+}
+
+export interface BurokkuPointerEvent<Type extends string = string> extends BurokkuMouseEvent<Type> {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+}
+
+export interface BurokkuKeyboardEvent<Type extends string = string> extends BurokkuEvent {
+  readonly type: Type;
+  readonly key: string;
+  /** Platform virtual key code. */
+  readonly keyCode: number;
+  readonly repeat: boolean;
+  readonly shiftKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+}
+
+export interface BurokkuEventMap {
+  click: BurokkuClickEvent;
+  keydown: BurokkuKeyboardEvent<"keydown">;
+  keyup: BurokkuKeyboardEvent<"keyup">;
+  pointerdown: BurokkuPointerEvent<"pointerdown">;
+  pointerup: BurokkuPointerEvent<"pointerup">;
+  pointermove: BurokkuPointerEvent<"pointermove">;
+  pointerenter: BurokkuPointerEvent<"pointerenter">;
+  pointerleave: BurokkuPointerEvent<"pointerleave">;
+  pointercancel: BurokkuPointerEvent<"pointercancel">;
+  gotpointercapture: BurokkuPointerEvent<"gotpointercapture">;
+  lostpointercapture: BurokkuPointerEvent<"lostpointercapture">;
+  wheel: BurokkuWheelEvent;
+}
+
+export type BurokkuEventListener<Event extends BurokkuEvent = BurokkuEvent> = (
+  this: BurokkuNode,
+  event: Event,
+) => void;
 
 /** Shared behavior implemented by every Burokku-native node wrapper. */
 export interface Node<AllowedChild = never> {
@@ -25,7 +94,15 @@ export interface Node<AllowedChild = never> {
     oldChild: OldChild,
   ): OldChild;
   contains(other: BurokkuNode): boolean;
+  addEventListener<Type extends keyof BurokkuEventMap>(
+    type: Type,
+    callback: BurokkuEventListener<BurokkuEventMap[Type]>,
+  ): void;
   addEventListener(type: string, callback: BurokkuEventListener): void;
+  removeEventListener<Type extends keyof BurokkuEventMap>(
+    type: Type,
+    callback: BurokkuEventListener<BurokkuEventMap[Type]>,
+  ): void;
   removeEventListener(type: string, callback: BurokkuEventListener): void;
 }
 
@@ -49,7 +126,7 @@ export interface BurokkuStyleDeclaration {
   removeProperty(name: string): void;
 }
 
-/** Last successfully calculated border box in logical pixels. */
+/** Last successfully presented border box in logical pixels. */
 export interface BurokkuDOMRectReadOnly {
   readonly x: number;
   readonly y: number;
@@ -68,6 +145,10 @@ export interface Element<
 > extends Node<AllowedChild> {
   readonly localName: Tag;
   readonly style: BurokkuStyleDeclaration;
+
+  setPointerCapture(pointerId: number): void;
+  releasePointerCapture(pointerId: number): void;
+  hasPointerCapture(pointerId: number): boolean;
 
   getBoundingClientRect(): BurokkuDOMRectReadOnly | null;
   getAttribute(name: string): string | null;

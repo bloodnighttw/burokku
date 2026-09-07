@@ -231,13 +231,19 @@ The current public event set is:
 - `RedrawRequested`;
 - `Focused(bool)` and `Occluded(bool)`;
 - `KeyboardInput(KeyEvent)` and `ModifiersChanged(Modifiers)`;
-- `CursorMoved { position }`;
-- `MouseInput { state, button, position }`;
+- `CursorEntered { position, buttons }` and `CursorLeft { position, buttons }`
+  for content-area boundaries (also during dragging);
+- `CursorMoved { position, buttons }` (including movement while dragging);
+- `MouseInput { state, button, position, buttons }`;
 - `MouseWheel { delta_x, delta_y, precise, position }`.
 
 Keyboard input contains the platform virtual key code, layout-resolved text when
 available, pressed/released state, repeat status, and modifier snapshot. Mouse
 coordinates and sizes reported by events are physical pixels.
+Precise wheel deltas are physical pixels; non-precise deltas are lines. Positive
+wheel deltas move content right or down.
+`buttons` snapshots the pressed buttons after each event: left=1, right=2,
+middle=4, then extra buttons in successive bits (up to 16 buttons).
 
 ## Runtime behavior and constraints
 

@@ -1,11 +1,14 @@
 use std::{cell::Ref, collections::HashMap, rc::Rc};
 
 use rquickjs::{
-    class::Trace, object::Property, Class, Coerced, Constructor, Ctx, Function, IntoJs, JsLifetime,
-    Null, Object, Result, Value,
+    class::Trace, object::Property, prelude::This, CatchResultExt, Class, Coerced, Constructor,
+    Ctx, Function, IntoJs, JsLifetime, Null, Object, Result, Value,
 };
 
-use super::{errors, lifetime::SharedWrapperRoots, LayoutRect, SharedUiDom, UiDomState};
+use super::{
+    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeKeyboardEvent, NativeMouseEvent,
+    NativeMouseInput, SharedUiDom, UiDomState,
+};
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
 #[derive(Trace, JsLifetime)]
@@ -16,10 +19,20 @@ struct WrapperEntry<'js> {
 }
 
 #[derive(Trace, JsLifetime)]
+struct ListenerRoot<'js> {
+    #[qjs(skip_trace)]
+    id: NodeId,
+    wrapper: Object<'js>,
+}
+
+#[derive(Trace, JsLifetime)]
 #[rquickjs::class]
 struct WrapperCache<'js> {
     // ponytail: linear lookup; add a traced index only if large DOMs make this measurable.
     entries: Vec<WrapperEntry<'js>>,
+    listener_roots: Vec<ListenerRoot<'js>>,
+    weak_ref: Constructor<'js>,
+    weak_ref_deref: Function<'js>,
 }
 
 impl<'js> WrapperCache<'js> {
@@ -32,7 +45,149 @@ impl<'js> WrapperCache<'js> {
 
     fn remove(&mut self, id: NodeId) {
         self.entries.retain(|entry| entry.id != id);
+        self.listener_roots.retain(|entry| entry.id != id);
     }
+}
+
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class(rename = "BurokkuMouseEvent", rename_all = "camelCase")]
+struct MouseEvent<'js> {
+    #[qjs(get, enumerable, rename = "type")]
+    event_type: String,
+    #[qjs(get, enumerable)]
+    target: Object<'js>,
+    current_target: Option<Object<'js>>,
+    #[qjs(get, enumerable)]
+    client_x: f64,
+    #[qjs(get, enumerable)]
+    client_y: f64,
+    #[qjs(get, enumerable)]
+    button: i32,
+    #[qjs(get, enumerable)]
+    buttons: u16,
+    #[qjs(get, enumerable)]
+    delta_x: f64,
+    #[qjs(get, enumerable)]
+    delta_y: f64,
+    #[qjs(get, enumerable)]
+    delta_mode: u16,
+    #[qjs(get, enumerable)]
+    pointer_id: u32,
+    #[qjs(get, enumerable)]
+    pointer_type: String,
+    #[qjs(get, enumerable)]
+    is_primary: bool,
+    related_target: Option<Object<'js>>,
+    #[qjs(get, enumerable)]
+    bubbles: bool,
+    #[qjs(get, enumerable)]
+    cancelable: bool,
+    #[qjs(get, enumerable)]
+    default_prevented: bool,
+    propagation_stopped: bool,
+    immediate_propagation_stopped: bool,
+}
+
+#[rquickjs::methods]
+impl<'js> MouseEvent<'js> {
+    #[qjs(get, rename = "relatedTarget", enumerable)]
+    fn related_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
+        match &self.related_target {
+            Some(target) => Ok(target.clone().into_value()),
+            None => Null.into_js(&context),
+        }
+    }
+
+    #[qjs(get, rename = "currentTarget", enumerable)]
+    fn current_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
+        match &self.current_target {
+            Some(target) => Ok(target.clone().into_value()),
+            None => Null.into_js(&context),
+        }
+    }
+
+    #[qjs(rename = "preventDefault")]
+    fn prevent_default(&mut self) {
+        if self.cancelable {
+            self.default_prevented = true;
+        }
+    }
+
+    #[qjs(rename = "stopPropagation")]
+    fn stop_propagation(&mut self) {
+        self.propagation_stopped = true;
+    }
+
+    #[qjs(rename = "stopImmediatePropagation")]
+    fn stop_immediate_propagation(&mut self) {
+        self.propagation_stopped = true;
+        self.immediate_propagation_stopped = true;
+    }
+}
+
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class(rename = "BurokkuKeyboardEvent", rename_all = "camelCase")]
+struct KeyboardEvent<'js> {
+    #[qjs(get, enumerable, rename = "type")]
+    event_type: String,
+    #[qjs(get, enumerable)]
+    target: Object<'js>,
+    current_target: Option<Object<'js>>,
+    #[qjs(get, enumerable)]
+    key: String,
+    #[qjs(get, enumerable)]
+    key_code: u16,
+    #[qjs(get, enumerable)]
+    repeat: bool,
+    #[qjs(get, enumerable)]
+    shift_key: bool,
+    #[qjs(get, enumerable)]
+    ctrl_key: bool,
+    #[qjs(get, enumerable)]
+    alt_key: bool,
+    #[qjs(get, enumerable)]
+    meta_key: bool,
+    #[qjs(get, enumerable)]
+    bubbles: bool,
+    #[qjs(get, enumerable)]
+    cancelable: bool,
+    #[qjs(get, enumerable)]
+    default_prevented: bool,
+    propagation_stopped: bool,
+    immediate_propagation_stopped: bool,
+}
+
+#[rquickjs::methods]
+impl<'js> KeyboardEvent<'js> {
+    #[qjs(get, rename = "currentTarget", enumerable)]
+    fn current_target(&self, context: Ctx<'js>) -> Result<Value<'js>> {
+        match &self.current_target {
+            Some(target) => Ok(target.clone().into_value()),
+            None => Null.into_js(&context),
+        }
+    }
+
+    #[qjs(rename = "preventDefault")]
+    fn prevent_default(&mut self) {
+        self.default_prevented = true;
+    }
+
+    #[qjs(rename = "stopPropagation")]
+    fn stop_propagation(&mut self) {
+        self.propagation_stopped = true;
+    }
+
+    #[qjs(rename = "stopImmediatePropagation")]
+    fn stop_immediate_propagation(&mut self) {
+        self.propagation_stopped = true;
+        self.immediate_propagation_stopped = true;
+    }
+}
+
+#[derive(Clone, Trace, JsLifetime)]
+struct EventListener<'js> {
+    id: u64,
+    callback: Function<'js>,
 }
 
 #[derive(Trace, JsLifetime)]
@@ -44,7 +199,8 @@ pub(super) struct NativeNode<'js> {
     id: NodeId,
     #[qjs(skip_trace)]
     wrapper_roots: SharedWrapperRoots,
-    listeners: HashMap<String, Vec<Function<'js>>>,
+    listeners: HashMap<String, Vec<EventListener<'js>>>,
+    next_listener_id: u64,
 }
 
 impl Drop for NativeNode<'_> {
@@ -112,25 +268,95 @@ impl<'js> NativeNode<'js> {
     }
 
     #[qjs(rename = "addEventListener")]
-    fn add_event_listener(&mut self, event_type: Coerced<String>, callback: Function<'js>) {
-        let callbacks = self.listeners.entry(event_type.0).or_default();
-        if !callbacks.contains(&callback) {
-            callbacks.push(callback);
+    fn add_event_listener(
+        this: This<Class<'js, NativeNode<'js>>>,
+        context: Ctx<'js>,
+        event_type: Coerced<String>,
+        callback: Function<'js>,
+    ) -> Result<()> {
+        let state = this.0.borrow().state.clone();
+        {
+            let mut node = this.0.borrow_mut();
+            let event_type = event_type.0;
+            if node
+                .listeners
+                .get(&event_type)
+                .is_some_and(|listeners| listeners.iter().any(|item| item.callback == callback))
+            {
+                return Ok(());
+            }
+            let id = node.next_listener_id;
+            node.next_listener_id = node
+                .next_listener_id
+                .checked_add(1)
+                .expect("event listener IDs exhausted");
+            node.listeners
+                .entry(event_type)
+                .or_default()
+                .push(EventListener { id, callback });
         }
+        sync_connected_listener_roots(&context, &state)
     }
 
     #[qjs(rename = "removeEventListener")]
-    fn remove_event_listener(&mut self, event_type: Coerced<String>, callback: Value<'js>) {
+    fn remove_event_listener(
+        this: This<Class<'js, NativeNode<'js>>>,
+        context: Ctx<'js>,
+        event_type: Coerced<String>,
+        callback: Value<'js>,
+    ) -> Result<()> {
         let Some(callback) = callback.into_function() else {
-            return;
+            return Ok(());
         };
-        let Some(callbacks) = self.listeners.get_mut(&event_type.0) else {
-            return;
-        };
-        callbacks.retain(|candidate| candidate != &callback);
-        if callbacks.is_empty() {
-            self.listeners.remove(&event_type.0);
+        let state = this.0.borrow().state.clone();
+        {
+            let mut node = this.0.borrow_mut();
+            let event_type = event_type.0;
+            let Some(callbacks) = node.listeners.get_mut(&event_type) else {
+                return Ok(());
+            };
+            callbacks.retain(|candidate| candidate.callback != callback);
+            if callbacks.is_empty() {
+                node.listeners.remove(&event_type);
+            }
         }
+        sync_connected_listener_roots(&context, &state)
+    }
+
+    #[qjs(rename = "setPointerCapture")]
+    fn set_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<()> {
+        let mut state = borrow_mut(&context, &self.state)?;
+        if pointer_id != 1 || !state.pointer_active {
+            return errors::throw_named(&context, "NotFoundError", "pointer is not active");
+        }
+        if !state.dom.is_connected(self.id).unwrap_or(false) {
+            return errors::throw_named(
+                &context,
+                "InvalidStateError",
+                "capture target is not connected",
+            );
+        }
+        state.pointer_capture = Some(self.id);
+        Ok(())
+    }
+
+    #[qjs(rename = "releasePointerCapture")]
+    fn release_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<()> {
+        let mut state = borrow_mut(&context, &self.state)?;
+        if pointer_id != 1 || !state.pointer_active {
+            return errors::throw_named(&context, "NotFoundError", "pointer is not active");
+        }
+        if state.pointer_capture == Some(self.id) {
+            state.pointer_capture = None;
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "hasPointerCapture")]
+    fn has_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<bool> {
+        let mut state = borrow_mut(&context, &self.state)?;
+        state.clear_disconnected_pointer_capture();
+        Ok(pointer_id == 1 && state.pointer_capture == Some(self.id))
     }
 
     #[qjs(rename = "appendChild")]
@@ -144,6 +370,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .append_child(self.id, child_id);
         errors::map_dom(&context, "appendChild", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -164,6 +391,7 @@ impl<'js> NativeNode<'js> {
                 .dom
                 .insert_before(self.id, child_id, reference_id);
         errors::map_dom(&context, "insertBefore", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -178,6 +406,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .remove_child(self.id, child_id);
         errors::map_dom(&context, "removeChild", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -194,6 +423,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .replace_child(self.id, new_id, old_id);
         errors::map_dom(&context, "replaceChild", result)?;
+        sync_connected_listener_roots(&context, &self.state)?;
         Ok(old_child)
     }
 
@@ -216,7 +446,8 @@ impl<'js> NativeNode<'js> {
         let result = borrow_mut(&context, &self.state)?
             .dom
             .set_text_content(self.id, text.0);
-        errors::map_dom(&context, "set textContent", result).map(|_| ())
+        errors::map_dom(&context, "set textContent", result)?;
+        sync_connected_listener_roots(&context, &self.state)
     }
 
     #[qjs(get, rename = "nodeValue")]
@@ -457,6 +688,8 @@ impl NativeStyleDeclaration {
 const WRAPPER_CACHE: &str = "__burokkuWrapperCache";
 
 pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedUiDom) -> Result<()> {
+    let weak_ref: Constructor = context.globals().get("WeakRef")?;
+    let weak_ref_deref: Function = weak_ref.get::<_, Object>("prototype")?.get("deref")?;
     let node_methods = Class::<NativeNode<'js>>::prototype(context)?
         .expect("macro-backed Node class has a prototype");
     node_methods.prop(
@@ -465,6 +698,9 @@ pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedUiDom) -> Result<()>
             context.clone(),
             WrapperCache {
                 entries: Vec::new(),
+                listener_roots: Vec::new(),
+                weak_ref,
+                weak_ref_deref,
             },
         )?,
     )?;
@@ -538,6 +774,9 @@ fn install_facade<'js>(
         &element.get("prototype")?,
         node_methods,
         &[
+            "setPointerCapture",
+            "releasePointerCapture",
+            "hasPointerCapture",
             "localName",
             "getBoundingClientRect",
             "getAttribute",
@@ -617,28 +856,71 @@ fn wrapper_cache<'js>(context: &Ctx<'js>) -> Result<Class<'js, WrapperCache<'js>
         .get(WRAPPER_CACHE)
 }
 
+fn sync_connected_listener_roots<'js>(context: &Ctx<'js>, state: &SharedUiDom) -> Result<()> {
+    // ponytail: linear scan; index listener-bearing wrappers only if mutations make this measurable.
+    // ponytail: detached descendants survive only while their wrappers are live; root detached
+    // component groups if browser-compatible subtree retention becomes necessary.
+    let cache = wrapper_cache(context)?;
+    borrow_mut(context, state)?.clear_disconnected_pointer_capture();
+    let (candidates, deref) = {
+        let cache = cache.borrow();
+        (
+            cache
+                .entries
+                .iter()
+                .map(|entry| (entry.id, entry.reference.clone()))
+                .collect::<Vec<_>>(),
+            cache.weak_ref_deref.clone(),
+        )
+    };
+    let candidates: Vec<_> = {
+        let state = borrow(context, state)?;
+        candidates
+            .into_iter()
+            .filter(|(id, _)| matches!(state.dom.is_connected(*id), Ok(true)))
+            .collect()
+    };
+
+    let mut roots = Vec::new();
+    for (id, reference) in candidates {
+        let Some(wrapper) = deref.call::<_, Option<Object>>((This(reference),))? else {
+            continue;
+        };
+        let node =
+            Class::<NativeNode>::from_object(&wrapper).expect("wrapped nodes use NativeNode");
+        if !node.borrow().listeners.is_empty() {
+            roots.push(ListenerRoot { id, wrapper });
+        }
+    }
+    cache.borrow_mut().listener_roots = roots;
+    Ok(())
+}
+
 fn cached_wrapper<'js>(
     cache: &Class<'js, WrapperCache<'js>>,
     id: NodeId,
 ) -> Result<Option<Object<'js>>> {
-    let Some(reference) = cache.borrow().reference(id) else {
+    let (reference, deref) = {
+        let cache = cache.borrow();
+        (cache.reference(id), cache.weak_ref_deref.clone())
+    };
+    let Some(reference) = reference else {
         return Ok(None);
     };
-    let deref: Function = reference.get("deref")?;
-    deref.call((rquickjs::function::This(reference),))
+    deref.call((This(reference),))
 }
 
 fn cache_wrapper<'js>(
-    context: &Ctx<'js>,
     cache: &Class<'js, WrapperCache<'js>>,
     id: NodeId,
     wrapper: &Object<'js>,
 ) -> Result<()> {
-    let weak_ref: Constructor = context.globals().get("WeakRef")?;
-    cache.borrow_mut().entries.push(WrapperEntry {
-        id,
-        reference: weak_ref.construct((wrapper.clone(),))?,
-    });
+    let weak_ref = cache.borrow().weak_ref.clone();
+    let reference = weak_ref.construct((wrapper.clone(),))?;
+    cache
+        .borrow_mut()
+        .entries
+        .push(WrapperEntry { id, reference });
     Ok(())
 }
 
@@ -689,6 +971,7 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             id,
             wrapper_roots,
             listeners: HashMap::new(),
+            next_listener_id: 0,
         },
         prototype,
     )?;
@@ -705,7 +988,6 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
     }
 
     cache_wrapper(
-        context,
         &cache,
         id,
         node.as_value()
@@ -713,6 +995,421 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
             .expect("class instance is an object"),
     )?;
     Ok(node.into_inner())
+}
+
+fn hover_path(state: &UiDomState, target: Option<NodeId>) -> Vec<NodeId> {
+    let mut path = Vec::new();
+    let mut current = target.filter(|id| state.dom.is_connected(*id).unwrap_or(false));
+    while let Some(id) = current {
+        path.push(id);
+        current = state
+            .dom
+            .parent_node(id)
+            .expect("hover path contains live nodes");
+    }
+    path
+}
+
+fn hover_events(
+    previous: &[NodeId],
+    next: &[NodeId],
+    input: NativeMouseInput,
+) -> Vec<NativeMouseEvent> {
+    if previous == next {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let mut push = |event_type, target, related_target| {
+        events.push(NativeMouseEvent {
+            event_type,
+            target,
+            related_target,
+            presented_revision: input.presented_revision,
+            client_x: input.client_x,
+            client_y: input.client_y,
+            button: input.button,
+            buttons: input.buttons,
+            wheel_delta: None,
+            pointer_id: Some(1),
+        });
+    };
+    let old_target = previous.first().copied();
+    let new_target = next.first().copied();
+    // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
+    // Comparing membership also handles a still-hovered subtree being reparented.
+    for &node in previous.iter().filter(|node| !next.contains(node)) {
+        push("pointerleave", node, new_target);
+    }
+    for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
+        push("pointerenter", node, old_target);
+    }
+    events
+}
+
+pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let boundaries = {
+        let mut state = borrow_mut(context, &state)?;
+        if state.pointer_capture_target().is_some() {
+            Vec::new()
+        } else {
+            let next = hover_path(&state, input.hit_target);
+            let events = hover_events(&state.hover_path, &next, input);
+            state.hover_path = next;
+            events
+        }
+    };
+    for event in boundaries {
+        dispatch_mouse_event(context, event)?;
+    }
+
+    if let Some(event_type) = input.event_type {
+        let target = {
+            let state = borrow(context, &state)?;
+            if input.pointer_id.is_some() {
+                state.pointer_capture_target().or(input.hit_target)
+            } else {
+                input.hit_target
+            }
+        };
+        if let Some(target) = target {
+            dispatch_mouse_event(
+                context,
+                NativeMouseEvent {
+                    event_type,
+                    target,
+                    presented_revision: input.presented_revision,
+                    client_x: input.client_x,
+                    client_y: input.client_y,
+                    button: input.button,
+                    buttons: input.buttons,
+                    related_target: None,
+                    wheel_delta: input.wheel_delta,
+                    pointer_id: input.pointer_id,
+                },
+            )?;
+        }
+    }
+
+    if let Some(target) = input.click_target {
+        dispatch_mouse_event(
+            context,
+            NativeMouseEvent {
+                event_type: "click",
+                target,
+                presented_revision: input.presented_revision,
+                client_x: input.client_x,
+                client_y: input.client_y,
+                button: input.button,
+                buttons: input.buttons,
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEvent) -> Result<()> {
+    let routes_through_capture = matches!(
+        mouse.event_type,
+        "pointerdown" | "pointerup" | "pointermove" | "pointercancel"
+    );
+    if !routes_through_capture {
+        return dispatch_mouse_event_inner(context, mouse);
+    }
+
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    if mouse.event_type == "pointerdown" {
+        borrow_mut(context, &state)?.pointer_active = true;
+    }
+    dispatch_pointer_capture_transitions(context, &state, mouse)?;
+    if let Some(target) = borrow(context, &state)?.pointer_capture {
+        mouse.target = target;
+    }
+
+    let result = dispatch_mouse_event_inner(context, mouse);
+    if mouse.event_type == "pointercancel"
+        || (mouse.event_type == "pointerup" && mouse.buttons.is_empty())
+    {
+        let mut state = borrow_mut(context, &state)?;
+        state.pointer_active = false;
+        state.pointer_capture = None;
+    }
+    let transitions = dispatch_pointer_capture_transitions(context, &state, mouse);
+    result?;
+    transitions
+}
+
+fn dispatch_pointer_capture_transitions(
+    context: &Ctx<'_>,
+    state: &SharedUiDom,
+    source: NativeMouseEvent,
+) -> Result<()> {
+    let transitions = {
+        let mut state = borrow_mut(context, state)?;
+        if state
+            .pointer_capture
+            .is_some_and(|target| !state.dom.is_connected(target).unwrap_or(false))
+        {
+            state.pointer_capture = None;
+        }
+        let previous = state.announced_pointer_capture;
+        let next = state.pointer_capture;
+        if previous == next {
+            return Ok(());
+        }
+        state.announced_pointer_capture = next;
+        [
+            ("lostpointercapture", previous),
+            ("gotpointercapture", next),
+        ]
+    };
+
+    for (event_type, target) in transitions {
+        let Some(target) = target else {
+            continue;
+        };
+        dispatch_mouse_event_inner(
+            context,
+            NativeMouseEvent {
+                event_type,
+                target,
+                related_target: None,
+                wheel_delta: None,
+                pointer_id: Some(1),
+                ..source
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn dispatch_mouse_event_inner(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let bubbles = !matches!(mouse.event_type, "pointerenter" | "pointerleave");
+    let (path, related_target) = {
+        let state = borrow(context, &state)?;
+        debug_assert!(mouse.presented_revision <= state.dom.revision());
+        if !state.dom.is_connected(mouse.target).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let mut path = Vec::new();
+        let mut current = Some(mouse.target);
+        while let Some(id) = current {
+            path.push(id);
+            if !bubbles {
+                break;
+            }
+            current = errors::map_dom(
+                context,
+                "build mouse propagation path",
+                state.dom.parent_node(id),
+            )?;
+        }
+        (
+            path,
+            mouse
+                .related_target
+                .filter(|id| state.dom.node(*id).is_some()),
+        )
+    };
+
+    let mut listeners = Vec::with_capacity(path.len());
+    for id in path {
+        let current = wrap_node(context, &state, id)?;
+        let node =
+            Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+        let callbacks = node
+            .borrow()
+            .listeners
+            .get(mouse.event_type)
+            .cloned()
+            .unwrap_or_default();
+        listeners.push((current, callbacks));
+    }
+    if listeners.iter().all(|(_, callbacks)| callbacks.is_empty()) {
+        return Ok(());
+    }
+
+    let target = listeners[0].0.clone();
+    let related_target = related_target
+        .map(|id| wrap_node(context, &state, id))
+        .transpose()?;
+    let (delta_x, delta_y, delta_mode) = mouse.wheel_delta.unwrap_or((0.0, 0.0, 0));
+    let pointer_id = mouse.pointer_id.unwrap_or(0);
+    let cancelable = bubbles
+        && !matches!(
+            mouse.event_type,
+            "pointercancel" | "gotpointercapture" | "lostpointercapture"
+        );
+    let event = Class::instance(
+        context.clone(),
+        MouseEvent {
+            event_type: mouse.event_type.into(),
+            target,
+            current_target: None,
+            client_x: mouse.client_x,
+            client_y: mouse.client_y,
+            button: mouse.button.code(),
+            buttons: mouse.buttons.bits(),
+            delta_x,
+            delta_y,
+            delta_mode,
+            pointer_id,
+            pointer_type: if pointer_id == 0 { "" } else { "mouse" }.into(),
+            is_primary: pointer_id != 0,
+            related_target,
+            bubbles,
+            cancelable,
+            default_prevented: false,
+            propagation_stopped: false,
+            immediate_propagation_stopped: false,
+        },
+    )?;
+
+    for (current, callbacks) in listeners {
+        event.borrow_mut().current_target = Some(current.clone());
+        for listener in callbacks {
+            let node =
+                Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+            let still_registered = node
+                .borrow()
+                .listeners
+                .get(mouse.event_type)
+                .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
+            if !still_registered {
+                continue;
+            }
+            if let Err(error) = listener
+                .callback
+                .call::<_, ()>((This(current.clone()), event.clone()))
+                .catch(context)
+            {
+                eprintln!("Burokku {} listener failed: {error}", mouse.event_type);
+            }
+            if event.borrow().immediate_propagation_stopped {
+                break;
+            }
+        }
+        if event.borrow().propagation_stopped {
+            break;
+        }
+    }
+    event.borrow_mut().current_target = None;
+    Ok(())
+}
+
+pub(super) fn dispatch_keyboard_event(
+    context: &Ctx<'_>,
+    keyboard: NativeKeyboardEvent,
+) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let path = {
+        let state = borrow(context, &state)?;
+        if !state.dom.is_connected(keyboard.target).unwrap_or(false) {
+            return Ok(());
+        }
+        let mut path = Vec::new();
+        let mut current = Some(keyboard.target);
+        while let Some(id) = current {
+            path.push(id);
+            current = errors::map_dom(
+                context,
+                "build keyboard propagation path",
+                state.dom.parent_node(id),
+            )?;
+        }
+        path
+    };
+
+    let mut listeners = Vec::with_capacity(path.len());
+    for id in path {
+        let current = wrap_node(context, &state, id)?;
+        let node =
+            Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+        let callbacks = node
+            .borrow()
+            .listeners
+            .get(keyboard.event_type)
+            .cloned()
+            .unwrap_or_default();
+        listeners.push((current, callbacks));
+    }
+    if listeners.iter().all(|(_, callbacks)| callbacks.is_empty()) {
+        return Ok(());
+    }
+
+    let target = listeners[0].0.clone();
+    let event = Class::instance(
+        context.clone(),
+        KeyboardEvent {
+            event_type: keyboard.event_type.into(),
+            target,
+            current_target: None,
+            key: keyboard.key,
+            key_code: keyboard.key_code,
+            repeat: keyboard.repeat,
+            shift_key: keyboard.modifiers.shift,
+            ctrl_key: keyboard.modifiers.control,
+            alt_key: keyboard.modifiers.alt,
+            meta_key: keyboard.modifiers.command,
+            bubbles: true,
+            cancelable: true,
+            default_prevented: false,
+            propagation_stopped: false,
+            immediate_propagation_stopped: false,
+        },
+    )?;
+
+    for (current, callbacks) in listeners {
+        event.borrow_mut().current_target = Some(current.clone());
+        for listener in callbacks {
+            let node =
+                Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
+            let still_registered = node
+                .borrow()
+                .listeners
+                .get(keyboard.event_type)
+                .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
+            if !still_registered {
+                continue;
+            }
+            if let Err(error) = listener
+                .callback
+                .call::<_, ()>((This(current.clone()), event.clone()))
+                .catch(context)
+            {
+                eprintln!("Burokku {} listener failed: {error}", keyboard.event_type);
+            }
+            if event.borrow().immediate_propagation_stopped {
+                break;
+            }
+        }
+        if event.borrow().propagation_stopped {
+            break;
+        }
+    }
+    event.borrow_mut().current_target = None;
+    Ok(())
 }
 
 fn layout_rect_object<'js>(context: &Ctx<'js>, rect: LayoutRect) -> Result<Object<'js>> {

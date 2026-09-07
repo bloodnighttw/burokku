@@ -2,9 +2,9 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
-    fmt,
+    fmt, mem,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr::{self, NonNull},
     rc::Rc,
@@ -13,7 +13,10 @@ use std::{
 };
 
 use crate::{event_loop::EventLoopWaker, window::WindowState};
-use crate::{Error, LogicalSize, PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId};
+use crate::{
+    ElementState, Error, KeyEvent, LogicalSize, Modifiers, MouseButton, PhysicalPosition,
+    PhysicalSize, Window, WindowAttributes, WindowEvent, WindowId,
+};
 use core_foundation_sys::{
     base::{kCFAllocatorDefault, CFRelease},
     date::CFAbsoluteTimeGetCurrent,
@@ -23,14 +26,15 @@ use dispatch2::MainThreadBound;
 use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
-    runtime::ProtocolObject,
-    sel, DefinedClass, MainThreadOnly,
+    runtime::{Imp, ProtocolObject, Sel},
+    sel, AnyThread, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventSubtype, NSEventTrackingRunLoopMode, NSEventType, NSView,
-    NSViewFrameDidChangeNotification, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventSubtype, NSEventTrackingRunLoopMode, NSEventType, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSViewFrameDidChangeNotification,
+    NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint,
@@ -45,6 +49,60 @@ use raw_window_handle::{
 use super::PlatformTick;
 
 const DORMANT_TIMER_INTERVAL: f64 = 86_400.0;
+
+type SendEvent = extern "C" fn(&NSApplication, Sel, &NSEvent);
+
+static ORIGINAL_SEND_EVENT: MainThreadBound<Cell<Option<SendEvent>>> = MainThreadBound::new(
+    Cell::new(None),
+    // SAFETY: This static is only accessed with a real main-thread marker.
+    unsafe { MainThreadMarker::new_unchecked() },
+);
+
+extern "C" fn send_event(app: &NSApplication, selector: Sel, event: &NSEvent) {
+    let mtm = MainThreadMarker::from(app);
+    if event.r#type() == NSEventType::KeyUp
+        && event
+            .modifierFlags()
+            .contains(NSEventModifierFlags::Command)
+    {
+        let window = app
+            .keyWindow()
+            .or_else(|| app.windowWithWindowNumber(event.windowNumber()))
+            .or_else(|| {
+                // Headless AppKit leaves synthetic events and the sole window unnumbered.
+                let windows = app.windows();
+                (windows.len() == 1).then(|| windows.objectAtIndex(0))
+            });
+        if let Some(window) = window {
+            window.sendEvent(event);
+        }
+        return;
+    }
+
+    ORIGINAL_SEND_EVENT
+        .get(mtm)
+        .get()
+        .expect("sendEvent: override was not initialized")(app, selector, event);
+}
+
+fn override_send_event(app: &NSApplication) {
+    let mtm = MainThreadMarker::from(app);
+    let original = ORIGINAL_SEND_EVENT.get(mtm);
+    if original.get().is_some() {
+        return;
+    }
+
+    let method = app
+        .class()
+        .instance_method(sel!(sendEvent:))
+        .expect("NSApplication must implement sendEvent:");
+    // SAFETY: send_event has the Objective-C sendEvent: method signature.
+    let replacement = unsafe { mem::transmute::<SendEvent, Imp>(send_event) };
+    // SAFETY: replacement has the same signature and requirements as sendEvent:.
+    let previous = unsafe { method.set_implementation(replacement) };
+    // SAFETY: previous was the implementation of sendEvent: and has its signature.
+    original.set(Some(unsafe { mem::transmute::<Imp, SendEvent>(previous) }));
+}
 
 struct PlatformWakeState {
     run_loop: usize,
@@ -348,6 +406,7 @@ impl WindowDelegate {
 struct ContentViewIvars {
     state: Arc<WindowState>,
     dispatcher: Rc<EventDispatcher>,
+    pressed_modifier_keys: RefCell<HashSet<u16>>,
 }
 
 define_class!(
@@ -362,6 +421,130 @@ define_class!(
     unsafe impl NSObjectProtocol for ContentView {}
 
     impl ContentView {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            self.send_key_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, event: &NSEvent) {
+            self.send_key_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            let modifiers = event_modifiers(event);
+            let state = modifier_key_state(
+                event.keyCode(),
+                modifiers,
+                &mut self.ivars().pressed_modifier_keys.borrow_mut(),
+            );
+            if let Some(state) = state {
+                self.send(WindowEvent::KeyboardInput(KeyEvent {
+                    key_code: event.keyCode(),
+                    text: None,
+                    logical_text: None,
+                    state,
+                    repeat: false,
+                    modifiers,
+                }));
+            }
+            self.send(WindowEvent::ModifiersChanged(modifiers));
+        }
+
+        #[unsafe(method(_wantsKeyDownForEvent:))]
+        fn wants_key_down_for_event(&self, _event: &NSEvent) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Pressed);
+        }
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            self.send_mouse_input(event, ElementState::Released);
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let precise = event.hasPreciseScrollingDeltas();
+            let (delta_x, delta_y) = wheel_delta(
+                event.scrollingDeltaX(),
+                event.scrollingDeltaY(),
+                precise,
+                self.ivars().state.scale_factor(),
+            );
+            self.send(WindowEvent::MouseWheel {
+                delta_x,
+                delta_y,
+                precise,
+                position: self.mouse_position(event),
+            });
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            self.send(WindowEvent::CursorEntered {
+                position: self.mouse_position(event),
+                buttons: NSEvent::pressedMouseButtons() as u16,
+            });
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            self.send(WindowEvent::CursorLeft {
+                position: self.mouse_position(event),
+                buttons: NSEvent::pressedMouseButtons() as u16,
+            });
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, event: &NSEvent) {
+            self.send_cursor_moved(event);
+        }
+
         #[unsafe(method(frameDidChange:))]
         fn frame_did_change(&self, _notification: &NSNotification) {
             let scale_factor = self
@@ -411,13 +594,33 @@ impl ContentView {
         state: Arc<WindowState>,
         dispatcher: Rc<EventDispatcher>,
     ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ContentViewIvars { state, dispatcher });
+        let this = Self::alloc(mtm).set_ivars(ContentViewIvars {
+            state,
+            dispatcher,
+            pressed_modifier_keys: RefCell::new(HashSet::new()),
+        });
         // SAFETY: The selector and argument exactly match NSView's designated
         // frame initializer, and the Rust ivars were initialized above.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
 
         this.setWantsLayer(true);
         this.setPostsFrameChangedNotifications(true);
+        // InVisibleRect follows resizing automatically; the view owns the tracking area.
+        // SAFETY: ContentView implements the requested mouse selectors and owns the area.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                NSRect::default(),
+                NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::EnabledDuringMouseDrag
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&this),
+                None,
+            )
+        };
+        this.addTrackingArea(&tracking);
 
         let notification_center = NSNotificationCenter::defaultCenter();
         // SAFETY: frameDidChange: is implemented above with the notification
@@ -441,6 +644,60 @@ impl ContentView {
         });
     }
 
+    fn send_key_input(&self, event: &NSEvent, state: ElementState) {
+        let modifiers = event_modifiers(event);
+        let text = event.characters().map(|text| text.to_string());
+        let logical_text = if modifiers.control || modifiers.command {
+            event
+                .charactersIgnoringModifiers()
+                .map(|text| text.to_string())
+        } else {
+            text.clone()
+        };
+        self.send(WindowEvent::KeyboardInput(KeyEvent {
+            key_code: event.keyCode(),
+            text,
+            logical_text,
+            state,
+            repeat: state == ElementState::Pressed && event.isARepeat(),
+            modifiers,
+        }));
+    }
+
+    fn mouse_position(&self, event: &NSEvent) -> PhysicalPosition<f64> {
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let bounds = self.bounds();
+        let scale = self.ivars().state.scale_factor();
+        // AppKit's unflipped view uses bottom-left points; hit testing uses top-left pixels.
+        PhysicalPosition::new(
+            (point.x - bounds.origin.x) * scale,
+            (bounds.origin.y + bounds.size.height - point.y) * scale,
+        )
+    }
+
+    fn send_mouse_input(&self, event: &NSEvent, state: ElementState) {
+        let Some((button, buttons)) = mouse_button_state(
+            event.buttonNumber(),
+            state,
+            NSEvent::pressedMouseButtons() as u16,
+        ) else {
+            return;
+        };
+        self.send(WindowEvent::MouseInput {
+            state,
+            button,
+            position: self.mouse_position(event),
+            buttons,
+        });
+    }
+
+    fn send_cursor_moved(&self, event: &NSEvent) {
+        self.send(WindowEvent::CursorMoved {
+            position: self.mouse_position(event),
+            buttons: NSEvent::pressedMouseButtons() as u16,
+        });
+    }
+
     fn sync_metal_surface(&self, size: PhysicalSize<u32>) {
         let Some(root_layer) = self.layer() else {
             return;
@@ -455,6 +712,95 @@ impl ContentView {
                 sync_metal_layer(&layer, size);
             }
         }
+    }
+}
+
+fn event_modifiers(event: &NSEvent) -> Modifiers {
+    let flags = event.modifierFlags();
+    Modifiers {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        control: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        command: flags.contains(NSEventModifierFlags::Command),
+        caps_lock: flags.contains(NSEventModifierFlags::CapsLock),
+    }
+}
+
+fn modifier_key_state(
+    key_code: u16,
+    modifiers: Modifiers,
+    pressed: &mut HashSet<u16>,
+) -> Option<ElementState> {
+    if key_code == 0x39 {
+        return Some(if modifiers.caps_lock {
+            ElementState::Pressed
+        } else {
+            ElementState::Released
+        });
+    }
+    let active = match key_code {
+        0x38 | 0x3c => modifiers.shift,
+        0x3b | 0x3e => modifiers.control,
+        0x3a | 0x3d => modifiers.alt,
+        0x36 | 0x37 => modifiers.command,
+        _ => return None,
+    };
+    Some(if pressed.remove(&key_code) {
+        ElementState::Released
+    } else if active {
+        pressed.insert(key_code);
+        ElementState::Pressed
+    } else {
+        ElementState::Released
+    })
+}
+
+fn wheel_delta(delta_x: f64, delta_y: f64, precise: bool, scale_factor: f64) -> (f64, f64) {
+    let scale = if precise { scale_factor } else { 1.0 };
+    (delta_x * scale, delta_y * scale)
+}
+fn mouse_button_state(
+    number: isize,
+    state: ElementState,
+    buttons: u16,
+) -> Option<(MouseButton, u16)> {
+    let number = u16::try_from(number).ok()?;
+    let button = match number {
+        0 => MouseButton::Left,
+        1 => MouseButton::Right,
+        2 => MouseButton::Middle,
+        other => MouseButton::Other(other),
+    };
+    let mask = 1u16.checked_shl(u32::from(number)).unwrap_or(0);
+    let buttons = match state {
+        ElementState::Pressed => buttons | mask,
+        ElementState::Released => buttons & !mask,
+    };
+    Some((button, buttons))
+}
+
+#[test]
+fn native_mouse_buttons_preserve_chords_and_validate_numbers() {
+    for (number, button, mask) in [
+        (0, MouseButton::Left, 1),
+        (1, MouseButton::Right, 2),
+        (2, MouseButton::Middle, 4),
+        (3, MouseButton::Other(3), 8),
+        (4, MouseButton::Other(4), 16),
+        (15, MouseButton::Other(15), 32768),
+        (16, MouseButton::Other(16), 0),
+    ] {
+        assert_eq!(
+            mouse_button_state(number, ElementState::Pressed, 5),
+            Some((button, 5 | mask))
+        );
+        assert_eq!(
+            mouse_button_state(number, ElementState::Released, 7),
+            Some((button, 7 & !mask))
+        );
+    }
+    for invalid in [-1, 65536] {
+        assert_eq!(mouse_button_state(invalid, ElementState::Pressed, 0), None);
     }
 }
 
@@ -631,6 +977,7 @@ impl PlatformEventLoop {
     pub(crate) fn new() -> crate::Result<Self> {
         let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
         let app = NSApplication::sharedApplication(mtm);
+        override_send_event(&app);
         app.finishLaunching();
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         // Command-line binaries have no application bundle to activate them.
@@ -723,6 +1070,7 @@ impl PlatformEventLoop {
         );
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
         native_window.setContentView(Some(&view));
+        native_window.makeFirstResponder(Some(&view));
 
         let delegate = WindowDelegate::new(self.mtm, state.clone(), self.dispatcher.clone());
         native_window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -909,5 +1257,37 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn precise_wheel_deltas_are_physical_pixels() {
+        assert_eq!(wheel_delta(2.0, -3.0, true, 2.0), (4.0, -6.0));
+        assert_eq!(wheel_delta(2.0, -3.0, false, 2.0), (2.0, -3.0));
+    }
+
+    #[test]
+    fn modifier_keys_track_each_side() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let mut pressed = HashSet::new();
+        assert_eq!(
+            modifier_key_state(0x38, shift, &mut pressed),
+            Some(ElementState::Pressed)
+        );
+        assert_eq!(
+            modifier_key_state(0x3c, shift, &mut pressed),
+            Some(ElementState::Pressed)
+        );
+        assert_eq!(
+            modifier_key_state(0x38, shift, &mut pressed),
+            Some(ElementState::Released)
+        );
+        assert_eq!(
+            modifier_key_state(0x3c, Modifiers::default(), &mut pressed),
+            Some(ElementState::Released)
+        );
+        assert_eq!(modifier_key_state(0x00, shift, &mut pressed), None);
     }
 }
