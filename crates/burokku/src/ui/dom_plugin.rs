@@ -18,6 +18,45 @@ use lifetime::SharedWrapperRoots;
 
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Button(Option<u16>);
+
+impl Button {
+    pub(crate) const NONE: Self = Self(None);
+    pub(crate) const PRIMARY: Self = Self(Some(0));
+    pub(crate) const AUXILIARY: Self = Self(Some(1));
+    pub(crate) const SECONDARY: Self = Self(Some(2));
+    pub(crate) const BACK: Self = Self(Some(3));
+    pub(crate) const FORWARD: Self = Self(Some(4));
+
+    pub(crate) const fn from_code(code: u16) -> Self {
+        Self(Some(code))
+    }
+
+    pub(crate) fn code(self) -> i32 {
+        self.0.map_or(-1, i32::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Buttons(u16);
+
+impl Buttons {
+    pub(crate) const NONE: Self = Self(0);
+
+    pub(crate) const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub(crate) const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NativeMouseEvent {
     pub(crate) event_type: &'static str,
@@ -25,8 +64,8 @@ pub(crate) struct NativeMouseEvent {
     pub(crate) presented_revision: u64,
     pub(crate) client_x: f64,
     pub(crate) client_y: f64,
-    pub(crate) button: u16,
-    pub(crate) buttons: u16,
+    pub(crate) button: Button,
+    pub(crate) buttons: Buttons,
     pub(crate) related_target: Option<NodeId>,
     pub(crate) wheel_delta: Option<(f64, f64, u16)>,
     pub(crate) pointer_id: Option<u32>,
@@ -40,8 +79,8 @@ pub(crate) struct NativeMouseInput {
     pub(crate) presented_revision: u64,
     pub(crate) client_x: f64,
     pub(crate) client_y: f64,
-    pub(crate) button: u16,
-    pub(crate) buttons: u16,
+    pub(crate) button: Button,
+    pub(crate) buttons: Buttons,
     pub(crate) wheel_delta: Option<(f64, f64, u16)>,
     pub(crate) pointer_id: Option<u32>,
 }
@@ -715,8 +754,8 @@ mod tests {
                         presented_revision,
                         client_x: 0.0,
                         client_y: 0.0,
-                        button: 0,
-                        buttons: 0,
+                        button: Button::PRIMARY,
+                        buttons: Buttons::NONE,
                         related_target: None,
                         wheel_delta: None,
                         pointer_id: None,
@@ -825,8 +864,8 @@ mod tests {
                         presented_revision,
                         client_x: 12.5,
                         client_y: 8.25,
-                        button: 2,
-                        buttons: 3,
+                        button: Button::SECONDARY,
+                        buttons: Buttons::from_bits(3),
                         related_target: Some(related_target),
                         wheel_delta: (event_type == "wheel").then_some((4.5, -6.25, 1)),
                         pointer_id: event_type.starts_with("pointer").then_some(1),
@@ -870,8 +909,8 @@ mod tests {
                 presented_revision,
                 client_x: 12.5,
                 client_y: 8.25,
-                button: 2,
-                buttons: 3,
+                button: Button::SECONDARY,
+                buttons: Buttons::from_bits(3),
                 related_target: None,
                 wheel_delta: None,
                 pointer_id: Some(1),
@@ -946,8 +985,8 @@ mod tests {
                 presented_revision: revision,
                 client_x: 10.0,
                 client_y: 20.0,
-                button: 0,
-                buttons,
+                button: Button::PRIMARY,
+                buttons: Buttons::from_bits(buttons),
                 related_target: None,
                 wheel_delta: None,
                 pointer_id: Some(1),
@@ -1168,8 +1207,8 @@ mod tests {
                         presented_revision,
                         client_x: 12.5,
                         client_y: 8.25,
-                        button: 0,
-                        buttons: 0,
+                        button: Button::PRIMARY,
+                        buttons: Buttons::NONE,
                         related_target: None,
                         wheel_delta: None,
                         pointer_id: None,
@@ -1183,8 +1222,8 @@ mod tests {
                         presented_revision,
                         client_x: 20.0,
                         client_y: 10.0,
-                        button: 0,
-                        buttons: 0,
+                        button: Button::PRIMARY,
+                        buttons: Buttons::NONE,
                         related_target: None,
                         wheel_delta: None,
                         pointer_id: None,

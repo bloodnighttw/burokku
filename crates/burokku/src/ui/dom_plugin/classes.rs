@@ -62,7 +62,7 @@ struct MouseEvent<'js> {
     #[qjs(get, enumerable)]
     client_y: f64,
     #[qjs(get, enumerable)]
-    button: u16,
+    button: i32,
     #[qjs(get, enumerable)]
     buttons: u16,
     #[qjs(get, enumerable)]
@@ -1027,7 +1027,7 @@ fn hover_events(
             presented_revision: input.presented_revision,
             client_x: input.client_x,
             client_y: input.client_y,
-            button: 0,
+            button: input.button,
             buttons: input.buttons,
             wheel_delta: None,
             pointer_id: Some(1),
@@ -1139,7 +1139,7 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEven
 
     let result = dispatch_mouse_event_inner(context, mouse);
     if mouse.event_type == "pointercancel"
-        || (mouse.event_type == "pointerup" && mouse.buttons == 0)
+        || (mouse.event_type == "pointerup" && mouse.buttons.is_empty())
     {
         let mut state = borrow_mut(context, &state)?;
         state.pointer_active = false;
@@ -1265,8 +1265,8 @@ fn dispatch_mouse_event_inner(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Res
             current_target: None,
             client_x: mouse.client_x,
             client_y: mouse.client_y,
-            button: mouse.button,
-            buttons: mouse.buttons,
+            button: mouse.button.code(),
+            buttons: mouse.buttons.bits(),
             delta_x,
             delta_y,
             delta_mode,

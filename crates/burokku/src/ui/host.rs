@@ -12,7 +12,9 @@ use winit::{
 use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
-    dom_plugin::{NativeKeyboardEvent, NativeMouseEvent, NativeMouseInput, SharedUiDom},
+    dom_plugin::{
+        Button, Buttons, NativeKeyboardEvent, NativeMouseEvent, NativeMouseInput, SharedUiDom,
+    },
     elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
     layout::{LayoutEngine, LayoutError, LogicalViewport},
@@ -113,10 +115,10 @@ fn pointer_input_for_input(
         Some((state, mouse_button)) => {
             let click = recognize_primary_click(pressed_target, state, mouse_button, hit_target);
             let button = match mouse_button {
-                MouseButton::Left => 0,
-                MouseButton::Middle => 1,
-                MouseButton::Right => 2,
-                MouseButton::Other(number) => number,
+                MouseButton::Left => Button::PRIMARY,
+                MouseButton::Middle => Button::AUXILIARY,
+                MouseButton::Right => Button::SECONDARY,
+                MouseButton::Other(number) => Button::from_code(number),
             };
             let changed_button = match mouse_button {
                 MouseButton::Left => 1,
@@ -138,7 +140,7 @@ fn pointer_input_for_input(
             if buttons & 1 == 0 {
                 *pressed_target = None;
             }
-            ("pointermove", 0, None, true)
+            ("pointermove", Button::NONE, None, true)
         }
     };
     NativeMouseInput {
@@ -149,7 +151,7 @@ fn pointer_input_for_input(
         client_x: position.x / plan.scale_factor(),
         client_y: position.y / plan.scale_factor(),
         button,
-        buttons,
+        buttons: Buttons::from_bits(buttons),
         wheel_delta: None,
         pointer_id: Some(1),
     }
@@ -176,8 +178,8 @@ fn wheel_input_for_input(
         presented_revision: plan.revision(),
         client_x: position.x / plan.scale_factor(),
         client_y: position.y / plan.scale_factor(),
-        button: 0,
-        buttons,
+        button: Button::PRIMARY,
+        buttons: Buttons::from_bits(buttons),
         wheel_delta: Some((
             delta_x * delta_scale,
             delta_y * delta_scale,
@@ -504,8 +506,8 @@ impl ApplicationHost {
             presented_revision: state.dom.revision(),
             client_x: position.x / scale,
             client_y: position.y / scale,
-            button: 0,
-            buttons: 0,
+            button: Button::NONE,
+            buttons: Buttons::NONE,
             related_target: None,
             wheel_delta: None,
             pointer_id: Some(1),
@@ -590,8 +592,8 @@ impl ApplicationHost {
                 presented_revision: frame.revision(),
                 client_x: position.x / scale,
                 client_y: position.y / scale,
-                button: 0,
-                buttons,
+                button: Button::NONE,
+                buttons: Buttons::from_bits(buttons),
                 wheel_delta: None,
                 pointer_id: None,
             },
@@ -633,8 +635,8 @@ impl ApplicationHost {
                 presented_revision: revision,
                 client_x: position.x / scale,
                 client_y: position.y / scale,
-                button: 0,
-                buttons,
+                button: Button::NONE,
+                buttons: Buttons::from_bits(buttons),
                 wheel_delta: None,
                 pointer_id: None,
             },
@@ -660,7 +662,7 @@ impl ApplicationHost {
         let enqueue = state.enqueue_mouse_input(input);
         drop(state);
         if let Err(error) = enqueue {
-            if input.event_type == Some("pointerup") && input.buttons == 0 {
+            if input.event_type == Some("pointerup") && input.buttons.is_empty() {
                 eprintln!(
                     "Burokku warning: replacing dropped pointer release with cancellation: {error}"
                 );
@@ -1586,8 +1588,8 @@ mod tests {
             presented_revision: presented.0,
             client_x: position.x / presented.1,
             client_y: position.y / presented.1,
-            button: 0,
-            buttons,
+            button: Button::NONE,
+            buttons: Buttons::from_bits(buttons),
             wheel_delta: None,
             pointer_id: event_type.map(|_| 1),
         }
@@ -1661,7 +1663,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(i32::from(event.button), -1);
+        assert_eq!(event.button.code(), -1);
     }
 
     fn oversized_target() -> GraphicsError {
@@ -1739,7 +1741,7 @@ mod tests {
                         node.addEventListener(type, function (event) {
                             hoverChecks.push(event.currentTarget === this, event.type === type,
                                 event.target === this, event.clientX === 12.5, event.clientY === 20,
-                                event.button === 0, event.buttons === 1, event.pointerId === 1,
+                                event.button === -1, event.buttons === 1, event.pointerId === 1,
                                 event.bubbles === false, event.cancelable === false);
                             hoverLog.push(`${type}:${name}:${event.relatedTarget?.testName ?? '-'}`);
                             event.preventDefault();
@@ -2223,7 +2225,7 @@ mod tests {
                     assert_eq!(native.event_type, expected_pointer);
                     assert_eq!(native.presented_revision, plan.revision());
                     assert_eq!((native.client_x, native.client_y), (12.5, 10.0));
-                    assert_eq!(native.buttons, buttons);
+                    assert_eq!(native.buttons.bits(), buttons);
                     host.queue_hover_and_mouse(native, plan.scale_factor())
                         .unwrap();
                 }
@@ -2232,12 +2234,12 @@ mod tests {
                     .chain(
                         [
                             "pointerdown:0:1",
-                            "pointermove:0:1",
+                            "pointermove:-1:1",
                             "pointermove:2:3",
                             "pointermove:2:1",
                             "pointerup:0:0",
                             "click:0:0",
-                            "pointermove:0:0",
+                            "pointermove:-1:0",
                             "pointerdown:1:4",
                             "pointerup:1:0",
                             "pointerdown:3:8",
@@ -2336,8 +2338,8 @@ mod tests {
                 Some((state, MouseButton::Right)),
             );
             assert_eq!(event.event_type, Some("pointermove"));
-            assert_eq!(event.button, 2);
-            assert_eq!(event.buttons, buttons);
+            assert_eq!(event.button, Button::SECONDARY);
+            assert_eq!(event.buttons.bits(), buttons);
         }
     }
 
