@@ -22,19 +22,28 @@ Queue raw native input instead. Resolve hit target, capture, hover, click, and c
 
 ### Duplicated pointer authority
 
-`ApplicationHost` owns:
+`ApplicationHost` still owns:
 
-- `pressed_target`
-- `active_pointer`
-- `hover_path`
+- `pressed_target`;
+- `active_pointer`;
+- the enqueue-time `hit_target`, `event_type`, and `click_target` decisions.
 
 `UiDomState` separately owns:
 
-- `pointer_active`
-- `pointer_capture`
-- `announced_pointer_capture`
+- `pointer_active`;
+- `pointer_capture`;
+- `announced_pointer_capture`;
+- `hover_path`.
 
-These fields describe one interaction but can advance independently. Keep pointer lifecycle and capture state in one authoritative component. The host should retain only native position/buttons and the presented layout needed for hit testing.
+These fields describe one interaction but can advance independently because native input reaches the host immediately while JavaScript handlers run later from a queue.
+
+For example, the host can see a press on A and a release on B and decide that no click occurred. When the queued press handler eventually runs, it can capture the pointer to A, causing the release to be delivered to A after the host has already rejected the click. The application then observes a release on A without the corresponding click.
+
+Cancellation has the same ownership problem: the host uses `active_pointer` to decide whether cancellation is needed, while the DOM uses `pointer_active` to decide whether an interaction exists. Queue failure, resize, or disconnection can make those answers differ.
+
+The known P1 failures have targeted fixes, so this is design debt rather than a current release blocker. It can be deferred, but the event API should not be frozen and multi-pointer or touch support should not be added first.
+
+The eventual fix should keep one authoritative pointer state machine. The host should queue native facts such as position, changed button, current buttons, and presented revision. Dispatch-time code should then decide capture, hover, click, and cancellation once.
 
 ### Preconstructed event batches
 
