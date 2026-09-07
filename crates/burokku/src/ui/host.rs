@@ -1651,6 +1651,19 @@ mod tests {
         ScenePlan::from_layout(dom, computed, PhysicalSize::new(320, 240), 1.0).unwrap()
     }
 
+    #[test]
+    fn pointer_motion_reports_no_changed_button() {
+        let event = pointer_input_for_input(
+            &scene_plan(&Dom::new()),
+            &mut None,
+            PhysicalPosition::new(0.0, 0.0),
+            0,
+            None,
+        );
+
+        assert_eq!(i32::from(event.button), -1);
+    }
+
     fn oversized_target() -> GraphicsError {
         GraphicsError::TargetTooLarge {
             size: PhysicalSize::new(70_000, 10),
