@@ -76,7 +76,7 @@ fn js_event_type(kind: KeyboardEventKind) -> &'static str {
     }
 }
 
-pub(super) fn dispatch_keyboard_event(
+pub(super) fn execute_keyboard_event(
     context: &Ctx<'_>,
     keyboard: DomKeyboardEvent,
 ) -> JsResult<()> {
@@ -96,6 +96,8 @@ pub(super) fn dispatch_keyboard_event(
     let Some(plan) = plan else {
         return Ok(());
     };
+    let bubbles = plan.bubbles;
+    let cancelable = plan.cancelable;
     let keyboard = plan.event;
     let event_type = js_event_type(keyboard.kind);
     let path = plan.path;
@@ -131,8 +133,8 @@ pub(super) fn dispatch_keyboard_event(
             ctrl_key: keyboard.ctrl_key,
             alt_key: keyboard.alt_key,
             meta_key: keyboard.meta_key,
-            bubbles: true,
-            cancelable: true,
+            bubbles,
+            cancelable,
             default_prevented: false,
             propagation_stopped: false,
             immediate_propagation_stopped: false,
@@ -231,7 +233,7 @@ mod tests {
                 context
                     .eval::<(), _>("keyCalls = []; keyChecks = []")
                     .unwrap();
-                dispatch_keyboard_event(
+                execute_keyboard_event(
                     &context,
                     DomKeyboardEvent {
                         kind,

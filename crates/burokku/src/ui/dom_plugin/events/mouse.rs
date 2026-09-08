@@ -1,4 +1,4 @@
-//! DOM mouse/wheel event payloads and listener propagation.
+//! JavaScript mouse/wheel-event construction and listener execution.
 
 use rquickjs::{
     class::Trace, prelude::This, CatchResultExt, Class, Ctx, IntoJs, JsLifetime, Null, Object,
@@ -7,7 +7,7 @@ use rquickjs::{
 
 use super::super::{
     classes::{borrow, wrap_node, NativeNode},
-    errors,
+    errors, SharedDomBindings,
 };
 use crate::ui::events::{DomMouseEvent, MouseEventKind};
 
@@ -87,10 +87,10 @@ impl<'js> MouseEvent<'js> {
     }
 }
 
-#[derive(Clone, Copy)]
 pub(super) struct PointingEvent {
-    pub(super) target: crate::ui::elements::NodeId,
-    pub(super) presented_revision: u64,
+    pub(super) path: Vec<crate::ui::elements::NodeId>,
+    pub(super) bubbles: bool,
+    pub(super) cancelable: bool,
     pub(super) client_x: f64,
     pub(super) client_y: f64,
     pub(super) button: crate::ui::host::ChangedMouseButton,
@@ -106,18 +106,35 @@ fn js_event_type(kind: MouseEventKind) -> &'static str {
     }
 }
 
-pub(in crate::ui::dom_plugin) fn dispatch_mouse_event(
+pub(in crate::ui::dom_plugin) fn execute_mouse_event(
     context: &Ctx<'_>,
     mouse: DomMouseEvent,
 ) -> JsResult<()> {
-    dispatch_pointing_event_inner(
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let plan = {
+        let state = borrow(context, &state)?;
+        errors::map_dom(
+            context,
+            "plan mouse dispatch",
+            mouse.plan_dispatch(&state.dom),
+        )?
+    };
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let mouse = plan.event;
+    execute_pointing_event(
         context,
+        &state,
         js_event_type(mouse.kind),
-        true,
-        true,
         PointingEvent {
-            target: mouse.target,
-            presented_revision: mouse.presented_revision,
+            path: plan.path,
+            bubbles: plan.bubbles,
+            cancelable: plan.cancelable,
             client_x: mouse.client_x,
             client_y: mouse.client_y,
             button: mouse.button,
@@ -129,49 +146,15 @@ pub(in crate::ui::dom_plugin) fn dispatch_mouse_event(
     )
 }
 
-pub(super) fn dispatch_pointing_event_inner(
+pub(super) fn execute_pointing_event(
     context: &Ctx<'_>,
+    state: &SharedDomBindings,
     event_type: &'static str,
-    bubbles: bool,
-    cancelable: bool,
     mouse: PointingEvent,
 ) -> JsResult<()> {
-    let app: Object = context.globals().get("app")?;
-    let Some(app) = Class::<NativeNode>::from_object(&app) else {
-        return Ok(());
-    };
-    let state = app.borrow().state.clone();
-    let (path, related_target) = {
-        let state = borrow(context, &state)?;
-        debug_assert!(mouse.presented_revision <= state.dom.revision());
-        if !state.dom.is_connected(mouse.target).unwrap_or(false) {
-            return Ok(());
-        }
-
-        let mut path = Vec::new();
-        let mut current = Some(mouse.target);
-        while let Some(id) = current {
-            path.push(id);
-            if !bubbles {
-                break;
-            }
-            current = errors::map_dom(
-                context,
-                "build mouse propagation path",
-                state.dom.parent_node(id),
-            )?;
-        }
-        (
-            path,
-            mouse
-                .related_target
-                .filter(|id| state.dom.node(*id).is_some()),
-        )
-    };
-
-    let mut listeners = Vec::with_capacity(path.len());
-    for id in path {
-        let current = wrap_node(context, &state, id)?;
+    let mut listeners = Vec::with_capacity(mouse.path.len());
+    for id in mouse.path {
+        let current = wrap_node(context, state, id)?;
         let node =
             Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
         let callbacks = node
@@ -187,8 +170,9 @@ pub(super) fn dispatch_pointing_event_inner(
     }
 
     let target = listeners[0].0.clone();
-    let related_target = related_target
-        .map(|id| wrap_node(context, &state, id))
+    let related_target = mouse
+        .related_target
+        .map(|id| wrap_node(context, state, id))
         .transpose()?;
     let (delta_x, delta_y, delta_mode) = mouse
         .wheel_delta
@@ -212,8 +196,8 @@ pub(super) fn dispatch_pointing_event_inner(
             pointer_type: if pointer_id == 0 { "" } else { "mouse" }.into(),
             is_primary: pointer_id != 0,
             related_target,
-            bubbles,
-            cancelable,
+            bubbles: mouse.bubbles,
+            cancelable: mouse.cancelable,
             default_prevented: false,
             propagation_stopped: false,
             immediate_propagation_stopped: false,
@@ -329,7 +313,7 @@ mod tests {
                         WheelDeltaMode::Line,
                     )),
                 };
-                dispatch_mouse_event(&context, event).unwrap();
+                execute_mouse_event(&context, event).unwrap();
                 assert_eq!(
                     context.eval::<Vec<String>, _>("mouseCalls").unwrap(),
                     ["target", "window", "app"],
@@ -352,7 +336,7 @@ mod tests {
                 context
                     .eval::<(), _>("mouseWindow.removeChild(mouseTarget); mouseCalls = []")
                     .unwrap();
-                dispatch_mouse_event(&context, event).unwrap();
+                execute_mouse_event(&context, event).unwrap();
                 assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
                 context
                     .eval::<(), _>("mouseWindow.appendChild(mouseTarget)")

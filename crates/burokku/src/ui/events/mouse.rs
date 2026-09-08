@@ -1,10 +1,12 @@
 use crate::ui::{
-    elements::NodeId,
+    elements::{Dom, DomError, NodeId},
     host::{
         ChangedMouseButton, NativeMouseInput, NativeMouseInputKind, PressedMouseButtons,
         WheelDeltaMode,
     },
 };
+
+use super::{build_dispatch_plan, DispatchPlan};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MouseEventKind {
@@ -25,6 +27,11 @@ pub(crate) struct DomMouseEvent {
 }
 
 impl DomMouseEvent {
+    pub(crate) fn plan_dispatch(self, dom: &Dom) -> Result<Option<DispatchPlan<Self>>, DomError> {
+        let target = self.target;
+        build_dispatch_plan(dom, self, target, true, true)
+    }
+
     pub(crate) fn wheel(input: NativeMouseInput, target: NodeId) -> Option<Self> {
         let NativeMouseInputKind::Wheel {
             delta_x,

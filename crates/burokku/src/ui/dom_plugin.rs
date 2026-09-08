@@ -617,7 +617,7 @@ mod tests {
                 )
                 .unwrap());
             for target in targets.iter().copied() {
-                events::dispatch_mouse_event(
+                events::execute_mouse_event(
                     &context,
                     DomMouseEvent {
                         kind: MouseEventKind::Click,

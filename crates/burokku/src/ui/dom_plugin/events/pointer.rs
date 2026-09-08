@@ -2,14 +2,17 @@
 
 use rquickjs::{Class, Ctx, Object, Result as JsResult};
 
-use super::super::classes::{borrow, borrow_mut, NativeNode};
-use super::mouse::{dispatch_mouse_event, dispatch_pointing_event_inner, PointingEvent};
+use super::super::{
+    classes::{borrow, borrow_mut, NativeNode},
+    errors,
+};
+use super::mouse::{execute_mouse_event, execute_pointing_event, PointingEvent};
 use crate::ui::{
     events::{DomPointerEvent, PointerEventKind},
     host::NativeMouseInput,
 };
 
-pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -> JsResult<()> {
+pub(super) fn execute_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -> JsResult<()> {
     let app: Object = context.globals().get("app")?;
     let Some(app) = Class::<NativeNode>::from_object(&app) else {
         return Ok(());
@@ -21,17 +24,17 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         state.pointer.plan_input(&state.dom, input)
     };
     for event in plan.boundaries {
-        dispatch_pointer_event(context, event)?;
+        execute_pointer_event(context, event)?;
     }
     if let Some(event) = plan.pointer {
-        dispatch_pointer_event(context, event)?;
+        execute_pointer_event(context, event)?;
     }
     if let Some(event) = plan.mouse {
-        dispatch_mouse_event(context, event)?;
+        execute_mouse_event(context, event)?;
     }
     Ok(())
 }
-pub(super) fn dispatch_pointer_cancel(context: &Ctx<'_>) -> JsResult<()> {
+pub(super) fn execute_pointer_cancel(context: &Ctx<'_>) -> JsResult<()> {
     let app: Object = context.globals().get("app")?;
     let Some(app) = Class::<NativeNode>::from_object(&app) else {
         return Ok(());
@@ -40,7 +43,7 @@ pub(super) fn dispatch_pointer_cancel(context: &Ctx<'_>) -> JsResult<()> {
     let Some(event) = borrow(context, &state)?.pointer.cancel_event() else {
         return Ok(());
     };
-    dispatch_pointer_event(context, event)
+    execute_pointer_event(context, event)
 }
 
 fn js_event_type(kind: PointerEventKind) -> &'static str {
@@ -56,24 +59,32 @@ fn js_event_type(kind: PointerEventKind) -> &'static str {
     }
 }
 
-fn dispatch_pointer_event_inner(context: &Ctx<'_>, pointer: DomPointerEvent) -> JsResult<()> {
-    let bubbles = !matches!(
-        pointer.kind,
-        PointerEventKind::Enter | PointerEventKind::Leave
-    );
-    let cancelable = bubbles
-        && !matches!(
-            pointer.kind,
-            PointerEventKind::Cancel | PointerEventKind::GotCapture | PointerEventKind::LostCapture
-        );
-    dispatch_pointing_event_inner(
+fn execute_pointer_event_inner(context: &Ctx<'_>, pointer: DomPointerEvent) -> JsResult<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let plan = {
+        let state = borrow(context, &state)?;
+        errors::map_dom(
+            context,
+            "plan pointer dispatch",
+            pointer.plan_dispatch(&state.dom),
+        )?
+    };
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let pointer = plan.event;
+    execute_pointing_event(
         context,
+        &state,
         js_event_type(pointer.kind),
-        bubbles,
-        cancelable,
         PointingEvent {
-            target: pointer.target,
-            presented_revision: pointer.presented_revision,
+            path: plan.path,
+            bubbles: plan.bubbles,
+            cancelable: plan.cancelable,
             client_x: pointer.client_x,
             client_y: pointer.client_y,
             button: pointer.button,
@@ -85,19 +96,12 @@ fn dispatch_pointer_event_inner(context: &Ctx<'_>, pointer: DomPointerEvent) -> 
     )
 }
 
-pub(in crate::ui::dom_plugin) fn dispatch_pointer_event(
+pub(in crate::ui::dom_plugin) fn execute_pointer_event(
     context: &Ctx<'_>,
     pointer: DomPointerEvent,
 ) -> JsResult<()> {
-    let routes_through_capture = matches!(
-        pointer.kind,
-        PointerEventKind::Down
-            | PointerEventKind::Up
-            | PointerEventKind::Move
-            | PointerEventKind::Cancel
-    );
-    if !routes_through_capture {
-        return dispatch_pointer_event_inner(context, pointer);
+    if !pointer.uses_pointer_state() {
+        return execute_pointer_event_inner(context, pointer);
     }
 
     let app: Object = context.globals().get("app")?;
@@ -111,10 +115,10 @@ pub(in crate::ui::dom_plugin) fn dispatch_pointer_event(
         state.pointer.start_dispatch(&state.dom, pointer)
     };
     for event in transitions {
-        dispatch_pointer_event_inner(context, event)?;
+        execute_pointer_event_inner(context, event)?;
     }
 
-    let result = dispatch_pointer_event_inner(context, pointer);
+    let result = execute_pointer_event_inner(context, pointer);
     let transitions = {
         let mut state = borrow_mut(context, &state)?;
         let state = &mut *state;
@@ -122,7 +126,7 @@ pub(in crate::ui::dom_plugin) fn dispatch_pointer_event(
     };
     result?;
     for event in transitions {
-        dispatch_pointer_event_inner(context, event)?;
+        execute_pointer_event_inner(context, event)?;
     }
     Ok(())
 }
@@ -215,7 +219,7 @@ mod tests {
                 pointer(PointerEventKind::Move, 1),
                 pointer(PointerEventKind::Up, 0),
             ] {
-                dispatch_pointer_event(&context, event).unwrap();
+                execute_pointer_event(&context, event).unwrap();
             }
             assert_eq!(
                 context.eval::<Vec<String>, _>("captureLog").unwrap(),
@@ -249,14 +253,14 @@ mod tests {
                     .unwrap(),
                 ["NotFoundError", "NotFoundError"]
             );
-            dispatch_pointer_event(&context, pointer(PointerEventKind::Down, 1)).unwrap();
+            execute_pointer_event(&context, pointer(PointerEventKind::Down, 1)).unwrap();
             assert!(context
                 .eval::<bool, _>(
                     "captureWindow.removeChild(captureTarget); \
                      captureTarget.hasPointerCapture(1) === false",
                 )
                 .unwrap());
-            dispatch_pointer_event(&context, pointer(PointerEventKind::Up, 0)).unwrap();
+            execute_pointer_event(&context, pointer(PointerEventKind::Up, 0)).unwrap();
             assert_ne!(hit_target, capture_target);
         });
     }

@@ -1,9 +1,9 @@
 use crate::ui::{
-    elements::{Dom, NodeId},
+    elements::{Dom, DomError, NodeId},
     host::{ChangedMouseButton, NativeMouseInput, NativeMouseInputKind, PressedMouseButtons},
 };
 
-use super::DomMouseEvent;
+use super::{build_dispatch_plan, DispatchPlan, DomMouseEvent};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PointerEventKind {
@@ -61,6 +61,35 @@ impl DomPointerEvent {
             related_target: None,
             pointer_id: 1,
         })
+    }
+
+    pub(crate) fn uses_pointer_state(self) -> bool {
+        matches!(
+            self.kind,
+            PointerEventKind::Down
+                | PointerEventKind::Up
+                | PointerEventKind::Move
+                | PointerEventKind::Cancel
+        )
+    }
+
+    pub(crate) fn plan_dispatch(
+        mut self,
+        dom: &Dom,
+    ) -> Result<Option<DispatchPlan<Self>>, DomError> {
+        let bubbles = !matches!(self.kind, PointerEventKind::Enter | PointerEventKind::Leave);
+        let cancelable = bubbles
+            && !matches!(
+                self.kind,
+                PointerEventKind::Cancel
+                    | PointerEventKind::GotCapture
+                    | PointerEventKind::LostCapture
+            );
+        self.related_target = self
+            .related_target
+            .filter(|target| dom.node(*target).is_some());
+        let target = self.target;
+        build_dispatch_plan(dom, self, target, bubbles, cancelable)
     }
 }
 

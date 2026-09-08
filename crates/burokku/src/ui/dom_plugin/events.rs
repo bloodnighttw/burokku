@@ -13,14 +13,14 @@ use crate::ui::{
 };
 
 #[cfg(test)]
-pub(super) use mouse::dispatch_mouse_event;
+pub(super) use mouse::execute_mouse_event;
 
 impl DomBindingState {
     pub(crate) fn enqueue_pointer_cancel(&self) -> std::result::Result<(), JsTaskQueueError> {
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(pointer::dispatch_pointer_cancel)
+            .try_enqueue(pointer::execute_pointer_cancel)
     }
 
     pub(crate) fn enqueue_pointer_cancel_when_ready(
@@ -32,7 +32,7 @@ impl DomBindingState {
             .ok_or(JsTaskQueueError::Closed)?
             .clone();
         tokio::task::spawn_local(async move {
-            if let Err(error) = queue.enqueue(pointer::dispatch_pointer_cancel).await {
+            if let Err(error) = queue.enqueue(pointer::execute_pointer_cancel).await {
                 eprintln!("Burokku warning: pointer cancellation stopped: {error}");
             }
         });
@@ -46,7 +46,7 @@ impl DomBindingState {
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(move |context| pointer::dispatch_mouse_input(context, input))
+            .try_enqueue(move |context| pointer::execute_mouse_input(context, input))
     }
 
     pub(crate) fn enqueue_keyboard_event(
@@ -57,6 +57,6 @@ impl DomBindingState {
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(move |context| keyboard::dispatch_keyboard_event(context, event))
+            .try_enqueue(move |context| keyboard::execute_keyboard_event(context, event))
     }
 }

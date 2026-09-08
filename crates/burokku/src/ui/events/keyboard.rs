@@ -3,6 +3,8 @@ use crate::ui::{
     host::{NativeKeyboardEvent, NativeKeyboardEventKind},
 };
 
+use super::{build_dispatch_plan, DispatchPlan};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeyboardEventKind {
     Down,
@@ -22,24 +24,10 @@ pub(crate) struct DomKeyboardEvent {
     pub(crate) meta_key: bool,
 }
 
-/// A keyboard event paired with its target-to-root propagation path.
-pub(crate) struct KeyboardDispatchPlan {
-    pub(crate) event: DomKeyboardEvent,
-    pub(crate) path: Vec<NodeId>,
-}
-
 impl DomKeyboardEvent {
-    pub(crate) fn plan_dispatch(self, dom: &Dom) -> Result<Option<KeyboardDispatchPlan>, DomError> {
-        if !dom.is_connected(self.target).unwrap_or(false) {
-            return Ok(None);
-        }
-        let mut path = Vec::new();
-        let mut current = Some(self.target);
-        while let Some(id) = current {
-            path.push(id);
-            current = dom.parent_node(id)?;
-        }
-        Ok(Some(KeyboardDispatchPlan { event: self, path }))
+    pub(crate) fn plan_dispatch(self, dom: &Dom) -> Result<Option<DispatchPlan<Self>>, DomError> {
+        let target = self.target;
+        build_dispatch_plan(dom, self, target, true, true)
     }
 }
 
