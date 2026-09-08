@@ -1,5 +1,5 @@
 use crate::ui::{
-    elements::NodeId,
+    elements::{Dom, DomError, NodeId},
     host::{NativeKeyboardEvent, NativeKeyboardEventKind},
 };
 
@@ -20,6 +20,27 @@ pub(crate) struct DomKeyboardEvent {
     pub(crate) ctrl_key: bool,
     pub(crate) alt_key: bool,
     pub(crate) meta_key: bool,
+}
+
+/// A keyboard event paired with its target-to-root propagation path.
+pub(crate) struct KeyboardDispatchPlan {
+    pub(crate) event: DomKeyboardEvent,
+    pub(crate) path: Vec<NodeId>,
+}
+
+impl DomKeyboardEvent {
+    pub(crate) fn plan_dispatch(self, dom: &Dom) -> Result<Option<KeyboardDispatchPlan>, DomError> {
+        if !dom.is_connected(self.target).unwrap_or(false) {
+            return Ok(None);
+        }
+        let mut path = Vec::new();
+        let mut current = Some(self.target);
+        while let Some(id) = current {
+            path.push(id);
+            current = dom.parent_node(id)?;
+        }
+        Ok(Some(KeyboardDispatchPlan { event: self, path }))
+    }
 }
 
 impl From<NativeKeyboardEvent> for DomKeyboardEvent {

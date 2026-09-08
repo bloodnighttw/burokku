@@ -1,4 +1,4 @@
-//! DOM keyboard event payloads and listener propagation.
+//! JavaScript keyboard-event construction and listener execution.
 
 use super::super::{
     classes::{borrow, wrap_node, NativeNode},
@@ -85,24 +85,20 @@ pub(super) fn dispatch_keyboard_event(
         return Ok(());
     };
     let state = app.borrow().state.clone();
-    let event_type = js_event_type(keyboard.kind);
-    let path = {
+    let plan = {
         let state = borrow(context, &state)?;
-        if !state.dom.is_connected(keyboard.target).unwrap_or(false) {
-            return Ok(());
-        }
-        let mut path = Vec::new();
-        let mut current = Some(keyboard.target);
-        while let Some(id) = current {
-            path.push(id);
-            current = errors::map_dom(
-                context,
-                "build keyboard propagation path",
-                state.dom.parent_node(id),
-            )?;
-        }
-        path
+        errors::map_dom(
+            context,
+            "plan keyboard dispatch",
+            keyboard.plan_dispatch(&state.dom),
+        )?
     };
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let keyboard = plan.event;
+    let event_type = js_event_type(keyboard.kind);
+    let path = plan.path;
 
     let mut listeners = Vec::with_capacity(path.len());
     for id in path {
