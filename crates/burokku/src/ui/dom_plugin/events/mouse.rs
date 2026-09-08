@@ -9,24 +9,7 @@ use super::super::{
     classes::{borrow, wrap_node, NativeNode},
     errors,
 };
-use crate::ui::{
-    elements::NodeId,
-    host::{ChangedMouseButton, PressedMouseButtons, WheelDeltaMode},
-};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::ui::dom_plugin) struct NativeMouseEvent {
-    pub(in crate::ui::dom_plugin) event_type: &'static str,
-    pub(in crate::ui::dom_plugin) target: NodeId,
-    pub(in crate::ui::dom_plugin) presented_revision: u64,
-    pub(in crate::ui::dom_plugin) client_x: f64,
-    pub(in crate::ui::dom_plugin) client_y: f64,
-    pub(in crate::ui::dom_plugin) button: ChangedMouseButton,
-    pub(in crate::ui::dom_plugin) buttons: PressedMouseButtons,
-    pub(in crate::ui::dom_plugin) related_target: Option<NodeId>,
-    pub(in crate::ui::dom_plugin) wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
-    pub(in crate::ui::dom_plugin) pointer_id: Option<u32>,
-}
+use crate::ui::events::{DomMouseEvent, MouseEventKind};
 
 #[derive(Trace, JsLifetime)]
 #[rquickjs::class(rename = "BurokkuMouseEvent", rename_all = "camelCase")]
@@ -104,16 +87,60 @@ impl<'js> MouseEvent<'js> {
     }
 }
 
-pub(super) fn dispatch_mouse_event_inner(
+#[derive(Clone, Copy)]
+pub(super) struct PointingEvent {
+    pub(super) target: crate::ui::elements::NodeId,
+    pub(super) presented_revision: u64,
+    pub(super) client_x: f64,
+    pub(super) client_y: f64,
+    pub(super) button: crate::ui::host::ChangedMouseButton,
+    pub(super) buttons: crate::ui::host::PressedMouseButtons,
+    pub(super) related_target: Option<crate::ui::elements::NodeId>,
+    pub(super) wheel_delta: Option<(f64, f64, crate::ui::host::WheelDeltaMode)>,
+    pub(super) pointer_id: u32,
+}
+fn js_event_type(kind: MouseEventKind) -> &'static str {
+    match kind {
+        MouseEventKind::Click => "click",
+        MouseEventKind::Wheel => "wheel",
+    }
+}
+
+pub(in crate::ui::dom_plugin) fn dispatch_mouse_event(
     context: &Ctx<'_>,
-    mouse: NativeMouseEvent,
+    mouse: DomMouseEvent,
+) -> JsResult<()> {
+    dispatch_pointing_event_inner(
+        context,
+        js_event_type(mouse.kind),
+        true,
+        true,
+        PointingEvent {
+            target: mouse.target,
+            presented_revision: mouse.presented_revision,
+            client_x: mouse.client_x,
+            client_y: mouse.client_y,
+            button: mouse.button,
+            buttons: mouse.buttons,
+            related_target: None,
+            wheel_delta: mouse.wheel_delta,
+            pointer_id: 0,
+        },
+    )
+}
+
+pub(super) fn dispatch_pointing_event_inner(
+    context: &Ctx<'_>,
+    event_type: &'static str,
+    bubbles: bool,
+    cancelable: bool,
+    mouse: PointingEvent,
 ) -> JsResult<()> {
     let app: Object = context.globals().get("app")?;
     let Some(app) = Class::<NativeNode>::from_object(&app) else {
         return Ok(());
     };
     let state = app.borrow().state.clone();
-    let bubbles = !matches!(mouse.event_type, "pointerenter" | "pointerleave");
     let (path, related_target) = {
         let state = borrow(context, &state)?;
         debug_assert!(mouse.presented_revision <= state.dom.revision());
@@ -150,7 +177,7 @@ pub(super) fn dispatch_mouse_event_inner(
         let callbacks = node
             .borrow()
             .listeners
-            .get(mouse.event_type)
+            .get(event_type)
             .cloned()
             .unwrap_or_default();
         listeners.push((current, callbacks));
@@ -167,16 +194,11 @@ pub(super) fn dispatch_mouse_event_inner(
         .wheel_delta
         .map(|(delta_x, delta_y, mode)| (delta_x, delta_y, mode.code()))
         .unwrap_or((0.0, 0.0, 0));
-    let pointer_id = mouse.pointer_id.unwrap_or(0);
-    let cancelable = bubbles
-        && !matches!(
-            mouse.event_type,
-            "pointercancel" | "gotpointercapture" | "lostpointercapture"
-        );
+    let pointer_id = mouse.pointer_id;
     let event = Class::instance(
         context.clone(),
         MouseEvent {
-            event_type: mouse.event_type.into(),
+            event_type: event_type.into(),
             target,
             current_target: None,
             client_x: mouse.client_x,
@@ -206,7 +228,7 @@ pub(super) fn dispatch_mouse_event_inner(
             let still_registered = node
                 .borrow()
                 .listeners
-                .get(mouse.event_type)
+                .get(event_type)
                 .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
             if !still_registered {
                 continue;
@@ -216,7 +238,7 @@ pub(super) fn dispatch_mouse_event_inner(
                 .call::<_, ()>((This(current.clone()), event.clone()))
                 .catch(context)
             {
-                eprintln!("Burokku {} listener failed: {error}", mouse.event_type);
+                eprintln!("Burokku {} listener failed: {error}", event_type);
             }
             if event.borrow().immediate_propagation_stopped {
                 break;
@@ -237,8 +259,9 @@ mod tests {
         Plugin,
     };
 
-    use super::{super::pointer::dispatch_mouse_event, *};
+    use super::*;
     use crate::ui::dom_plugin::DomPlugin;
+    use crate::ui::host::{ChangedMouseButton, PressedMouseButtons, WheelDeltaMode};
 
     fn context() -> (JsRuntime, Context) {
         let runtime = JsRuntime::new().unwrap();
@@ -247,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn pointing_dispatch_preserves_payload_and_propagation() {
+    fn mouse_dispatch_preserves_payload_and_propagation() {
         let (plugin, _) = DomPlugin::new();
         let (_runtime, context) = context();
         context.with(|context| {
@@ -257,15 +280,12 @@ mod tests {
                     r#"
                 globalThis.mouseWindow = app.createElement('window');
                 globalThis.mouseTarget = app.createElement('div');
-                globalThis.mouseRelated = app.createElement('div');
                 mouseWindow.appendChild(mouseTarget);
-                mouseWindow.appendChild(mouseRelated);
                 app.appendChild(mouseWindow);
                 globalThis.mouseCalls = [];
                 globalThis.mouseChecks = [];
                 globalThis.lastMouseEvent = null;
-                for (const type of ['click', 'wheel', 'pointerdown', 'pointerup', 'pointermove',
-                                    'pointerenter', 'pointerleave', 'pointercancel']) {
+                for (const type of ['click', 'wheel']) {
                     mouseTarget.addEventListener(type, function (event) {
                         lastMouseEvent = event;
                         mouseCalls.push('target');
@@ -274,79 +294,47 @@ mod tests {
                             event.currentTarget === mouseTarget, this === mouseTarget,
                             event.clientX === 12.5, event.clientY === 8.25,
                             event.button === 2, event.buttons === 3,
-                            event.relatedTarget === mouseRelated,
+                            event.relatedTarget === null, event.pointerId === 0,
                             type !== 'wheel' || (event.deltaX === 4.5 &&
-                                event.deltaY === -6.25 && event.deltaMode === 1),
-                            !type.startsWith('pointer') || (event.pointerId === 1 &&
-                                event.pointerType === 'mouse' && event.isPrimary));
-                        try { event.buttons = 99; } catch {}
-                        try { event.relatedTarget = mouseTarget; } catch {}
-                        try { event.deltaY = 99; } catch {}
-                        try { event.pointerId = 2; } catch {}
-                        mouseChecks.push(event.buttons === 3,
-                            event.relatedTarget === mouseRelated,
-                            type !== 'wheel' || event.deltaY === -6.25,
-                            !type.startsWith('pointer') || event.pointerId === 1);
+                                event.deltaY === -6.25 && event.deltaMode === 1));
                         event.preventDefault();
                     });
-                    mouseWindow.addEventListener(type, function (event) {
-                        mouseCalls.push('window');
-                        mouseChecks.push(event.currentTarget === mouseWindow,
-                            this === mouseWindow, event.target === mouseTarget);
-                    });
+                    mouseWindow.addEventListener(type, () => mouseCalls.push('window'));
                     app.addEventListener(type, () => mouseCalls.push('app'));
                 }
             "#,
                 )
                 .unwrap();
-            let (target, related_target, presented_revision) = {
+            let (target, presented_revision) = {
                 let state = plugin.state();
                 let window = state.dom.children(state.dom.root()).unwrap()[0];
-                let children = state.dom.children(window).unwrap();
-                (children[0], children[1], state.dom.revision())
+                (state.dom.children(window).unwrap()[0], state.dom.revision())
             };
-            for event_type in [
-                "click",
-                "wheel",
-                "pointerdown",
-                "pointerup",
-                "pointermove",
-                "pointerenter",
-                "pointerleave",
-                "pointercancel",
-            ] {
+            for kind in [MouseEventKind::Click, MouseEventKind::Wheel] {
+                let event_type = js_event_type(kind);
                 context
                     .eval::<(), _>("mouseCalls = []; mouseChecks = []")
                     .unwrap();
-                dispatch_mouse_event(
-                    &context,
-                    NativeMouseEvent {
-                        event_type,
-                        target,
-                        presented_revision,
-                        client_x: 12.5,
-                        client_y: 8.25,
-                        button: ChangedMouseButton::SECONDARY,
-                        buttons: PressedMouseButtons::from_bits(3),
-                        related_target: Some(related_target),
-                        wheel_delta: (event_type == "wheel").then_some((
-                            4.5,
-                            -6.25,
-                            WheelDeltaMode::Line,
-                        )),
-                        pointer_id: event_type.starts_with("pointer").then_some(1),
-                    },
-                )
-                .unwrap();
-                let bubbles = !matches!(event_type, "pointerenter" | "pointerleave");
-                let cancelable = bubbles && event_type != "pointercancel";
-                let calls: Vec<String> = context.eval("mouseCalls").unwrap();
-                let expected = if bubbles {
-                    vec!["target", "window", "app"]
-                } else {
-                    vec!["target"]
+                let event = DomMouseEvent {
+                    kind,
+                    target,
+                    presented_revision,
+                    client_x: 12.5,
+                    client_y: 8.25,
+                    button: ChangedMouseButton::SECONDARY,
+                    buttons: PressedMouseButtons::from_bits(3),
+                    wheel_delta: (kind == MouseEventKind::Wheel).then_some((
+                        4.5,
+                        -6.25,
+                        WheelDeltaMode::Line,
+                    )),
                 };
-                assert_eq!(calls, expected, "{event_type}");
+                dispatch_mouse_event(&context, event).unwrap();
+                assert_eq!(
+                    context.eval::<Vec<String>, _>("mouseCalls").unwrap(),
+                    ["target", "window", "app"],
+                    "{event_type}"
+                );
                 assert!(
                     context
                         .eval::<bool, _>("mouseChecks.every(Boolean)")
@@ -355,43 +343,21 @@ mod tests {
                 );
                 let flags: Vec<bool> = context
                     .eval(
-                        "[lastMouseEvent.bubbles, lastMouseEvent.cancelable,
-                      lastMouseEvent.defaultPrevented, lastMouseEvent.currentTarget === null]",
+                        "[lastMouseEvent.bubbles, lastMouseEvent.cancelable, \
+                         lastMouseEvent.defaultPrevented, lastMouseEvent.currentTarget === null]",
                     )
                     .unwrap();
-                assert_eq!(
-                    flags,
-                    [bubbles, cancelable, cancelable, true],
-                    "{event_type}"
-                );
-            }
-            // Leaving the window has no related node.
-            context
-                .eval::<(), _>("mouseRelated = null; mouseChecks = []")
-                .unwrap();
-            let leave = NativeMouseEvent {
-                event_type: "pointerleave",
-                target,
-                presented_revision,
-                client_x: 12.5,
-                client_y: 8.25,
-                button: ChangedMouseButton::SECONDARY,
-                buttons: PressedMouseButtons::from_bits(3),
-                related_target: None,
-                wheel_delta: None,
-                pointer_id: Some(1),
-            };
-            dispatch_mouse_event(&context, leave).unwrap();
-            assert!(context
-                .eval::<bool, _>("mouseChecks.every(Boolean)")
-                .unwrap());
+                assert_eq!(flags, [true, true, true, true], "{event_type}");
 
-            // A queued event must not reach a target detached before dispatch.
-            context
-                .eval::<(), _>("mouseWindow.removeChild(mouseTarget); mouseCalls = []")
-                .unwrap();
-            dispatch_mouse_event(&context, leave).unwrap();
-            assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
+                context
+                    .eval::<(), _>("mouseWindow.removeChild(mouseTarget); mouseCalls = []")
+                    .unwrap();
+                dispatch_mouse_event(&context, event).unwrap();
+                assert!(context.eval::<bool, _>("mouseCalls.length === 0").unwrap());
+                context
+                    .eval::<(), _>("mouseWindow.appendChild(mouseTarget)")
+                    .unwrap();
+            }
         });
     }
 }

@@ -6,28 +6,12 @@ use super::super::{
     classes::{borrow, borrow_mut, NativeNode},
     DomBindingState, SharedDomBindings,
 };
-use super::mouse::{dispatch_mouse_event_inner, NativeMouseEvent};
+use super::mouse::{dispatch_mouse_event, dispatch_pointing_event_inner, PointingEvent};
 use crate::ui::{
     elements::NodeId,
+    events::{ActivePointer, DomMouseEvent, DomPointerEvent, MouseEventKind, PointerEventKind},
     host::{ChangedMouseButton, NativeMouseInput, NativeMouseInputKind, PressedMouseButtons},
 };
-
-#[derive(Clone, Copy, Debug)]
-pub(in crate::ui::dom_plugin) struct ActivePointer {
-    target: NodeId,
-    presented_revision: u64,
-    client_x: f64,
-    client_y: f64,
-}
-
-#[derive(Debug, Default)]
-pub(in crate::ui::dom_plugin) struct PointerState {
-    pub(in crate::ui::dom_plugin) active: Option<ActivePointer>,
-    pub(in crate::ui::dom_plugin) pressed_target: Option<NodeId>,
-    pub(in crate::ui::dom_plugin) capture: Option<NodeId>,
-    pub(in crate::ui::dom_plugin) announced_capture: Option<NodeId>,
-    pub(in crate::ui::dom_plugin) hover_path: Vec<NodeId>,
-}
 
 impl DomBindingState {
     pub(crate) fn pointer_capture_target(&self) -> Option<NodeId> {
@@ -65,37 +49,27 @@ fn hover_path(state: &DomBindingState, target: Option<NodeId>) -> Vec<NodeId> {
     path
 }
 
-fn mouse_event(input: NativeMouseInput, target: NodeId) -> Option<NativeMouseEvent> {
-    let (event_type, button, wheel_delta, pointer_id) = match input.kind {
-        NativeMouseInputKind::Hover => return None,
-        NativeMouseInputKind::Move => ("pointermove", ChangedMouseButton::NONE, None, Some(1)),
+fn pointer_event(input: NativeMouseInput, target: NodeId) -> Option<DomPointerEvent> {
+    let (kind, button) = match input.kind {
+        NativeMouseInputKind::Hover | NativeMouseInputKind::Wheel { .. } => return None,
+        NativeMouseInputKind::Move => (PointerEventKind::Move, ChangedMouseButton::NONE),
         NativeMouseInputKind::Button { button, pressed } => {
             let changed_button = button.buttons_bit();
             if changed_button == 0 {
                 return None;
             }
-            let event_type = if pressed && input.buttons.bits() == changed_button {
-                "pointerdown"
+            let kind = if pressed && input.buttons.bits() == changed_button {
+                PointerEventKind::Down
             } else if !pressed && input.buttons.is_empty() {
-                "pointerup"
+                PointerEventKind::Up
             } else {
-                "pointermove"
+                PointerEventKind::Move
             };
-            (event_type, button, None, Some(1))
+            (kind, button)
         }
-        NativeMouseInputKind::Wheel {
-            delta_x,
-            delta_y,
-            delta_mode,
-        } => (
-            "wheel",
-            ChangedMouseButton::PRIMARY,
-            Some((delta_x, delta_y, delta_mode)),
-            None,
-        ),
     };
-    Some(NativeMouseEvent {
-        event_type,
+    Some(DomPointerEvent {
+        kind,
         target,
         presented_revision: input.presented_revision,
         client_x: input.client_x,
@@ -103,8 +77,28 @@ fn mouse_event(input: NativeMouseInput, target: NodeId) -> Option<NativeMouseEve
         button,
         buttons: input.buttons,
         related_target: None,
-        wheel_delta,
-        pointer_id,
+        pointer_id: 1,
+    })
+}
+
+fn wheel_event(input: NativeMouseInput, target: NodeId) -> Option<DomMouseEvent> {
+    let NativeMouseInputKind::Wheel {
+        delta_x,
+        delta_y,
+        delta_mode,
+    } = input.kind
+    else {
+        return None;
+    };
+    Some(DomMouseEvent {
+        kind: MouseEventKind::Wheel,
+        target,
+        presented_revision: input.presented_revision,
+        client_x: input.client_x,
+        client_y: input.client_y,
+        button: ChangedMouseButton::PRIMARY,
+        buttons: input.buttons,
+        wheel_delta: Some((delta_x, delta_y, delta_mode)),
     })
 }
 
@@ -112,7 +106,7 @@ fn hover_events(
     previous: &[NodeId],
     next: &[NodeId],
     input: NativeMouseInput,
-) -> Vec<NativeMouseEvent> {
+) -> Vec<DomPointerEvent> {
     if previous == next {
         return Vec::new();
     }
@@ -122,9 +116,9 @@ fn hover_events(
         NativeMouseInputKind::Wheel { .. } => ChangedMouseButton::PRIMARY,
         NativeMouseInputKind::Hover | NativeMouseInputKind::Move => ChangedMouseButton::NONE,
     };
-    let mut push = |event_type, target, related_target| {
-        events.push(NativeMouseEvent {
-            event_type,
+    let mut push = |kind, target, related_target| {
+        events.push(DomPointerEvent {
+            kind,
             target,
             related_target,
             presented_revision: input.presented_revision,
@@ -132,8 +126,7 @@ fn hover_events(
             client_y: input.client_y,
             button,
             buttons: input.buttons,
-            wheel_delta: None,
-            pointer_id: Some(1),
+            pointer_id: 1,
         });
     };
     let old_target = previous.first().copied();
@@ -141,10 +134,10 @@ fn hover_events(
     // ponytail: O(depth²) membership checks; use sets if deep hover paths become costly.
     // Comparing membership also handles a still-hovered subtree being reparented.
     for &node in previous.iter().filter(|node| !next.contains(node)) {
-        push("pointerleave", node, new_target);
+        push(PointerEventKind::Leave, node, new_target);
     }
     for &node in next.iter().rev().filter(|node| !previous.contains(node)) {
-        push("pointerenter", node, old_target);
+        push(PointerEventKind::Enter, node, old_target);
     }
     events
 }
@@ -167,7 +160,7 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         }
     };
     for event in boundaries {
-        dispatch_mouse_event(context, event)?;
+        dispatch_pointer_event(context, event)?;
     }
 
     let target = {
@@ -207,24 +200,25 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         }
     };
 
-    if let Some(event) = target.and_then(|target| mouse_event(input, target)) {
+    if let Some(event) = target.and_then(|target| pointer_event(input, target)) {
+        dispatch_pointer_event(context, event)?;
+    }
+    if let Some(event) = target.and_then(|target| wheel_event(input, target)) {
         dispatch_mouse_event(context, event)?;
     }
 
     if let Some(target) = click_target {
         dispatch_mouse_event(
             context,
-            NativeMouseEvent {
-                event_type: "click",
+            DomMouseEvent {
+                kind: MouseEventKind::Click,
                 target,
                 presented_revision: input.presented_revision,
                 client_x: input.client_x,
                 client_y: input.client_y,
                 button: ChangedMouseButton::PRIMARY,
                 buttons: input.buttons,
-                related_target: None,
                 wheel_delta: None,
-                pointer_id: None,
             },
         )?;
     }
@@ -239,10 +233,10 @@ pub(super) fn dispatch_pointer_cancel(context: &Ctx<'_>) -> JsResult<()> {
     let Some(active) = borrow(context, &state)?.pointer.active else {
         return Ok(());
     };
-    dispatch_mouse_event(
+    dispatch_pointer_event(
         context,
-        NativeMouseEvent {
-            event_type: "pointercancel",
+        DomPointerEvent {
+            kind: PointerEventKind::Cancel,
             target: active.target,
             presented_revision: active.presented_revision,
             client_x: active.client_x,
@@ -250,22 +244,66 @@ pub(super) fn dispatch_pointer_cancel(context: &Ctx<'_>) -> JsResult<()> {
             button: ChangedMouseButton::NONE,
             buttons: PressedMouseButtons::NONE,
             related_target: None,
-            wheel_delta: None,
-            pointer_id: Some(1),
+            pointer_id: 1,
         },
     )
 }
 
-pub(in crate::ui::dom_plugin) fn dispatch_mouse_event(
+fn js_event_type(kind: PointerEventKind) -> &'static str {
+    match kind {
+        PointerEventKind::Down => "pointerdown",
+        PointerEventKind::Up => "pointerup",
+        PointerEventKind::Move => "pointermove",
+        PointerEventKind::Enter => "pointerenter",
+        PointerEventKind::Leave => "pointerleave",
+        PointerEventKind::Cancel => "pointercancel",
+        PointerEventKind::GotCapture => "gotpointercapture",
+        PointerEventKind::LostCapture => "lostpointercapture",
+    }
+}
+
+fn dispatch_pointer_event_inner(context: &Ctx<'_>, pointer: DomPointerEvent) -> JsResult<()> {
+    let bubbles = !matches!(
+        pointer.kind,
+        PointerEventKind::Enter | PointerEventKind::Leave
+    );
+    let cancelable = bubbles
+        && !matches!(
+            pointer.kind,
+            PointerEventKind::Cancel | PointerEventKind::GotCapture | PointerEventKind::LostCapture
+        );
+    dispatch_pointing_event_inner(
+        context,
+        js_event_type(pointer.kind),
+        bubbles,
+        cancelable,
+        PointingEvent {
+            target: pointer.target,
+            presented_revision: pointer.presented_revision,
+            client_x: pointer.client_x,
+            client_y: pointer.client_y,
+            button: pointer.button,
+            buttons: pointer.buttons,
+            related_target: pointer.related_target,
+            wheel_delta: None,
+            pointer_id: pointer.pointer_id,
+        },
+    )
+}
+
+pub(in crate::ui::dom_plugin) fn dispatch_pointer_event(
     context: &Ctx<'_>,
-    mut mouse: NativeMouseEvent,
+    mut pointer: DomPointerEvent,
 ) -> JsResult<()> {
     let routes_through_capture = matches!(
-        mouse.event_type,
-        "pointerdown" | "pointerup" | "pointermove" | "pointercancel"
+        pointer.kind,
+        PointerEventKind::Down
+            | PointerEventKind::Up
+            | PointerEventKind::Move
+            | PointerEventKind::Cancel
     );
     if !routes_through_capture {
-        return dispatch_mouse_event_inner(context, mouse);
+        return dispatch_pointer_event_inner(context, pointer);
     }
 
     let app: Object = context.globals().get("app")?;
@@ -275,40 +313,40 @@ pub(in crate::ui::dom_plugin) fn dispatch_mouse_event(
     let state = app.borrow().state.clone();
     {
         let mut state = borrow_mut(context, &state)?;
-        match mouse.event_type {
-            "pointerdown" => {
+        match pointer.kind {
+            PointerEventKind::Down => {
                 state.pointer.active = Some(ActivePointer {
-                    target: mouse.target,
-                    presented_revision: mouse.presented_revision,
-                    client_x: mouse.client_x,
-                    client_y: mouse.client_y,
+                    target: pointer.target,
+                    presented_revision: pointer.presented_revision,
+                    client_x: pointer.client_x,
+                    client_y: pointer.client_y,
                 });
             }
-            "pointermove" | "pointerup" => {
+            PointerEventKind::Move | PointerEventKind::Up => {
                 if let Some(active) = state.pointer.active.as_mut() {
-                    active.presented_revision = mouse.presented_revision;
-                    active.client_x = mouse.client_x;
-                    active.client_y = mouse.client_y;
+                    active.presented_revision = pointer.presented_revision;
+                    active.client_x = pointer.client_x;
+                    active.client_y = pointer.client_y;
                 }
             }
             _ => {}
         }
     }
-    dispatch_pointer_capture_transitions(context, &state, mouse)?;
+    dispatch_pointer_capture_transitions(context, &state, pointer)?;
     if let Some(target) = borrow(context, &state)?.pointer.capture {
-        mouse.target = target;
+        pointer.target = target;
     }
 
-    let result = dispatch_mouse_event_inner(context, mouse);
-    if mouse.event_type == "pointercancel"
-        || (mouse.event_type == "pointerup" && mouse.buttons.is_empty())
+    let result = dispatch_pointer_event_inner(context, pointer);
+    if pointer.kind == PointerEventKind::Cancel
+        || (pointer.kind == PointerEventKind::Up && pointer.buttons.is_empty())
     {
         let mut state = borrow_mut(context, &state)?;
         state.pointer.active = None;
         state.pointer.pressed_target = None;
         state.pointer.capture = None;
     }
-    let transitions = dispatch_pointer_capture_transitions(context, &state, mouse);
+    let transitions = dispatch_pointer_capture_transitions(context, &state, pointer);
     result?;
     transitions
 }
@@ -316,7 +354,7 @@ pub(in crate::ui::dom_plugin) fn dispatch_mouse_event(
 fn dispatch_pointer_capture_transitions(
     context: &Ctx<'_>,
     state: &SharedDomBindings,
-    source: NativeMouseEvent,
+    source: DomPointerEvent,
 ) -> JsResult<()> {
     let transitions = {
         let mut state = borrow_mut(context, state)?;
@@ -334,23 +372,21 @@ fn dispatch_pointer_capture_transitions(
         }
         state.pointer.announced_capture = next;
         [
-            ("lostpointercapture", previous),
-            ("gotpointercapture", next),
+            (PointerEventKind::LostCapture, previous),
+            (PointerEventKind::GotCapture, next),
         ]
     };
 
-    for (event_type, target) in transitions {
+    for (kind, target) in transitions {
         let Some(target) = target else {
             continue;
         };
-        dispatch_mouse_event_inner(
+        dispatch_pointer_event_inner(
             context,
-            NativeMouseEvent {
-                event_type,
+            DomPointerEvent {
+                kind,
                 target,
                 related_target: None,
-                wheel_delta: None,
-                pointer_id: Some(1),
                 ..source
             },
         )?;
@@ -428,8 +464,8 @@ mod tests {
                 let children = state.dom.children(window).unwrap();
                 (children[0], children[1], state.dom.revision())
             };
-            let pointer = |event_type, buttons| NativeMouseEvent {
-                event_type,
+            let pointer = |kind, buttons| DomPointerEvent {
+                kind,
                 target: hit_target,
                 presented_revision: revision,
                 client_x: 10.0,
@@ -437,16 +473,15 @@ mod tests {
                 button: ChangedMouseButton::PRIMARY,
                 buttons: PressedMouseButtons::from_bits(buttons),
                 related_target: None,
-                wheel_delta: None,
-                pointer_id: Some(1),
+                pointer_id: 1,
             };
             for event in [
-                pointer("pointerdown", 1),
-                pointer("pointermove", 1),
-                pointer("pointermove", 1),
-                pointer("pointerup", 0),
+                pointer(PointerEventKind::Down, 1),
+                pointer(PointerEventKind::Move, 1),
+                pointer(PointerEventKind::Move, 1),
+                pointer(PointerEventKind::Up, 0),
             ] {
-                dispatch_mouse_event(&context, event).unwrap();
+                dispatch_pointer_event(&context, event).unwrap();
             }
             assert_eq!(
                 context.eval::<Vec<String>, _>("captureLog").unwrap(),
@@ -480,14 +515,14 @@ mod tests {
                     .unwrap(),
                 ["NotFoundError", "NotFoundError"]
             );
-            dispatch_mouse_event(&context, pointer("pointerdown", 1)).unwrap();
+            dispatch_pointer_event(&context, pointer(PointerEventKind::Down, 1)).unwrap();
             assert!(context
                 .eval::<bool, _>(
                     "captureWindow.removeChild(captureTarget); \
                      captureTarget.hasPointerCapture(1) === false",
                 )
                 .unwrap());
-            dispatch_mouse_event(&context, pointer("pointerup", 0)).unwrap();
+            dispatch_pointer_event(&context, pointer(PointerEventKind::Up, 0)).unwrap();
             assert_ne!(hit_target, capture_target);
         });
     }

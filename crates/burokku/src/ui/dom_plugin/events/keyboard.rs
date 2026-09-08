@@ -4,7 +4,7 @@ use super::super::{
     classes::{borrow, wrap_node, NativeNode},
     errors,
 };
-use crate::ui::host::NativeKeyboardEvent;
+use crate::ui::events::{DomKeyboardEvent, KeyboardEventKind};
 use rquickjs::{
     class::Trace, prelude::This, CatchResultExt, Class, Ctx, IntoJs, JsLifetime, Null, Object,
     Result as JsResult, Value,
@@ -69,15 +69,23 @@ impl<'js> KeyboardEvent<'js> {
     }
 }
 
+fn js_event_type(kind: KeyboardEventKind) -> &'static str {
+    match kind {
+        KeyboardEventKind::Down => "keydown",
+        KeyboardEventKind::Up => "keyup",
+    }
+}
+
 pub(super) fn dispatch_keyboard_event(
     context: &Ctx<'_>,
-    keyboard: NativeKeyboardEvent,
+    keyboard: DomKeyboardEvent,
 ) -> JsResult<()> {
     let app: Object = context.globals().get("app")?;
     let Some(app) = Class::<NativeNode>::from_object(&app) else {
         return Ok(());
     };
     let state = app.borrow().state.clone();
+    let event_type = js_event_type(keyboard.kind);
     let path = {
         let state = borrow(context, &state)?;
         if !state.dom.is_connected(keyboard.target).unwrap_or(false) {
@@ -104,7 +112,7 @@ pub(super) fn dispatch_keyboard_event(
         let callbacks = node
             .borrow()
             .listeners
-            .get(keyboard.event_type)
+            .get(event_type)
             .cloned()
             .unwrap_or_default();
         listeners.push((current, callbacks));
@@ -117,16 +125,16 @@ pub(super) fn dispatch_keyboard_event(
     let event = Class::instance(
         context.clone(),
         KeyboardEvent {
-            event_type: keyboard.event_type.into(),
+            event_type: event_type.into(),
             target,
             current_target: None,
             key: keyboard.key,
             key_code: keyboard.key_code,
             repeat: keyboard.repeat,
-            shift_key: keyboard.modifiers.shift,
-            ctrl_key: keyboard.modifiers.control,
-            alt_key: keyboard.modifiers.alt,
-            meta_key: keyboard.modifiers.command,
+            shift_key: keyboard.shift_key,
+            ctrl_key: keyboard.ctrl_key,
+            alt_key: keyboard.alt_key,
+            meta_key: keyboard.meta_key,
             bubbles: true,
             cancelable: true,
             default_prevented: false,
@@ -143,7 +151,7 @@ pub(super) fn dispatch_keyboard_event(
             let still_registered = node
                 .borrow()
                 .listeners
-                .get(keyboard.event_type)
+                .get(event_type)
                 .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
             if !still_registered {
                 continue;
@@ -153,7 +161,7 @@ pub(super) fn dispatch_keyboard_event(
                 .call::<_, ()>((This(current.clone()), event.clone()))
                 .catch(context)
             {
-                eprintln!("Burokku {} listener failed: {error}", keyboard.event_type);
+                eprintln!("Burokku {event_type} listener failed: {error}");
             }
             if event.borrow().immediate_propagation_stopped {
                 break;
@@ -169,14 +177,12 @@ pub(super) fn dispatch_keyboard_event(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::ui::dom_plugin::DomPlugin;
     use runtime::{
         rquickjs::{Context, Runtime as JsRuntime},
         Plugin,
     };
-    use winit::Modifiers;
-
-    use super::*;
-    use crate::ui::dom_plugin::DomPlugin;
 
     fn context() -> (JsRuntime, Context) {
         let runtime = JsRuntime::new().unwrap();
@@ -225,25 +231,22 @@ mod tests {
                 .dom
                 .children(plugin.state().dom.root())
                 .unwrap()[0];
-            let modifiers = Modifiers {
-                shift: true,
-                control: true,
-                command: true,
-                ..Modifiers::default()
-            };
-            for event_type in ["keydown", "keyup"] {
+            for kind in [KeyboardEventKind::Down, KeyboardEventKind::Up] {
                 context
                     .eval::<(), _>("keyCalls = []; keyChecks = []")
                     .unwrap();
                 dispatch_keyboard_event(
                     &context,
-                    NativeKeyboardEvent {
-                        event_type,
+                    DomKeyboardEvent {
+                        kind,
                         target,
                         key: "A".into(),
                         key_code: 0,
-                        repeat: event_type == "keydown",
-                        modifiers,
+                        repeat: kind == KeyboardEventKind::Down,
+                        shift_key: true,
+                        ctrl_key: true,
+                        alt_key: false,
+                        meta_key: true,
                     },
                 )
                 .unwrap();

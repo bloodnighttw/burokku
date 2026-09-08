@@ -6,8 +6,8 @@ mod reconcile;
 mod render;
 
 pub(crate) use events::{
-    ChangedMouseButton, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind,
-    PressedMouseButtons, WheelDeltaMode,
+    ChangedMouseButton, NativeKeyboardEvent, NativeKeyboardEventKind, NativeMouseInput,
+    NativeMouseInputKind, PressedMouseButtons, WheelDeltaMode,
 };
 
 use thiserror::Error;

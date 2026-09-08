@@ -15,11 +15,11 @@ mod errors;
 mod events;
 mod lifetime;
 
+use crate::ui::events::PointerState;
+#[cfg(test)]
+use crate::ui::events::{DomMouseEvent, MouseEventKind};
 #[cfg(test)]
 use crate::ui::host::{ChangedMouseButton, PressedMouseButtons};
-#[cfg(test)]
-use events::NativeMouseEvent;
-use events::PointerState;
 use lifetime::SharedWrapperRoots;
 
 pub(crate) type SharedDomBindings = Rc<RefCell<DomBindingState>>;
@@ -602,17 +602,15 @@ mod tests {
             for target in targets.iter().copied() {
                 events::dispatch_mouse_event(
                     &context,
-                    NativeMouseEvent {
-                        event_type: "click",
+                    DomMouseEvent {
+                        kind: MouseEventKind::Click,
                         target,
                         presented_revision,
                         client_x: 0.0,
                         client_y: 0.0,
                         button: ChangedMouseButton::PRIMARY,
                         buttons: PressedMouseButtons::NONE,
-                        related_target: None,
                         wheel_delta: None,
-                        pointer_id: None,
                     },
                 )
                 .unwrap();

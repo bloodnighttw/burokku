@@ -103,9 +103,15 @@ pub(crate) struct NativeMouseInput {
     pub(crate) buttons: PressedMouseButtons,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeKeyboardEventKind {
+    Pressed,
+    Released,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeKeyboardEvent {
-    pub(crate) event_type: &'static str,
+    pub(crate) kind: NativeKeyboardEventKind,
     pub(crate) target: NodeId,
     pub(crate) key: String,
     pub(crate) key_code: u16,
@@ -270,9 +276,9 @@ impl ApplicationHost {
             modifiers,
         } = event;
         let event = NativeKeyboardEvent {
-            event_type: match state {
-                ElementState::Pressed => "keydown",
-                ElementState::Released => "keyup",
+            kind: match state {
+                ElementState::Pressed => NativeKeyboardEventKind::Pressed,
+                ElementState::Released => NativeKeyboardEventKind::Released,
             },
             target,
             key: keyboard_key(key_code, text, logical_text),

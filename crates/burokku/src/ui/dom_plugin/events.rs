@@ -7,13 +7,13 @@ mod pointer;
 use runtime::JsTaskQueueError;
 
 use super::DomBindingState;
-use crate::ui::host::{NativeKeyboardEvent, NativeMouseInput};
+use crate::ui::{
+    events::DomKeyboardEvent,
+    host::{NativeKeyboardEvent, NativeMouseInput},
+};
 
 #[cfg(test)]
-pub(super) use mouse::NativeMouseEvent;
-#[cfg(test)]
-pub(super) use pointer::dispatch_mouse_event;
-pub(super) use pointer::PointerState;
+pub(super) use mouse::dispatch_mouse_event;
 
 impl DomBindingState {
     pub(crate) fn enqueue_pointer_cancel(&self) -> std::result::Result<(), JsTaskQueueError> {
@@ -53,6 +53,7 @@ impl DomBindingState {
         &self,
         event: NativeKeyboardEvent,
     ) -> std::result::Result<(), JsTaskQueueError> {
+        let event = DomKeyboardEvent::from(event);
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?

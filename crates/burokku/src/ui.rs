@@ -4,6 +4,7 @@
 )]
 pub(crate) mod dom_plugin;
 pub mod elements;
+pub(crate) mod events;
 pub(crate) mod gpu;
 pub(crate) mod host;
 pub(crate) mod layout;
