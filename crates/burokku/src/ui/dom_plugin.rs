@@ -6,7 +6,7 @@ use runtime::{rquickjs::Ctx, JsTaskQueue, JsTaskQueueError, Plugin};
 use winit::Modifiers;
 
 use super::{
-    elements::{Dom, DomError, NodeId, ReclaimReport},
+    elements::{Dom, DomError, NodeId},
     layout::ComputedLayout,
 };
 
@@ -107,7 +107,6 @@ pub(crate) struct LayoutRect {
 pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
     wrapper_roots: SharedWrapperRoots,
-    pub(crate) last_reclaim: ReclaimReport,
     task_queue: Option<JsTaskQueue>,
     presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
     pointer_active: bool,
@@ -216,7 +215,6 @@ impl DomPlugin {
         let state = Rc::new(RefCell::new(UiDomState {
             dom: Dom::new(),
             wrapper_roots: SharedWrapperRoots::default(),
-            last_reclaim: ReclaimReport::default(),
             task_queue: None,
             presented_layout: RefCell::new(None),
             pointer_active: false,
@@ -233,13 +231,12 @@ impl DomPlugin {
     }
 
     #[cfg(test)]
-    #[cfg(test)]
-    fn reclaim_for_test(&self) {
+    fn reclaim_for_test(&self) -> crate::ui::elements::ReclaimReport {
         self.state
             .try_borrow_mut()
             .expect("DOM plugin state is not borrowed")
             .reclaim_detached()
-            .unwrap();
+            .unwrap()
     }
 
     #[cfg(test)]
@@ -571,9 +568,9 @@ mod tests {
         // no FinalizationRegistry callback or JavaScript job is needed.
         assert_eq!(plugin.state().live_wrapper_count(), 1);
 
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
-        assert_eq!(plugin.state().last_reclaim.nodes.len(), 1);
+        assert_eq!(reclaimed.nodes.len(), 1);
         assert_eq!(plugin.state().dom.iter().count(), 1);
         context.with(|context| {
             assert!(context
@@ -606,9 +603,9 @@ mod tests {
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrapper_count(), 2);
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 4);
-        assert!(plugin.state().last_reclaim.nodes.is_empty());
+        assert!(reclaimed.nodes.is_empty());
 
         context.with(|context| {
             assert!(context
@@ -628,9 +625,9 @@ mod tests {
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrapper_count(), 1);
 
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
-        assert_eq!(plugin.state().last_reclaim.nodes.len(), 3);
+        assert_eq!(reclaimed.nodes.len(), 3);
     }
 
     #[test]
@@ -1328,10 +1325,10 @@ mod tests {
         assert_eq!(plugin.state().dom.node_count(), 101);
 
         collect_garbage(&runtime, &context);
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().live_wrapper_count(), 1);
         assert_eq!(plugin.state().dom.node_count(), 1);
-        assert_eq!(plugin.state().last_reclaim.nodes.len(), 100);
+        assert_eq!(reclaimed.nodes.len(), 100);
     }
 
     fn run_framework_fixture(prefix: &str, bundle: &str) {

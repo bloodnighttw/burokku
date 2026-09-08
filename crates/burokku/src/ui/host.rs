@@ -1416,12 +1416,14 @@ impl ApplicationHandler for ApplicationHost {
                     return;
                 }
             };
-            if let Err(error) = state.reclaim_detached() {
-                drop(state);
-                self.fail(event_loop, HostError::DomMaintenance(error.to_string()));
-                return;
+            match state.reclaim_detached() {
+                Ok(report) => report.nodes,
+                Err(error) => {
+                    drop(state);
+                    self.fail(event_loop, HostError::DomMaintenance(error.to_string()));
+                    return;
+                }
             }
-            state.last_reclaim.nodes.clone()
         };
         self.layout.remove_nodes(&reclaimed);
 
