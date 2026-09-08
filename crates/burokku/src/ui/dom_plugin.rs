@@ -1,4 +1,5 @@
-//! UI-thread ownership and QuickJS bindings for the live DOM.
+//! UI-thread-only QuickJS binding state around one live [`Dom`].
+//! This module integrates the document model; it is not the document model itself.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -16,7 +17,7 @@ mod lifetime;
 
 use lifetime::SharedWrapperRoots;
 
-pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
+pub(crate) type SharedDomBindings = Rc<RefCell<DomBindingState>>;
 
 /// DOM `MouseEvent.button`: the button changed by this event.
 /// `None` means no button changed and is exposed to JavaScript as `-1`.
@@ -158,7 +159,7 @@ struct PointerState {
 }
 
 #[derive(Debug)]
-pub(crate) struct UiDomState {
+pub(crate) struct DomBindingState {
     pub(crate) dom: Dom,
     wrapper_roots: SharedWrapperRoots,
     task_queue: Option<JsTaskQueue>,
@@ -166,7 +167,7 @@ pub(crate) struct UiDomState {
     pointer: PointerState,
 }
 
-impl UiDomState {
+impl DomBindingState {
     pub(crate) fn publish_presented_layout(&self, computed: Rc<ComputedLayout>) {
         self.presented_layout.replace(Some(computed));
     }
@@ -269,12 +270,12 @@ impl UiDomState {
 
 /// Installs bindings backed by the UI thread's live DOM.
 pub(crate) struct DomPlugin {
-    state: SharedUiDom,
+    state: SharedDomBindings,
 }
 
 impl DomPlugin {
-    pub(crate) fn new() -> (Self, SharedUiDom) {
-        let state = Rc::new(RefCell::new(UiDomState {
+    pub(crate) fn new() -> (Self, SharedDomBindings) {
+        let state = Rc::new(RefCell::new(DomBindingState {
             dom: Dom::new(),
             wrapper_roots: SharedWrapperRoots::default(),
             task_queue: None,
@@ -299,7 +300,7 @@ impl DomPlugin {
     }
 
     #[cfg(test)]
-    fn state(&self) -> std::cell::Ref<'_, UiDomState> {
+    fn state(&self) -> std::cell::Ref<'_, DomBindingState> {
         self.state
             .try_borrow()
             .expect("DOM plugin state is not borrowed")

@@ -13,7 +13,7 @@ use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use slotmap::Key;
 
-use super::UiDomState;
+use super::DomBindingState;
 use crate::ui::elements::{DomError, NodeId, ReclaimReport};
 
 pub(super) type SharedWrapperRoots = Rc<RefCell<WrapperRoots>>;
@@ -45,7 +45,7 @@ pub(super) fn encode_node_id(id: NodeId) -> String {
     format!("{:016x}", id.data().as_ffi())
 }
 
-impl UiDomState {
+impl DomBindingState {
     pub(super) fn acquire_wrapper(&self, id: NodeId) -> Result<SharedWrapperRoots, DomError> {
         self.dom
             .contains(id)

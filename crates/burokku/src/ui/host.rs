@@ -13,8 +13,8 @@ use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
     dom_plugin::{
-        Button, Buttons, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind, SharedUiDom,
-        WheelDeltaMode,
+        Button, Buttons, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind,
+        SharedDomBindings, WheelDeltaMode,
     },
     elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
@@ -315,7 +315,7 @@ struct PendingGraphicsReplacement {
 
 #[derive(Debug)]
 pub(crate) struct ApplicationHost {
-    dom: SharedUiDom,
+    dom_bindings: SharedDomBindings,
     observed_revision: Option<u64>,
     graphics: Option<GraphicsContext>,
     pending_graphics: Option<PendingGraphicsInitialization>,
@@ -334,9 +334,13 @@ pub(crate) struct ApplicationHost {
 }
 
 impl ApplicationHost {
-    pub(crate) fn new(dom: SharedUiDom, text: TextEngine, lifecycle: RuntimeLifecycle) -> Self {
+    pub(crate) fn new(
+        dom_bindings: SharedDomBindings,
+        text: TextEngine,
+        lifecycle: RuntimeLifecycle,
+    ) -> Self {
         Self {
-            dom,
+            dom_bindings,
             observed_revision: None,
             // GPU allocation is delayed until a native Window exists, so its
             // surface can constrain adapter selection.
@@ -392,7 +396,7 @@ impl ApplicationHost {
     fn discard_stale_presented_frame(&mut self) {
         let window = self.windows.current().map(|window| window.id());
         if self.hover_window != window {
-            self.dom.borrow_mut().clear_hover_path();
+            self.dom_bindings.borrow_mut().clear_hover_path();
             self.cursor = None;
             self.hover_window = window;
         }
@@ -422,7 +426,7 @@ impl ApplicationHost {
 
     fn queue_pointer_cancel(&self) -> Result<(), HostError> {
         let state = self
-            .dom
+            .dom_bindings
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
         match state.enqueue_pointer_cancel() {
@@ -479,7 +483,7 @@ impl ApplicationHost {
             modifiers,
         };
         let state = self
-            .dom
+            .dom_bindings
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
         if let Err(error) = state.enqueue_keyboard_event(event) {
@@ -524,7 +528,7 @@ impl ApplicationHost {
             .window()
             .scale_factor();
         let revision = self
-            .dom
+            .dom_bindings
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?
             .dom
@@ -554,7 +558,7 @@ impl ApplicationHost {
             return Ok(());
         }
         let state = self
-            .dom
+            .dom_bindings
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
         let enqueue = state.enqueue_mouse_input(input);
@@ -642,7 +646,7 @@ impl ApplicationHost {
         // installing it. The borrow ends before any renderer or native work.
         let desired_dom_id = {
             let state = self
-                .dom
+                .dom_bindings
                 .try_borrow()
                 .map_err(|_| HostError::DomBorrowConflict)?;
             WindowSpec::from_dom(&state.dom)?
@@ -703,7 +707,7 @@ impl ApplicationHost {
 
         let is_current = {
             let state = self
-                .dom
+                .dom_bindings
                 .try_borrow()
                 .map_err(|_| HostError::DomBorrowConflict)?;
             WindowSpec::from_dom(&state.dom)?.as_ref() == Some(pending.prepared.spec())
@@ -813,7 +817,7 @@ impl ApplicationHost {
     fn sync_dom(&mut self, event_loop: &ActiveEventLoop) -> Result<(), HostError> {
         let (revision, desired) = {
             let state = self
-                .dom
+                .dom_bindings
                 .try_borrow()
                 .map_err(|_| HostError::DomBorrowConflict)?;
             (state.dom.revision(), WindowSpec::from_dom(&state.dom)?)
@@ -938,7 +942,7 @@ impl ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.dom.borrow_mut().clear_hover_path();
+                self.dom_bindings.borrow_mut().clear_hover_path();
                 self.cursor = None;
                 if self.ever_had_window {
                     self.request_exit();
@@ -999,7 +1003,7 @@ impl ApplicationHost {
             self.presented = None;
         }
         let mut revision = self
-            .dom
+            .dom_bindings
             .try_borrow()
             .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?
             .dom
@@ -1020,7 +1024,7 @@ impl ApplicationHost {
         })?;
         let (frame, computed) = {
             let state = self
-                .dom
+                .dom_bindings
                 .try_borrow()
                 .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?;
             revision = state.dom.revision();
@@ -1070,7 +1074,7 @@ impl ApplicationHost {
         {
             debug_assert_eq!(presented_revision, revision);
             debug_assert_eq!(renderer.last_presented_revision(), Some(presented_revision));
-            self.dom
+            self.dom_bindings
                 .try_borrow()
                 .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?
                 .publish_presented_layout(computed);
@@ -1131,7 +1135,7 @@ impl ApplicationHandler for ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.dom.borrow_mut().clear_hover_path();
+                self.dom_bindings.borrow_mut().clear_hover_path();
                 self.cursor = None;
                 self.windows.close();
                 self.request_exit();
@@ -1144,8 +1148,8 @@ impl ApplicationHandler for ApplicationHost {
                 if self.pending_graphics.is_some() {
                     return;
                 }
-                let dom = Rc::clone(&self.dom);
-                let revision = match dom.try_borrow() {
+                let dom_bindings = Rc::clone(&self.dom_bindings);
+                let revision = match dom_bindings.try_borrow() {
                     Ok(state) => state.dom.revision(),
                     Err(_) => {
                         self.fail(event_loop, HostError::DomBorrowConflict);
@@ -1308,9 +1312,9 @@ impl ApplicationHandler for ApplicationHost {
             return;
         }
 
-        let dom = Rc::clone(&self.dom);
+        let dom_bindings = Rc::clone(&self.dom_bindings);
         let reclaimed = {
-            let mut state = match dom.try_borrow_mut() {
+            let mut state = match dom_bindings.try_borrow_mut() {
                 Ok(state) => state,
                 Err(_) => {
                     self.fail(event_loop, HostError::DomBorrowConflict);

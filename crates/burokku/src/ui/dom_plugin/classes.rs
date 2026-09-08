@@ -6,8 +6,9 @@ use rquickjs::{
 };
 
 use super::{
-    errors, lifetime::SharedWrapperRoots, ActivePointer, Button, LayoutRect, NativeKeyboardEvent,
-    NativeMouseEvent, NativeMouseInput, NativeMouseInputKind, SharedUiDom, UiDomState,
+    errors, lifetime::SharedWrapperRoots, ActivePointer, Button, DomBindingState, LayoutRect,
+    NativeKeyboardEvent, NativeMouseEvent, NativeMouseInput, NativeMouseInputKind,
+    SharedDomBindings,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -194,7 +195,7 @@ struct EventListener<'js> {
 #[rquickjs::class(rename = "NativeNode")]
 pub(super) struct NativeNode<'js> {
     #[qjs(skip_trace)]
-    state: SharedUiDom,
+    state: SharedDomBindings,
     #[qjs(skip_trace)]
     id: NodeId,
     #[qjs(skip_trace)]
@@ -622,7 +623,7 @@ impl<'js> NativeNode<'js> {
         &self,
         context: &Ctx<'js>,
         operation: &str,
-        read: impl FnOnce(&UiDomState) -> std::result::Result<Option<NodeId>, DomError>,
+        read: impl FnOnce(&DomBindingState) -> std::result::Result<Option<NodeId>, DomError>,
     ) -> Result<Value<'js>> {
         let result = {
             let state = borrow(context, &self.state)?;
@@ -648,7 +649,7 @@ impl<'js> NativeNode<'js> {
 #[rquickjs::class(rename = "NativeStyleDeclaration", frozen)]
 struct NativeStyleDeclaration {
     #[qjs(skip_trace)]
-    state: SharedUiDom,
+    state: SharedDomBindings,
     #[qjs(skip_trace)]
     id: NodeId,
 }
@@ -687,7 +688,7 @@ impl NativeStyleDeclaration {
 
 const WRAPPER_CACHE: &str = "__burokkuWrapperCache";
 
-pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedUiDom) -> Result<()> {
+pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedDomBindings) -> Result<()> {
     let weak_ref: Constructor = context.globals().get("WeakRef")?;
     let weak_ref_deref: Function = weak_ref.get::<_, Object>("prototype")?.get("deref")?;
     let node_methods = Class::<NativeNode<'js>>::prototype(context)?
@@ -856,7 +857,7 @@ fn wrapper_cache<'js>(context: &Ctx<'js>) -> Result<Class<'js, WrapperCache<'js>
         .get(WRAPPER_CACHE)
 }
 
-fn sync_connected_listener_roots<'js>(context: &Ctx<'js>, state: &SharedUiDom) -> Result<()> {
+fn sync_connected_listener_roots<'js>(context: &Ctx<'js>, state: &SharedDomBindings) -> Result<()> {
     // ponytail: linear scan; index listener-bearing wrappers only if mutations make this measurable.
     // ponytail: detached descendants survive only while their wrappers are live; root detached
     // component groups if browser-compatible subtree retention becomes necessary.
@@ -924,7 +925,11 @@ fn cache_wrapper<'js>(
     Ok(())
 }
 
-fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result<Object<'js>> {
+fn wrap_node<'js>(
+    context: &Ctx<'js>,
+    state: &SharedDomBindings,
+    id: NodeId,
+) -> Result<Object<'js>> {
     let cache = wrapper_cache(context)?;
     let released = borrow(context, state)?.take_released_wrappers();
     if !released.is_empty() {
@@ -997,7 +1002,7 @@ fn wrap_node<'js>(context: &Ctx<'js>, state: &SharedUiDom, id: NodeId) -> Result
     Ok(node.into_inner())
 }
 
-fn hover_path(state: &UiDomState, target: Option<NodeId>) -> Vec<NodeId> {
+fn hover_path(state: &DomBindingState, target: Option<NodeId>) -> Vec<NodeId> {
     let mut path = Vec::new();
     let mut current = target.filter(|id| state.dom.is_connected(*id).unwrap_or(false));
     while let Some(id) = current {
@@ -1257,7 +1262,7 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEven
 
 fn dispatch_pointer_capture_transitions(
     context: &Ctx<'_>,
-    state: &SharedUiDom,
+    state: &SharedDomBindings,
     source: NativeMouseEvent,
 ) -> Result<()> {
     let transitions = {
@@ -1538,7 +1543,7 @@ fn layout_rect_object<'js>(context: &Ctx<'js>, rect: LayoutRect) -> Result<Objec
     Ok(object)
 }
 
-fn borrow<'a>(context: &Ctx<'_>, state: &'a SharedUiDom) -> Result<Ref<'a, UiDomState>> {
+fn borrow<'a>(context: &Ctx<'_>, state: &'a SharedDomBindings) -> Result<Ref<'a, DomBindingState>> {
     state
         .try_borrow()
         .map_err(|_| errors::borrow_conflict(context))
@@ -1546,8 +1551,8 @@ fn borrow<'a>(context: &Ctx<'_>, state: &'a SharedUiDom) -> Result<Ref<'a, UiDom
 
 fn borrow_mut<'a>(
     context: &Ctx<'_>,
-    state: &'a SharedUiDom,
-) -> Result<std::cell::RefMut<'a, UiDomState>> {
+    state: &'a SharedDomBindings,
+) -> Result<std::cell::RefMut<'a, DomBindingState>> {
     state
         .try_borrow_mut()
         .map_err(|_| errors::borrow_conflict(context))
