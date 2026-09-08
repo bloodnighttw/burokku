@@ -6,8 +6,9 @@ use rquickjs::{
 };
 
 use super::{
-    errors, lifetime::SharedWrapperRoots, LayoutRect, NativeKeyboardEvent, NativeMouseEvent,
-    NativeMouseInput, SharedUiDom, UiDomState,
+    errors, lifetime::SharedWrapperRoots, Button, LayoutRect, NativeKeyboardEvent,
+    NativeMouseEvent, NativeMouseInput, NativeMouseInputKind, SharedUiDom, UiDomState,
+    WheelDeltaMode,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -1010,6 +1011,65 @@ fn hover_path(state: &UiDomState, target: Option<NodeId>) -> Vec<NodeId> {
     path
 }
 
+#[derive(Clone, Copy)]
+struct MouseEventData {
+    event_type: Option<&'static str>,
+    button: Button,
+    wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
+    pointer_id: Option<u32>,
+}
+
+fn mouse_event_data(input: NativeMouseInput) -> MouseEventData {
+    match input.kind {
+        NativeMouseInputKind::Hover => MouseEventData {
+            event_type: None,
+            button: Button::NONE,
+            wheel_delta: None,
+            pointer_id: None,
+        },
+        NativeMouseInputKind::Move => MouseEventData {
+            event_type: Some("pointermove"),
+            button: Button::NONE,
+            wheel_delta: None,
+            pointer_id: Some(1),
+        },
+        NativeMouseInputKind::Button { button, pressed } => {
+            let changed_button = button.buttons_bit();
+            let event_type = if changed_button == 0 {
+                None
+            } else if pressed && input.buttons.bits() == changed_button {
+                Some("pointerdown")
+            } else if !pressed && input.buttons.is_empty() {
+                Some("pointerup")
+            } else {
+                Some("pointermove")
+            };
+            MouseEventData {
+                event_type,
+                button,
+                wheel_delta: None,
+                pointer_id: event_type.map(|_| 1),
+            }
+        }
+        NativeMouseInputKind::Wheel {
+            delta_x,
+            delta_y,
+            delta_mode,
+        } => MouseEventData {
+            event_type: Some("wheel"),
+            button: Button::PRIMARY,
+            wheel_delta: Some((delta_x, delta_y, delta_mode)),
+            pointer_id: None,
+        },
+        NativeMouseInputKind::Cancel => MouseEventData {
+            event_type: Some("pointercancel"),
+            button: Button::NONE,
+            wheel_delta: None,
+            pointer_id: Some(1),
+        },
+    }
+}
+
 fn hover_events(
     previous: &[NodeId],
     next: &[NodeId],
@@ -1019,6 +1079,7 @@ fn hover_events(
         return Vec::new();
     }
     let mut events = Vec::new();
+    let button = mouse_event_data(input).button;
     let mut push = |event_type, target, related_target| {
         events.push(NativeMouseEvent {
             event_type,
@@ -1027,7 +1088,7 @@ fn hover_events(
             presented_revision: input.presented_revision,
             client_x: input.client_x,
             client_y: input.client_y,
-            button: input.button,
+            button,
             buttons: input.buttons,
             wheel_delta: None,
             pointer_id: Some(1),
@@ -1054,7 +1115,9 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
     let state = app.borrow().state.clone();
     let boundaries = {
         let mut state = borrow_mut(context, &state)?;
-        if state.pointer_capture_target().is_some() {
+        if matches!(input.kind, NativeMouseInputKind::Cancel)
+            || state.pointer_capture_target().is_some()
+        {
             Vec::new()
         } else {
             let next = hover_path(&state, input.hit_target);
@@ -1067,35 +1130,63 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         dispatch_mouse_event(context, event)?;
     }
 
-    if let Some(event_type) = input.event_type {
-        let target = {
-            let state = borrow(context, &state)?;
-            if input.pointer_id.is_some() {
-                state.pointer_capture_target().or(input.hit_target)
-            } else {
-                input.hit_target
-            }
-        };
-        if let Some(target) = target {
-            dispatch_mouse_event(
-                context,
-                NativeMouseEvent {
-                    event_type,
-                    target,
-                    presented_revision: input.presented_revision,
-                    client_x: input.client_x,
-                    client_y: input.client_y,
-                    button: input.button,
-                    buttons: input.buttons,
-                    related_target: None,
-                    wheel_delta: input.wheel_delta,
-                    pointer_id: input.pointer_id,
-                },
-            )?;
+    let event = mouse_event_data(input);
+    let target = {
+        let state = borrow(context, &state)?;
+        if event.pointer_id.is_some() {
+            state.pointer_capture_target().or(input.hit_target)
+        } else {
+            input.hit_target
         }
+    };
+    let click_target = {
+        let mut state = borrow_mut(context, &state)?;
+        match input.kind {
+            NativeMouseInputKind::Button {
+                button: Button::PRIMARY,
+                pressed: true,
+            } => {
+                state.pressed_target = target;
+                None
+            }
+            NativeMouseInputKind::Button {
+                button: Button::PRIMARY,
+                pressed: false,
+            } => state
+                .pressed_target
+                .take()
+                .filter(|pressed| Some(*pressed) == target),
+            NativeMouseInputKind::Move if input.buttons.bits() & 1 == 0 => {
+                state.pressed_target = None;
+                None
+            }
+            NativeMouseInputKind::Cancel => {
+                state.pressed_target = None;
+                None
+            }
+            _ => None,
+        }
+    };
+
+    if let (Some(event_type), Some(target)) = (event.event_type, target) {
+        dispatch_mouse_event(
+            context,
+            NativeMouseEvent {
+                event_type,
+                target,
+                presented_revision: input.presented_revision,
+                client_x: input.client_x,
+                client_y: input.client_y,
+                button: event.button,
+                buttons: input.buttons,
+                related_target: None,
+                wheel_delta: event.wheel_delta,
+                pointer_id: event.pointer_id,
+            },
+        )?;
     }
 
-    if let Some(target) = input.click_target {
+    if let Some(target) = click_target {
         dispatch_mouse_event(
             context,
             NativeMouseEvent {
@@ -1104,7 +1195,7 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
                 presented_revision: input.presented_revision,
                 client_x: input.client_x,
                 client_y: input.client_y,
-                button: input.button,
+                button: event.button,
                 buttons: input.buttons,
                 related_target: None,
                 wheel_delta: None,
@@ -1250,7 +1341,10 @@ fn dispatch_mouse_event_inner(context: &Ctx<'_>, mouse: NativeMouseEvent) -> Res
     let related_target = related_target
         .map(|id| wrap_node(context, &state, id))
         .transpose()?;
-    let (delta_x, delta_y, delta_mode) = mouse.wheel_delta.unwrap_or((0.0, 0.0, 0));
+    let (delta_x, delta_y, delta_mode) = mouse
+        .wheel_delta
+        .map(|(delta_x, delta_y, mode)| (delta_x, delta_y, mode.code()))
+        .unwrap_or((0.0, 0.0, 0));
     let pointer_id = mouse.pointer_id.unwrap_or(0);
     let cancelable = bubbles
         && !matches!(

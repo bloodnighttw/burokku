@@ -18,6 +18,8 @@ use lifetime::SharedWrapperRoots;
 
 pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
 
+/// DOM `MouseEvent.button`: the button changed by this event.
+/// `None` means no button changed and is exposed to JavaScript as `-1`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Button(Option<u16>);
 
@@ -35,6 +37,16 @@ impl Button {
 
     pub(crate) fn code(self) -> i32 {
         self.0.map_or(-1, i32::from)
+    }
+
+    pub(crate) fn buttons_bit(self) -> u16 {
+        match self.0 {
+            None => 0,
+            Some(0) => 1,
+            Some(1) => 4,
+            Some(2) => 2,
+            Some(code) => 1_u16.checked_shl(code as u32).unwrap_or(0),
+        }
     }
 }
 
@@ -57,6 +69,20 @@ impl Buttons {
     }
 }
 
+/// Supported values for DOM `WheelEvent.deltaMode`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub(crate) enum WheelDeltaMode {
+    Pixel = 0,
+    Line = 1,
+}
+
+impl WheelDeltaMode {
+    const fn code(self) -> u16 {
+        self as u16
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NativeMouseEvent {
     pub(crate) event_type: &'static str,
@@ -67,22 +93,34 @@ pub(crate) struct NativeMouseEvent {
     pub(crate) button: Button,
     pub(crate) buttons: Buttons,
     pub(crate) related_target: Option<NodeId>,
-    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
+    pub(crate) wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
     pub(crate) pointer_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NativeMouseInputKind {
+    Hover,
+    Move,
+    Button {
+        button: Button,
+        pressed: bool,
+    },
+    Wheel {
+        delta_x: f64,
+        delta_y: f64,
+        delta_mode: WheelDeltaMode,
+    },
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NativeMouseInput {
+    pub(crate) kind: NativeMouseInputKind,
     pub(crate) hit_target: Option<NodeId>,
-    pub(crate) event_type: Option<&'static str>,
-    pub(crate) click_target: Option<NodeId>,
     pub(crate) presented_revision: u64,
     pub(crate) client_x: f64,
     pub(crate) client_y: f64,
-    pub(crate) button: Button,
     pub(crate) buttons: Buttons,
-    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
-    pub(crate) pointer_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,6 +147,7 @@ pub(crate) struct UiDomState {
     wrapper_roots: SharedWrapperRoots,
     task_queue: Option<JsTaskQueue>,
     presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
+    pressed_target: Option<NodeId>,
     pointer_active: bool,
     pointer_capture: Option<NodeId>,
     announced_pointer_capture: Option<NodeId>,
@@ -146,9 +185,9 @@ impl UiDomState {
             })
     }
 
-    pub(crate) fn enqueue_mouse_event_when_ready(
+    pub(crate) fn enqueue_mouse_input_when_ready(
         &self,
-        event: NativeMouseEvent,
+        input: NativeMouseInput,
     ) -> Result<(), JsTaskQueueError> {
         let queue = self
             .task_queue
@@ -157,7 +196,7 @@ impl UiDomState {
             .clone();
         tokio::task::spawn_local(async move {
             if let Err(error) = queue
-                .enqueue(move |context| classes::dispatch_mouse_event(context, event))
+                .enqueue(move |context| classes::dispatch_mouse_input(context, input))
                 .await
             {
                 eprintln!("Burokku warning: pointer cancellation stopped: {error}");
@@ -217,6 +256,7 @@ impl DomPlugin {
             wrapper_roots: SharedWrapperRoots::default(),
             task_queue: None,
             presented_layout: RefCell::new(None),
+            pressed_target: None,
             pointer_active: false,
             pointer_capture: None,
             announced_pointer_capture: None,
@@ -864,7 +904,11 @@ mod tests {
                         button: Button::SECONDARY,
                         buttons: Buttons::from_bits(3),
                         related_target: Some(related_target),
-                        wheel_delta: (event_type == "wheel").then_some((4.5, -6.25, 1)),
+                        wheel_delta: (event_type == "wheel").then_some((
+                            4.5,
+                            -6.25,
+                            WheelDeltaMode::Line,
+                        )),
                         pointer_id: event_type.starts_with("pointer").then_some(1),
                     },
                 )
