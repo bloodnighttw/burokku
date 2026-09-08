@@ -327,7 +327,6 @@ pub(crate) struct ApplicationHost {
     last_frame_failure: Option<FrameFailure>,
     hover_window: Option<WindowId>,
     cursor: Option<(PhysicalPosition<f64>, u16)>,
-    active_pointer: Option<(NodeId, PhysicalPosition<f64>, f64)>,
     ever_had_window: bool,
     fatal_error: Option<HostError>,
     lifecycle: RuntimeLifecycle,
@@ -351,7 +350,6 @@ impl ApplicationHost {
             last_frame_failure: None,
             hover_window: None,
             cursor: None,
-            active_pointer: None,
             ever_had_window: false,
             fatal_error: None,
             lifecycle,
@@ -394,9 +392,8 @@ impl ApplicationHost {
     fn discard_stale_presented_frame(&mut self) {
         let window = self.windows.current().map(|window| window.id());
         if self.hover_window != window {
-            self.dom.borrow_mut().hover_path.clear();
+            self.dom.borrow_mut().clear_hover_path();
             self.cursor = None;
-            self.active_pointer = None;
             self.hover_window = window;
         }
         if !self.has_usable_presented_frame() {
@@ -420,53 +417,19 @@ impl ApplicationHost {
         };
         let input = pointer_input_for_input(&frame.plan, position, buttons, input);
         let scale = frame.plan.scale_factor();
-        if matches!(
-            input.kind,
-            NativeMouseInputKind::Button {
-                button,
-                pressed: true,
-            } if button.buttons_bit() != 0 && buttons == button.buttons_bit()
-        ) {
-            if let Some(target) = input.hit_target {
-                self.active_pointer = Some((target, position, scale));
-            }
-        } else if let Some((_, active_position, active_scale)) = self.active_pointer.as_mut() {
-            *active_position = position;
-            *active_scale = scale;
-        }
-        let result = self.queue_hover_and_mouse(input, scale);
-        if buttons == 0 {
-            self.active_pointer = None;
-        }
-        result
+        self.queue_hover_and_mouse(input, scale)
     }
 
-    fn queue_pointer_cancel(&mut self) -> Result<(), HostError> {
-        let Some(&(target, position, scale)) = self.active_pointer.as_ref() else {
-            return Ok(());
-        };
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(HostError::InvalidScaleFactor(scale));
-        }
+    fn queue_pointer_cancel(&self) -> Result<(), HostError> {
         let state = self
             .dom
             .try_borrow()
             .map_err(|_| HostError::DomBorrowConflict)?;
-        let input = NativeMouseInput {
-            kind: NativeMouseInputKind::Cancel,
-            hit_target: Some(target),
-            presented_revision: state.dom.revision(),
-            client_x: position.x / scale,
-            client_y: position.y / scale,
-            buttons: Buttons::NONE,
-        };
-        match state.enqueue_mouse_input(input) {
-            Ok(()) => self.active_pointer = None,
+        match state.enqueue_pointer_cancel() {
+            Ok(()) => {}
             Err(runtime::JsTaskQueueError::Full) => {
-                if let Err(error) = state.enqueue_mouse_input_when_ready(input) {
+                if let Err(error) = state.enqueue_pointer_cancel_when_ready() {
                     eprintln!("Burokku warning: pointer cancellation stopped: {error}");
-                } else {
-                    self.active_pointer = None;
                 }
             }
             Err(error) => eprintln!("Burokku warning: pointer cancellation stopped: {error}"),
@@ -560,10 +523,6 @@ impl ApplicationHost {
             .ok_or(HostError::MissingNativeWindow)?
             .window()
             .scale_factor();
-        if let Some((_, active_position, active_scale)) = self.active_pointer.as_mut() {
-            *active_position = position;
-            *active_scale = scale;
-        }
         let revision = self
             .dom
             .try_borrow()
@@ -979,7 +938,7 @@ impl ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.dom.borrow_mut().hover_path.clear();
+                self.dom.borrow_mut().clear_hover_path();
                 self.cursor = None;
                 if self.ever_had_window {
                     self.request_exit();
@@ -1172,7 +1131,7 @@ impl ApplicationHandler for ApplicationHost {
                 self.cancel_graphics_initialization();
                 self.renderer = None;
                 self.presented = None;
-                self.dom.borrow_mut().hover_path.clear();
+                self.dom.borrow_mut().clear_hover_path();
                 self.cursor = None;
                 self.windows.close();
                 self.request_exit();
@@ -1537,7 +1496,6 @@ mod tests {
                     pressed: false,
                 },
                 Some("pointermove") => NativeMouseInputKind::Move,
-                Some("pointercancel") => NativeMouseInputKind::Cancel,
                 Some(event_type) => panic!("unsupported test mouse input: {event_type}"),
             },
             hit_target: target,
@@ -1800,7 +1758,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert!(state.borrow().hover_path.is_empty());
+            assert!(state.borrow().hover_path().is_empty());
             assert!(matches!(
                 queue_test_mouse(&mut host, Some(a), position, 1, (revision, 0.0), None),
                 Err(HostError::InvalidScaleFactor(0.0))
@@ -1808,7 +1766,7 @@ mod tests {
             runtime.shutdown().await.unwrap();
             driver.await.unwrap();
             queue_test_mouse(&mut host, Some(a), position, 1, (revision, 2.0), None).unwrap();
-            assert!(state.borrow().hover_path.is_empty());
+            assert!(state.borrow().hover_path().is_empty());
         }).await;
     }
 
@@ -1852,7 +1810,6 @@ mod tests {
                     (state.dom.children(window).unwrap()[0], state.dom.revision())
                 };
                 let position = PhysicalPosition::new(10.0, 10.0);
-                host.active_pointer = Some((target, position, 1.0));
                 queue_test_mouse(
                     &mut host,
                     Some(target),
@@ -1924,7 +1881,6 @@ mod tests {
                     (state.dom.children(window).unwrap()[0], state.dom.revision())
                 };
                 let position = PhysicalPosition::new(10.0, 10.0);
-                host.active_pointer = Some((target, position, 1.0));
                 queue_test_mouse(
                     &mut host,
                     Some(target),

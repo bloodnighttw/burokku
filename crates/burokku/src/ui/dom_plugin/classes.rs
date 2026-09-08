@@ -6,9 +6,8 @@ use rquickjs::{
 };
 
 use super::{
-    errors, lifetime::SharedWrapperRoots, Button, LayoutRect, NativeKeyboardEvent,
+    errors, lifetime::SharedWrapperRoots, ActivePointer, Button, LayoutRect, NativeKeyboardEvent,
     NativeMouseEvent, NativeMouseInput, NativeMouseInputKind, SharedUiDom, UiDomState,
-    WheelDeltaMode,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
 
@@ -327,7 +326,7 @@ impl<'js> NativeNode<'js> {
     #[qjs(rename = "setPointerCapture")]
     fn set_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<()> {
         let mut state = borrow_mut(&context, &self.state)?;
-        if pointer_id != 1 || !state.pointer_active {
+        if pointer_id != 1 || state.pointer.active.is_none() {
             return errors::throw_named(&context, "NotFoundError", "pointer is not active");
         }
         if !state.dom.is_connected(self.id).unwrap_or(false) {
@@ -337,18 +336,18 @@ impl<'js> NativeNode<'js> {
                 "capture target is not connected",
             );
         }
-        state.pointer_capture = Some(self.id);
+        state.pointer.capture = Some(self.id);
         Ok(())
     }
 
     #[qjs(rename = "releasePointerCapture")]
     fn release_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<()> {
         let mut state = borrow_mut(&context, &self.state)?;
-        if pointer_id != 1 || !state.pointer_active {
+        if pointer_id != 1 || state.pointer.active.is_none() {
             return errors::throw_named(&context, "NotFoundError", "pointer is not active");
         }
-        if state.pointer_capture == Some(self.id) {
-            state.pointer_capture = None;
+        if state.pointer.capture == Some(self.id) {
+            state.pointer.capture = None;
         }
         Ok(())
     }
@@ -357,7 +356,7 @@ impl<'js> NativeNode<'js> {
     fn has_pointer_capture(&self, context: Ctx<'js>, pointer_id: u32) -> Result<bool> {
         let mut state = borrow_mut(&context, &self.state)?;
         state.clear_disconnected_pointer_capture();
-        Ok(pointer_id == 1 && state.pointer_capture == Some(self.id))
+        Ok(pointer_id == 1 && state.pointer.capture == Some(self.id))
     }
 
     #[qjs(rename = "appendChild")]
@@ -1011,63 +1010,47 @@ fn hover_path(state: &UiDomState, target: Option<NodeId>) -> Vec<NodeId> {
     path
 }
 
-#[derive(Clone, Copy)]
-struct MouseEventData {
-    event_type: Option<&'static str>,
-    button: Button,
-    wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
-    pointer_id: Option<u32>,
-}
-
-fn mouse_event_data(input: NativeMouseInput) -> MouseEventData {
-    match input.kind {
-        NativeMouseInputKind::Hover => MouseEventData {
-            event_type: None,
-            button: Button::NONE,
-            wheel_delta: None,
-            pointer_id: None,
-        },
-        NativeMouseInputKind::Move => MouseEventData {
-            event_type: Some("pointermove"),
-            button: Button::NONE,
-            wheel_delta: None,
-            pointer_id: Some(1),
-        },
+fn mouse_event(input: NativeMouseInput, target: NodeId) -> Option<NativeMouseEvent> {
+    let (event_type, button, wheel_delta, pointer_id) = match input.kind {
+        NativeMouseInputKind::Hover => return None,
+        NativeMouseInputKind::Move => ("pointermove", Button::NONE, None, Some(1)),
         NativeMouseInputKind::Button { button, pressed } => {
             let changed_button = button.buttons_bit();
-            let event_type = if changed_button == 0 {
-                None
-            } else if pressed && input.buttons.bits() == changed_button {
-                Some("pointerdown")
-            } else if !pressed && input.buttons.is_empty() {
-                Some("pointerup")
-            } else {
-                Some("pointermove")
-            };
-            MouseEventData {
-                event_type,
-                button,
-                wheel_delta: None,
-                pointer_id: event_type.map(|_| 1),
+            if changed_button == 0 {
+                return None;
             }
+            let event_type = if pressed && input.buttons.bits() == changed_button {
+                "pointerdown"
+            } else if !pressed && input.buttons.is_empty() {
+                "pointerup"
+            } else {
+                "pointermove"
+            };
+            (event_type, button, None, Some(1))
         }
         NativeMouseInputKind::Wheel {
             delta_x,
             delta_y,
             delta_mode,
-        } => MouseEventData {
-            event_type: Some("wheel"),
-            button: Button::PRIMARY,
-            wheel_delta: Some((delta_x, delta_y, delta_mode)),
-            pointer_id: None,
-        },
-        NativeMouseInputKind::Cancel => MouseEventData {
-            event_type: Some("pointercancel"),
-            button: Button::NONE,
-            wheel_delta: None,
-            pointer_id: Some(1),
-        },
-    }
+        } => (
+            "wheel",
+            Button::PRIMARY,
+            Some((delta_x, delta_y, delta_mode)),
+            None,
+        ),
+    };
+    Some(NativeMouseEvent {
+        event_type,
+        target,
+        presented_revision: input.presented_revision,
+        client_x: input.client_x,
+        client_y: input.client_y,
+        button,
+        buttons: input.buttons,
+        related_target: None,
+        wheel_delta,
+        pointer_id,
+    })
 }
 
 fn hover_events(
@@ -1079,7 +1062,11 @@ fn hover_events(
         return Vec::new();
     }
     let mut events = Vec::new();
-    let button = mouse_event_data(input).button;
+    let button = match input.kind {
+        NativeMouseInputKind::Button { button, .. } => button,
+        NativeMouseInputKind::Wheel { .. } => Button::PRIMARY,
+        NativeMouseInputKind::Hover | NativeMouseInputKind::Move => Button::NONE,
+    };
     let mut push = |event_type, target, related_target| {
         events.push(NativeMouseEvent {
             event_type,
@@ -1115,14 +1102,12 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
     let state = app.borrow().state.clone();
     let boundaries = {
         let mut state = borrow_mut(context, &state)?;
-        if matches!(input.kind, NativeMouseInputKind::Cancel)
-            || state.pointer_capture_target().is_some()
-        {
+        if state.pointer_capture_target().is_some() {
             Vec::new()
         } else {
             let next = hover_path(&state, input.hit_target);
-            let events = hover_events(&state.hover_path, &next, input);
-            state.hover_path = next;
+            let events = hover_events(&state.pointer.hover_path, &next, input);
+            state.pointer.hover_path = next;
             events
         }
     };
@@ -1130,10 +1115,12 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         dispatch_mouse_event(context, event)?;
     }
 
-    let event = mouse_event_data(input);
     let target = {
         let state = borrow(context, &state)?;
-        if event.pointer_id.is_some() {
+        if matches!(
+            input.kind,
+            NativeMouseInputKind::Move | NativeMouseInputKind::Button { .. }
+        ) {
             state.pointer_capture_target().or(input.hit_target)
         } else {
             input.hit_target
@@ -1146,44 +1133,27 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
                 button: Button::PRIMARY,
                 pressed: true,
             } => {
-                state.pressed_target = target;
+                state.pointer.pressed_target = target;
                 None
             }
             NativeMouseInputKind::Button {
                 button: Button::PRIMARY,
                 pressed: false,
             } => state
+                .pointer
                 .pressed_target
                 .take()
                 .filter(|pressed| Some(*pressed) == target),
             NativeMouseInputKind::Move if input.buttons.bits() & 1 == 0 => {
-                state.pressed_target = None;
-                None
-            }
-            NativeMouseInputKind::Cancel => {
-                state.pressed_target = None;
+                state.pointer.pressed_target = None;
                 None
             }
             _ => None,
         }
     };
 
-    if let (Some(event_type), Some(target)) = (event.event_type, target) {
-        dispatch_mouse_event(
-            context,
-            NativeMouseEvent {
-                event_type,
-                target,
-                presented_revision: input.presented_revision,
-                client_x: input.client_x,
-                client_y: input.client_y,
-                button: event.button,
-                buttons: input.buttons,
-                related_target: None,
-                wheel_delta: event.wheel_delta,
-                pointer_id: event.pointer_id,
-            },
-        )?;
+    if let Some(event) = target.and_then(|target| mouse_event(input, target)) {
+        dispatch_mouse_event(context, event)?;
     }
 
     if let Some(target) = click_target {
@@ -1195,7 +1165,7 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
                 presented_revision: input.presented_revision,
                 client_x: input.client_x,
                 client_y: input.client_y,
-                button: event.button,
+                button: Button::PRIMARY,
                 buttons: input.buttons,
                 related_target: None,
                 wheel_delta: None,
@@ -1204,6 +1174,31 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         )?;
     }
     Ok(())
+}
+pub(super) fn dispatch_pointer_cancel(context: &Ctx<'_>) -> Result<()> {
+    let app: Object = context.globals().get("app")?;
+    let Some(app) = Class::<NativeNode>::from_object(&app) else {
+        return Ok(());
+    };
+    let state = app.borrow().state.clone();
+    let Some(active) = borrow(context, &state)?.pointer.active else {
+        return Ok(());
+    };
+    dispatch_mouse_event(
+        context,
+        NativeMouseEvent {
+            event_type: "pointercancel",
+            target: active.target,
+            presented_revision: active.presented_revision,
+            client_x: active.client_x,
+            client_y: active.client_y,
+            button: Button::NONE,
+            buttons: super::Buttons::NONE,
+            related_target: None,
+            wheel_delta: None,
+            pointer_id: Some(1),
+        },
+    )
 }
 
 pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEvent) -> Result<()> {
@@ -1220,11 +1215,29 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEven
         return Ok(());
     };
     let state = app.borrow().state.clone();
-    if mouse.event_type == "pointerdown" {
-        borrow_mut(context, &state)?.pointer_active = true;
+    {
+        let mut state = borrow_mut(context, &state)?;
+        match mouse.event_type {
+            "pointerdown" => {
+                state.pointer.active = Some(ActivePointer {
+                    target: mouse.target,
+                    presented_revision: mouse.presented_revision,
+                    client_x: mouse.client_x,
+                    client_y: mouse.client_y,
+                });
+            }
+            "pointermove" | "pointerup" => {
+                if let Some(active) = state.pointer.active.as_mut() {
+                    active.presented_revision = mouse.presented_revision;
+                    active.client_x = mouse.client_x;
+                    active.client_y = mouse.client_y;
+                }
+            }
+            _ => {}
+        }
     }
     dispatch_pointer_capture_transitions(context, &state, mouse)?;
-    if let Some(target) = borrow(context, &state)?.pointer_capture {
+    if let Some(target) = borrow(context, &state)?.pointer.capture {
         mouse.target = target;
     }
 
@@ -1233,8 +1246,9 @@ pub(super) fn dispatch_mouse_event(context: &Ctx<'_>, mut mouse: NativeMouseEven
         || (mouse.event_type == "pointerup" && mouse.buttons.is_empty())
     {
         let mut state = borrow_mut(context, &state)?;
-        state.pointer_active = false;
-        state.pointer_capture = None;
+        state.pointer.active = None;
+        state.pointer.pressed_target = None;
+        state.pointer.capture = None;
     }
     let transitions = dispatch_pointer_capture_transitions(context, &state, mouse);
     result?;
@@ -1249,17 +1263,18 @@ fn dispatch_pointer_capture_transitions(
     let transitions = {
         let mut state = borrow_mut(context, state)?;
         if state
-            .pointer_capture
+            .pointer
+            .capture
             .is_some_and(|target| !state.dom.is_connected(target).unwrap_or(false))
         {
-            state.pointer_capture = None;
+            state.pointer.capture = None;
         }
-        let previous = state.announced_pointer_capture;
-        let next = state.pointer_capture;
+        let previous = state.pointer.announced_capture;
+        let next = state.pointer.capture;
         if previous == next {
             return Ok(());
         }
-        state.announced_pointer_capture = next;
+        state.pointer.announced_capture = next;
         [
             ("lostpointercapture", previous),
             ("gotpointercapture", next),

@@ -110,7 +110,6 @@ pub(crate) enum NativeMouseInputKind {
         delta_y: f64,
         delta_mode: WheelDeltaMode,
     },
-    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,17 +140,30 @@ pub(crate) struct LayoutRect {
     pub(crate) height: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ActivePointer {
+    target: NodeId,
+    presented_revision: u64,
+    client_x: f64,
+    client_y: f64,
+}
+
+#[derive(Debug, Default)]
+struct PointerState {
+    active: Option<ActivePointer>,
+    pressed_target: Option<NodeId>,
+    capture: Option<NodeId>,
+    announced_capture: Option<NodeId>,
+    hover_path: Vec<NodeId>,
+}
+
 #[derive(Debug)]
 pub(crate) struct UiDomState {
     pub(crate) dom: Dom,
     wrapper_roots: SharedWrapperRoots,
     task_queue: Option<JsTaskQueue>,
     presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
-    pressed_target: Option<NodeId>,
-    pointer_active: bool,
-    pointer_capture: Option<NodeId>,
-    announced_pointer_capture: Option<NodeId>,
-    pub(crate) hover_path: Vec<NodeId>,
+    pointer: PointerState,
 }
 
 impl UiDomState {
@@ -160,14 +172,24 @@ impl UiDomState {
     }
 
     pub(crate) fn pointer_capture_target(&self) -> Option<NodeId> {
-        self.pointer_capture
+        self.pointer
+            .capture
             .filter(|target| self.dom.is_connected(*target).unwrap_or(false))
     }
 
     fn clear_disconnected_pointer_capture(&mut self) {
         if self.pointer_capture_target().is_none() {
-            self.pointer_capture = None;
+            self.pointer.capture = None;
         }
+    }
+
+    pub(crate) fn clear_hover_path(&mut self) {
+        self.pointer.hover_path.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hover_path(&self) -> &[NodeId] {
+        &self.pointer.hover_path
     }
 
     pub(crate) fn enqueue_mouse_events(
@@ -185,20 +207,21 @@ impl UiDomState {
             })
     }
 
-    pub(crate) fn enqueue_mouse_input_when_ready(
-        &self,
-        input: NativeMouseInput,
-    ) -> Result<(), JsTaskQueueError> {
+    pub(crate) fn enqueue_pointer_cancel(&self) -> Result<(), JsTaskQueueError> {
+        self.task_queue
+            .as_ref()
+            .ok_or(JsTaskQueueError::Closed)?
+            .try_enqueue(classes::dispatch_pointer_cancel)
+    }
+
+    pub(crate) fn enqueue_pointer_cancel_when_ready(&self) -> Result<(), JsTaskQueueError> {
         let queue = self
             .task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
             .clone();
         tokio::task::spawn_local(async move {
-            if let Err(error) = queue
-                .enqueue(move |context| classes::dispatch_mouse_input(context, input))
-                .await
-            {
+            if let Err(error) = queue.enqueue(classes::dispatch_pointer_cancel).await {
                 eprintln!("Burokku warning: pointer cancellation stopped: {error}");
             }
         });
@@ -256,11 +279,7 @@ impl DomPlugin {
             wrapper_roots: SharedWrapperRoots::default(),
             task_queue: None,
             presented_layout: RefCell::new(None),
-            pressed_target: None,
-            pointer_active: false,
-            pointer_capture: None,
-            announced_pointer_capture: None,
-            hover_path: Vec::new(),
+            pointer: PointerState::default(),
         }));
         (
             Self {
