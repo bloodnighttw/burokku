@@ -3,24 +3,115 @@
 use std::rc::Rc;
 
 use winit::{
-    application::ApplicationHandler, ActiveEventLoop, ElementState, KeyEvent, MouseButton,
-    PhysicalPosition, WindowEvent, WindowId,
+    application::ApplicationHandler, ActiveEventLoop, ElementState, KeyEvent, Modifiers,
+    MouseButton, PhysicalPosition, WindowEvent, WindowId,
 };
 
 use crate::app::RuntimeStatus;
 
 use super::{
-    super::{
-        dom_plugin::{
-            ChangedMouseButton, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind,
-            PressedMouseButtons, WheelDeltaMode,
-        },
-        gpu::PresentationOutcome,
-        scene::ScenePlan,
-    },
+    super::{elements::NodeId, gpu::PresentationOutcome, scene::ScenePlan},
     render::{classify_resize_failure, presentation_state, PresentedSurface},
     ApplicationHost, HostError,
 };
+
+/// DOM `MouseEvent.button`: the button changed by this event.
+/// `None` means no button changed and is exposed to JavaScript as `-1`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ChangedMouseButton(Option<u16>);
+
+impl ChangedMouseButton {
+    pub(crate) const NONE: Self = Self(None);
+    pub(crate) const PRIMARY: Self = Self(Some(0));
+    pub(crate) const AUXILIARY: Self = Self(Some(1));
+    pub(crate) const SECONDARY: Self = Self(Some(2));
+
+    pub(crate) const fn from_code(code: u16) -> Self {
+        Self(Some(code))
+    }
+
+    pub(crate) fn code(self) -> i32 {
+        self.0.map_or(-1, i32::from)
+    }
+
+    pub(crate) fn buttons_bit(self) -> u16 {
+        match self.0 {
+            None => 0,
+            Some(0) => 1,
+            Some(1) => 4,
+            Some(2) => 2,
+            Some(code) => 1_u16.checked_shl(code as u32).unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PressedMouseButtons(u16);
+
+impl PressedMouseButtons {
+    pub(crate) const NONE: Self = Self(0);
+
+    pub(crate) const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub(crate) const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Supported values for DOM `WheelEvent.deltaMode`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub(crate) enum WheelDeltaMode {
+    Pixel = 0,
+    Line = 1,
+}
+
+impl WheelDeltaMode {
+    pub(crate) const fn code(self) -> u16 {
+        self as u16
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NativeMouseInputKind {
+    Hover,
+    Move,
+    Button {
+        button: ChangedMouseButton,
+        pressed: bool,
+    },
+    Wheel {
+        delta_x: f64,
+        delta_y: f64,
+        delta_mode: WheelDeltaMode,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NativeMouseInput {
+    pub(crate) kind: NativeMouseInputKind,
+    pub(crate) hit_target: Option<NodeId>,
+    pub(crate) presented_revision: u64,
+    pub(crate) client_x: f64,
+    pub(crate) client_y: f64,
+    pub(crate) buttons: PressedMouseButtons,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeKeyboardEvent {
+    pub(crate) event_type: &'static str,
+    pub(crate) target: NodeId,
+    pub(crate) key: String,
+    pub(crate) key_code: u16,
+    pub(crate) repeat: bool,
+    pub(crate) modifiers: Modifiers,
+}
 
 pub(super) fn native_button(button: MouseButton) -> ChangedMouseButton {
     match button {

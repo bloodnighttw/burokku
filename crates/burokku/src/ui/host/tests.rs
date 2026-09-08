@@ -6,10 +6,6 @@ use winit::{ElementState, MouseButton, PhysicalPosition, PhysicalSize};
 use crate::{
     app::RuntimeLifecycle,
     ui::{
-        dom_plugin::{
-            ChangedMouseButton, NativeMouseInput, NativeMouseInputKind, PressedMouseButtons,
-            WheelDeltaMode,
-        },
         elements::{Dom, Element, ElementTag, NodeId},
         gpu::GraphicsError,
         layout::{LayoutEngine, LogicalViewport},
@@ -31,7 +27,8 @@ use super::{
         presented_frame_is_usable, FailureKind, FailurePolicy, FrameFailure, FrameStage,
         PresentationState, PresentedFrame, PresentedSurface, RedrawFailure,
     },
-    ApplicationHost, HostError,
+    ApplicationHost, ChangedMouseButton, HostError, NativeMouseInput, NativeMouseInputKind,
+    PressedMouseButtons, WheelDeltaMode,
 };
 
 fn test_mouse_input(
@@ -746,7 +743,7 @@ async fn pointer_input_reaches_dom_in_order_with_presented_coordinates() {
                     Some((ElementState::Pressed, MouseButton::Other(3))),
                     8,
                     NativeMouseInputKind::Button {
-                        button: ChangedMouseButton::BACK,
+                        button: ChangedMouseButton::from_code(3),
                         pressed: true,
                     },
                 ),
@@ -754,7 +751,7 @@ async fn pointer_input_reaches_dom_in_order_with_presented_coordinates() {
                     Some((ElementState::Released, MouseButton::Other(3))),
                     0,
                     NativeMouseInputKind::Button {
-                        button: ChangedMouseButton::BACK,
+                        button: ChangedMouseButton::from_code(3),
                         pressed: false,
                     },
                 ),
@@ -762,7 +759,7 @@ async fn pointer_input_reaches_dom_in_order_with_presented_coordinates() {
                     Some((ElementState::Pressed, MouseButton::Other(4))),
                     16,
                     NativeMouseInputKind::Button {
-                        button: ChangedMouseButton::FORWARD,
+                        button: ChangedMouseButton::from_code(4),
                         pressed: true,
                     },
                 ),
@@ -770,7 +767,7 @@ async fn pointer_input_reaches_dom_in_order_with_presented_coordinates() {
                     Some((ElementState::Released, MouseButton::Other(4))),
                     0,
                     NativeMouseInputKind::Button {
-                        button: ChangedMouseButton::FORWARD,
+                        button: ChangedMouseButton::from_code(4),
                         pressed: false,
                     },
                 ),

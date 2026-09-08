@@ -5,6 +5,11 @@ mod gpu_lifecycle;
 mod reconcile;
 mod render;
 
+pub(crate) use events::{
+    ChangedMouseButton, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind,
+    PressedMouseButtons, WheelDeltaMode,
+};
+
 use thiserror::Error;
 use winit::{ActiveEventLoop, PhysicalPosition, WindowId};
 
