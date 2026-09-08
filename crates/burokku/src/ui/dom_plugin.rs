@@ -22,9 +22,9 @@ pub(crate) type SharedDomBindings = Rc<RefCell<DomBindingState>>;
 /// DOM `MouseEvent.button`: the button changed by this event.
 /// `None` means no button changed and is exposed to JavaScript as `-1`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Button(Option<u16>);
+pub(crate) struct ChangedMouseButton(Option<u16>);
 
-impl Button {
+impl ChangedMouseButton {
     pub(crate) const NONE: Self = Self(None);
     pub(crate) const PRIMARY: Self = Self(Some(0));
     pub(crate) const AUXILIARY: Self = Self(Some(1));
@@ -52,9 +52,9 @@ impl Button {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Buttons(u16);
+pub(crate) struct PressedMouseButtons(u16);
 
-impl Buttons {
+impl PressedMouseButtons {
     pub(crate) const NONE: Self = Self(0);
 
     pub(crate) const fn from_bits(bits: u16) -> Self {
@@ -91,8 +91,8 @@ struct NativeMouseEvent {
     presented_revision: u64,
     client_x: f64,
     client_y: f64,
-    button: Button,
-    buttons: Buttons,
+    button: ChangedMouseButton,
+    buttons: PressedMouseButtons,
     related_target: Option<NodeId>,
     wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
     pointer_id: Option<u32>,
@@ -103,7 +103,7 @@ pub(crate) enum NativeMouseInputKind {
     Hover,
     Move,
     Button {
-        button: Button,
+        button: ChangedMouseButton,
         pressed: bool,
     },
     Wheel {
@@ -120,7 +120,7 @@ pub(crate) struct NativeMouseInput {
     pub(crate) presented_revision: u64,
     pub(crate) client_x: f64,
     pub(crate) client_y: f64,
-    pub(crate) buttons: Buttons,
+    pub(crate) buttons: PressedMouseButtons,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -796,8 +796,8 @@ mod tests {
                         presented_revision,
                         client_x: 0.0,
                         client_y: 0.0,
-                        button: Button::PRIMARY,
-                        buttons: Buttons::NONE,
+                        button: ChangedMouseButton::PRIMARY,
+                        buttons: PressedMouseButtons::NONE,
                         related_target: None,
                         wheel_delta: None,
                         pointer_id: None,
@@ -906,8 +906,8 @@ mod tests {
                         presented_revision,
                         client_x: 12.5,
                         client_y: 8.25,
-                        button: Button::SECONDARY,
-                        buttons: Buttons::from_bits(3),
+                        button: ChangedMouseButton::SECONDARY,
+                        buttons: PressedMouseButtons::from_bits(3),
                         related_target: Some(related_target),
                         wheel_delta: (event_type == "wheel").then_some((
                             4.5,
@@ -955,8 +955,8 @@ mod tests {
                 presented_revision,
                 client_x: 12.5,
                 client_y: 8.25,
-                button: Button::SECONDARY,
-                buttons: Buttons::from_bits(3),
+                button: ChangedMouseButton::SECONDARY,
+                buttons: PressedMouseButtons::from_bits(3),
                 related_target: None,
                 wheel_delta: None,
                 pointer_id: Some(1),
@@ -1031,8 +1031,8 @@ mod tests {
                 presented_revision: revision,
                 client_x: 10.0,
                 client_y: 20.0,
-                button: Button::PRIMARY,
-                buttons: Buttons::from_bits(buttons),
+                button: ChangedMouseButton::PRIMARY,
+                buttons: PressedMouseButtons::from_bits(buttons),
                 related_target: None,
                 wheel_delta: None,
                 pointer_id: Some(1),
@@ -1248,14 +1248,15 @@ mod tests {
                 for (target, client_x, client_y) in
                     [(target, 12.5, 8.25), (immediate_target, 20.0, 10.0)]
                 {
-                    for (pressed, buttons) in
-                        [(true, Buttons::from_bits(1)), (false, Buttons::NONE)]
-                    {
+                    for (pressed, buttons) in [
+                        (true, PressedMouseButtons::from_bits(1)),
+                        (false, PressedMouseButtons::NONE),
+                    ] {
                         state
                             .borrow()
                             .enqueue_mouse_input(NativeMouseInput {
                                 kind: NativeMouseInputKind::Button {
-                                    button: Button::PRIMARY,
+                                    button: ChangedMouseButton::PRIMARY,
                                     pressed,
                                 },
                                 hit_target: Some(target),

@@ -6,8 +6,8 @@ use rquickjs::{
 };
 
 use super::{
-    errors, lifetime::SharedWrapperRoots, ActivePointer, Button, DomBindingState, LayoutRect,
-    NativeKeyboardEvent, NativeMouseEvent, NativeMouseInput, NativeMouseInputKind,
+    errors, lifetime::SharedWrapperRoots, ActivePointer, ChangedMouseButton, DomBindingState,
+    LayoutRect, NativeKeyboardEvent, NativeMouseEvent, NativeMouseInput, NativeMouseInputKind,
     SharedDomBindings,
 };
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
@@ -1018,7 +1018,7 @@ fn hover_path(state: &DomBindingState, target: Option<NodeId>) -> Vec<NodeId> {
 fn mouse_event(input: NativeMouseInput, target: NodeId) -> Option<NativeMouseEvent> {
     let (event_type, button, wheel_delta, pointer_id) = match input.kind {
         NativeMouseInputKind::Hover => return None,
-        NativeMouseInputKind::Move => ("pointermove", Button::NONE, None, Some(1)),
+        NativeMouseInputKind::Move => ("pointermove", ChangedMouseButton::NONE, None, Some(1)),
         NativeMouseInputKind::Button { button, pressed } => {
             let changed_button = button.buttons_bit();
             if changed_button == 0 {
@@ -1039,7 +1039,7 @@ fn mouse_event(input: NativeMouseInput, target: NodeId) -> Option<NativeMouseEve
             delta_mode,
         } => (
             "wheel",
-            Button::PRIMARY,
+            ChangedMouseButton::PRIMARY,
             Some((delta_x, delta_y, delta_mode)),
             None,
         ),
@@ -1069,8 +1069,8 @@ fn hover_events(
     let mut events = Vec::new();
     let button = match input.kind {
         NativeMouseInputKind::Button { button, .. } => button,
-        NativeMouseInputKind::Wheel { .. } => Button::PRIMARY,
-        NativeMouseInputKind::Hover | NativeMouseInputKind::Move => Button::NONE,
+        NativeMouseInputKind::Wheel { .. } => ChangedMouseButton::PRIMARY,
+        NativeMouseInputKind::Hover | NativeMouseInputKind::Move => ChangedMouseButton::NONE,
     };
     let mut push = |event_type, target, related_target| {
         events.push(NativeMouseEvent {
@@ -1135,14 +1135,14 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
         let mut state = borrow_mut(context, &state)?;
         match input.kind {
             NativeMouseInputKind::Button {
-                button: Button::PRIMARY,
+                button: ChangedMouseButton::PRIMARY,
                 pressed: true,
             } => {
                 state.pointer.pressed_target = target;
                 None
             }
             NativeMouseInputKind::Button {
-                button: Button::PRIMARY,
+                button: ChangedMouseButton::PRIMARY,
                 pressed: false,
             } => state
                 .pointer
@@ -1170,7 +1170,7 @@ pub(super) fn dispatch_mouse_input(context: &Ctx<'_>, input: NativeMouseInput) -
                 presented_revision: input.presented_revision,
                 client_x: input.client_x,
                 client_y: input.client_y,
-                button: Button::PRIMARY,
+                button: ChangedMouseButton::PRIMARY,
                 buttons: input.buttons,
                 related_target: None,
                 wheel_delta: None,
@@ -1197,8 +1197,8 @@ pub(super) fn dispatch_pointer_cancel(context: &Ctx<'_>) -> Result<()> {
             presented_revision: active.presented_revision,
             client_x: active.client_x,
             client_y: active.client_y,
-            button: Button::NONE,
-            buttons: super::Buttons::NONE,
+            button: ChangedMouseButton::NONE,
+            buttons: super::PressedMouseButtons::NONE,
             related_target: None,
             wheel_delta: None,
             pointer_id: Some(1),

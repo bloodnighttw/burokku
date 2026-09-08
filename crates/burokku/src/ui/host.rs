@@ -13,8 +13,8 @@ use crate::app::{RuntimeLifecycle, RuntimeStatus};
 
 use super::{
     dom_plugin::{
-        Button, Buttons, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind,
-        SharedDomBindings, WheelDeltaMode,
+        ChangedMouseButton, NativeKeyboardEvent, NativeMouseInput, NativeMouseInputKind,
+        PressedMouseButtons, SharedDomBindings, WheelDeltaMode,
     },
     elements::NodeId,
     gpu::{GraphicsContext, GraphicsError, PresentationOutcome, WindowRenderer},
@@ -83,12 +83,12 @@ fn pending_window_status(
     }
 }
 
-fn native_button(button: MouseButton) -> Button {
+fn native_button(button: MouseButton) -> ChangedMouseButton {
     match button {
-        MouseButton::Left => Button::PRIMARY,
-        MouseButton::Middle => Button::AUXILIARY,
-        MouseButton::Right => Button::SECONDARY,
-        MouseButton::Other(number) => Button::from_code(number),
+        MouseButton::Left => ChangedMouseButton::PRIMARY,
+        MouseButton::Middle => ChangedMouseButton::AUXILIARY,
+        MouseButton::Right => ChangedMouseButton::SECONDARY,
+        MouseButton::Other(number) => ChangedMouseButton::from_code(number),
     }
 }
 
@@ -110,7 +110,7 @@ fn pointer_input_for_input(
         presented_revision: plan.revision(),
         client_x: position.x / plan.scale_factor(),
         client_y: position.y / plan.scale_factor(),
-        buttons: Buttons::from_bits(buttons),
+        buttons: PressedMouseButtons::from_bits(buttons),
     }
 }
 
@@ -141,7 +141,7 @@ fn wheel_input_for_input(
         presented_revision: plan.revision(),
         client_x: position.x / plan.scale_factor(),
         client_y: position.y / plan.scale_factor(),
-        buttons: Buttons::from_bits(buttons),
+        buttons: PressedMouseButtons::from_bits(buttons),
     }
 }
 
@@ -506,7 +506,7 @@ impl ApplicationHost {
                 presented_revision: frame.revision(),
                 client_x: position.x / scale,
                 client_y: position.y / scale,
-                buttons: Buttons::from_bits(buttons),
+                buttons: PressedMouseButtons::from_bits(buttons),
             },
             scale,
         )
@@ -540,7 +540,7 @@ impl ApplicationHost {
                 presented_revision: revision,
                 client_x: position.x / scale,
                 client_y: position.y / scale,
-                buttons: Buttons::from_bits(buttons),
+                buttons: PressedMouseButtons::from_bits(buttons),
             },
             scale,
         )
@@ -1492,11 +1492,11 @@ mod tests {
             kind: match event_type {
                 None => NativeMouseInputKind::Hover,
                 Some("pointerdown") => NativeMouseInputKind::Button {
-                    button: Button::PRIMARY,
+                    button: ChangedMouseButton::PRIMARY,
                     pressed: true,
                 },
                 Some("pointerup") => NativeMouseInputKind::Button {
-                    button: Button::PRIMARY,
+                    button: ChangedMouseButton::PRIMARY,
                     pressed: false,
                 },
                 Some("pointermove") => NativeMouseInputKind::Move,
@@ -1506,7 +1506,7 @@ mod tests {
             presented_revision: presented.0,
             client_x: position.x / presented.1,
             client_y: position.y / presented.1,
-            buttons: Buttons::from_bits(buttons),
+            buttons: PressedMouseButtons::from_bits(buttons),
         }
     }
 
@@ -2131,7 +2131,7 @@ mod tests {
                         Some((ElementState::Pressed, MouseButton::Left)),
                         1,
                         NativeMouseInputKind::Button {
-                            button: Button::PRIMARY,
+                            button: ChangedMouseButton::PRIMARY,
                             pressed: true,
                         },
                     ),
@@ -2140,7 +2140,7 @@ mod tests {
                         Some((ElementState::Pressed, MouseButton::Right)),
                         3,
                         NativeMouseInputKind::Button {
-                            button: Button::SECONDARY,
+                            button: ChangedMouseButton::SECONDARY,
                             pressed: true,
                         },
                     ),
@@ -2148,7 +2148,7 @@ mod tests {
                         Some((ElementState::Released, MouseButton::Right)),
                         1,
                         NativeMouseInputKind::Button {
-                            button: Button::SECONDARY,
+                            button: ChangedMouseButton::SECONDARY,
                             pressed: false,
                         },
                     ),
@@ -2156,7 +2156,7 @@ mod tests {
                         Some((ElementState::Released, MouseButton::Left)),
                         0,
                         NativeMouseInputKind::Button {
-                            button: Button::PRIMARY,
+                            button: ChangedMouseButton::PRIMARY,
                             pressed: false,
                         },
                     ),
@@ -2165,7 +2165,7 @@ mod tests {
                         Some((ElementState::Pressed, MouseButton::Middle)),
                         4,
                         NativeMouseInputKind::Button {
-                            button: Button::AUXILIARY,
+                            button: ChangedMouseButton::AUXILIARY,
                             pressed: true,
                         },
                     ),
@@ -2173,7 +2173,7 @@ mod tests {
                         Some((ElementState::Released, MouseButton::Middle)),
                         0,
                         NativeMouseInputKind::Button {
-                            button: Button::AUXILIARY,
+                            button: ChangedMouseButton::AUXILIARY,
                             pressed: false,
                         },
                     ),
@@ -2181,7 +2181,7 @@ mod tests {
                         Some((ElementState::Pressed, MouseButton::Other(3))),
                         8,
                         NativeMouseInputKind::Button {
-                            button: Button::BACK,
+                            button: ChangedMouseButton::BACK,
                             pressed: true,
                         },
                     ),
@@ -2189,7 +2189,7 @@ mod tests {
                         Some((ElementState::Released, MouseButton::Other(3))),
                         0,
                         NativeMouseInputKind::Button {
-                            button: Button::BACK,
+                            button: ChangedMouseButton::BACK,
                             pressed: false,
                         },
                     ),
@@ -2197,7 +2197,7 @@ mod tests {
                         Some((ElementState::Pressed, MouseButton::Other(4))),
                         16,
                         NativeMouseInputKind::Button {
-                            button: Button::FORWARD,
+                            button: ChangedMouseButton::FORWARD,
                             pressed: true,
                         },
                     ),
@@ -2205,7 +2205,7 @@ mod tests {
                         Some((ElementState::Released, MouseButton::Other(4))),
                         0,
                         NativeMouseInputKind::Button {
-                            button: Button::FORWARD,
+                            button: ChangedMouseButton::FORWARD,
                             pressed: false,
                         },
                     ),
@@ -2276,7 +2276,7 @@ mod tests {
                 assert_eq!(
                     outside_up.kind,
                     NativeMouseInputKind::Button {
-                        button: Button::PRIMARY,
+                        button: ChangedMouseButton::PRIMARY,
                         pressed: false,
                     }
                 );
@@ -2308,7 +2308,7 @@ mod tests {
             assert_eq!(
                 input.kind,
                 NativeMouseInputKind::Button {
-                    button: Button::SECONDARY,
+                    button: ChangedMouseButton::SECONDARY,
                     pressed: state == ElementState::Pressed,
                 }
             );
