@@ -2035,6 +2035,14 @@ mod tests {
                             pointerBoundaryLog.push('leave:a'));
                         captureB.addEventListener('pointerenter', () =>
                             pointerBoundaryLog.push('enter:b'));
+                        captureA.addEventListener('pointerup', () =>
+                            pointerBoundaryLog.push('up:a'));
+                        captureA.addEventListener('lostpointercapture', () =>
+                            pointerBoundaryLog.push('lost:a'));
+                        captureB.addEventListener('pointerup', () =>
+                            pointerBoundaryLog.push('up:b'));
+                        captureB.addEventListener('pointermove', () =>
+                            pointerBoundaryLog.push('move:b'));
                         "#,
                     )
                     .await
@@ -2084,11 +2092,15 @@ mod tests {
                     Some("pointerup"),
                 )
                 .unwrap();
-                assert!(runtime
-                    .eval::<bool>("pointerBoundaryLog.length === 0")
-                    .await
-                    .unwrap());
+                assert_eq!(
+                    runtime
+                        .eval::<Vec<String>>("pointerBoundaryLog")
+                        .await
+                        .unwrap(),
+                    ["up:a", "lost:a"]
+                );
                 assert_eq!(state.borrow().pointer_capture_target(), None);
+                runtime.eval::<()>("pointerBoundaryLog = []").await.unwrap();
 
                 queue_test_mouse(&mut host, Some(b), position, 0, (revision, 1.0), None).unwrap();
                 assert_eq!(
@@ -2098,6 +2110,42 @@ mod tests {
                         .unwrap(),
                     ["leave:a", "enter:b"]
                 );
+
+                // A capture target detached before dispatch must not retain routing authority.
+                queue_test_mouse(
+                    &mut host,
+                    Some(a),
+                    position,
+                    1,
+                    (revision, 1.0),
+                    Some("pointerdown"),
+                )
+                .unwrap();
+                assert!(runtime
+                    .eval::<bool>("captureA.hasPointerCapture(1)")
+                    .await
+                    .unwrap());
+                runtime
+                    .eval::<()>("captureWindow.removeChild(captureA); pointerBoundaryLog = []")
+                    .await
+                    .unwrap();
+                queue_test_mouse(
+                    &mut host,
+                    Some(b),
+                    position,
+                    1,
+                    (revision, 1.0),
+                    Some("pointermove"),
+                )
+                .unwrap();
+                assert_eq!(
+                    runtime
+                        .eval::<Vec<String>>("pointerBoundaryLog")
+                        .await
+                        .unwrap(),
+                    ["enter:b", "move:b"]
+                );
+                assert_eq!(state.borrow().pointer_capture_target(), None);
 
                 runtime.shutdown().await.unwrap();
                 driver.await.unwrap();
