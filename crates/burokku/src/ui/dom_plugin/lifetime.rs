@@ -13,8 +13,8 @@ use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use slotmap::Key;
 
-use super::UiDomState;
-use crate::ui::elements::{DomError, NodeId};
+use super::DomBindingState;
+use crate::ui::elements::{DomError, NodeId, ReclaimReport};
 
 pub(super) type SharedWrapperRoots = Rc<RefCell<WrapperRoots>>;
 
@@ -45,7 +45,7 @@ pub(super) fn encode_node_id(id: NodeId) -> String {
     format!("{:016x}", id.data().as_ffi())
 }
 
-impl UiDomState {
+impl DomBindingState {
     pub(super) fn acquire_wrapper(&self, id: NodeId) -> Result<SharedWrapperRoots, DomError> {
         self.dom
             .contains(id)
@@ -59,7 +59,7 @@ impl UiDomState {
         std::mem::take(&mut self.wrapper_roots.borrow_mut().released)
     }
 
-    pub(crate) fn reclaim_detached(&mut self) -> runtime::Result<()> {
+    pub(crate) fn reclaim_detached(&mut self) -> runtime::Result<ReclaimReport> {
         let live = self
             .wrapper_roots
             .borrow()
@@ -67,8 +67,7 @@ impl UiDomState {
             .iter()
             .copied()
             .collect::<Vec<_>>();
-        self.last_reclaim = self
-            .dom
+        self.dom
             .reclaim_unreachable_detached(live)
             .map_err(|error| {
                 runtime::Error::new_from_js_message(
@@ -76,8 +75,7 @@ impl UiDomState {
                     "live NodeId values",
                     error.to_string(),
                 )
-            })?;
-        Ok(())
+            })
     }
 
     #[cfg(test)]

@@ -1,4 +1,5 @@
-//! UI-thread ownership and QuickJS bindings for the live DOM.
+//! UI-thread-only QuickJS binding state around one live [`Dom`].
+//! This module integrates the document model; it is not the document model itself.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -6,7 +7,7 @@ use runtime::{rquickjs::Ctx, JsTaskQueue, JsTaskQueueError, Plugin};
 use winit::Modifiers;
 
 use super::{
-    elements::{Dom, DomError, NodeId, ReclaimReport},
+    elements::{Dom, DomError, NodeId},
     layout::ComputedLayout,
 };
 
@@ -16,12 +17,14 @@ mod lifetime;
 
 use lifetime::SharedWrapperRoots;
 
-pub(crate) type SharedUiDom = Rc<RefCell<UiDomState>>;
+pub(crate) type SharedDomBindings = Rc<RefCell<DomBindingState>>;
 
+/// DOM `MouseEvent.button`: the button changed by this event.
+/// `None` means no button changed and is exposed to JavaScript as `-1`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Button(Option<u16>);
+pub(crate) struct ChangedMouseButton(Option<u16>);
 
-impl Button {
+impl ChangedMouseButton {
     pub(crate) const NONE: Self = Self(None);
     pub(crate) const PRIMARY: Self = Self(Some(0));
     pub(crate) const AUXILIARY: Self = Self(Some(1));
@@ -36,12 +39,22 @@ impl Button {
     pub(crate) fn code(self) -> i32 {
         self.0.map_or(-1, i32::from)
     }
+
+    pub(crate) fn buttons_bit(self) -> u16 {
+        match self.0 {
+            None => 0,
+            Some(0) => 1,
+            Some(1) => 4,
+            Some(2) => 2,
+            Some(code) => 1_u16.checked_shl(code as u32).unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Buttons(u16);
+pub(crate) struct PressedMouseButtons(u16);
 
-impl Buttons {
+impl PressedMouseButtons {
     pub(crate) const NONE: Self = Self(0);
 
     pub(crate) const fn from_bits(bits: u16) -> Self {
@@ -57,32 +70,57 @@ impl Buttons {
     }
 }
 
+/// Supported values for DOM `WheelEvent.deltaMode`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub(crate) enum WheelDeltaMode {
+    Pixel = 0,
+    Line = 1,
+}
+
+impl WheelDeltaMode {
+    const fn code(self) -> u16 {
+        self as u16
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct NativeMouseEvent {
-    pub(crate) event_type: &'static str,
-    pub(crate) target: NodeId,
-    pub(crate) presented_revision: u64,
-    pub(crate) client_x: f64,
-    pub(crate) client_y: f64,
-    pub(crate) button: Button,
-    pub(crate) buttons: Buttons,
-    pub(crate) related_target: Option<NodeId>,
-    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
-    pub(crate) pointer_id: Option<u32>,
+struct NativeMouseEvent {
+    event_type: &'static str,
+    target: NodeId,
+    presented_revision: u64,
+    client_x: f64,
+    client_y: f64,
+    button: ChangedMouseButton,
+    buttons: PressedMouseButtons,
+    related_target: Option<NodeId>,
+    wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
+    pointer_id: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NativeMouseInputKind {
+    Hover,
+    Move,
+    Button {
+        button: ChangedMouseButton,
+        pressed: bool,
+    },
+    Wheel {
+        delta_x: f64,
+        delta_y: f64,
+        delta_mode: WheelDeltaMode,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NativeMouseInput {
+    pub(crate) kind: NativeMouseInputKind,
     pub(crate) hit_target: Option<NodeId>,
-    pub(crate) event_type: Option<&'static str>,
-    pub(crate) click_target: Option<NodeId>,
     pub(crate) presented_revision: u64,
     pub(crate) client_x: f64,
     pub(crate) client_y: f64,
-    pub(crate) button: Button,
-    pub(crate) buttons: Buttons,
-    pub(crate) wheel_delta: Option<(f64, f64, u16)>,
-    pub(crate) pointer_id: Option<u32>,
+    pub(crate) buttons: PressedMouseButtons,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,64 +141,73 @@ pub(crate) struct LayoutRect {
     pub(crate) height: f32,
 }
 
-#[derive(Debug)]
-pub(crate) struct UiDomState {
-    pub(crate) dom: Dom,
-    wrapper_roots: SharedWrapperRoots,
-    pub(crate) last_reclaim: ReclaimReport,
-    task_queue: Option<JsTaskQueue>,
-    presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
-    pointer_active: bool,
-    pointer_capture: Option<NodeId>,
-    announced_pointer_capture: Option<NodeId>,
-    pub(crate) hover_path: Vec<NodeId>,
+#[derive(Clone, Copy, Debug)]
+struct ActivePointer {
+    target: NodeId,
+    presented_revision: u64,
+    client_x: f64,
+    client_y: f64,
 }
 
-impl UiDomState {
+#[derive(Debug, Default)]
+struct PointerState {
+    active: Option<ActivePointer>,
+    pressed_target: Option<NodeId>,
+    capture: Option<NodeId>,
+    announced_capture: Option<NodeId>,
+    hover_path: Vec<NodeId>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DomBindingState {
+    pub(crate) dom: Dom,
+    wrapper_roots: SharedWrapperRoots,
+    task_queue: Option<JsTaskQueue>,
+    presented_layout: RefCell<Option<Rc<ComputedLayout>>>,
+    pointer: PointerState,
+}
+
+impl DomBindingState {
     pub(crate) fn publish_presented_layout(&self, computed: Rc<ComputedLayout>) {
         self.presented_layout.replace(Some(computed));
     }
 
     pub(crate) fn pointer_capture_target(&self) -> Option<NodeId> {
-        self.pointer_capture
+        self.pointer
+            .capture
             .filter(|target| self.dom.is_connected(*target).unwrap_or(false))
     }
 
     fn clear_disconnected_pointer_capture(&mut self) {
         if self.pointer_capture_target().is_none() {
-            self.pointer_capture = None;
+            self.pointer.capture = None;
         }
     }
 
-    pub(crate) fn enqueue_mouse_events(
-        &self,
-        events: Vec<NativeMouseEvent>,
-    ) -> Result<(), JsTaskQueueError> {
+    pub(crate) fn clear_hover_path(&mut self) {
+        self.pointer.hover_path.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hover_path(&self) -> &[NodeId] {
+        &self.pointer.hover_path
+    }
+
+    pub(crate) fn enqueue_pointer_cancel(&self) -> Result<(), JsTaskQueueError> {
         self.task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(move |context| {
-                for event in events {
-                    classes::dispatch_mouse_event(context, event)?;
-                }
-                Ok(())
-            })
+            .try_enqueue(classes::dispatch_pointer_cancel)
     }
 
-    pub(crate) fn enqueue_mouse_event_when_ready(
-        &self,
-        event: NativeMouseEvent,
-    ) -> Result<(), JsTaskQueueError> {
+    pub(crate) fn enqueue_pointer_cancel_when_ready(&self) -> Result<(), JsTaskQueueError> {
         let queue = self
             .task_queue
             .as_ref()
             .ok_or(JsTaskQueueError::Closed)?
             .clone();
         tokio::task::spawn_local(async move {
-            if let Err(error) = queue
-                .enqueue(move |context| classes::dispatch_mouse_event(context, event))
-                .await
-            {
+            if let Err(error) = queue.enqueue(classes::dispatch_pointer_cancel).await {
                 eprintln!("Burokku warning: pointer cancellation stopped: {error}");
             }
         });
@@ -208,21 +255,17 @@ impl UiDomState {
 
 /// Installs bindings backed by the UI thread's live DOM.
 pub(crate) struct DomPlugin {
-    state: SharedUiDom,
+    state: SharedDomBindings,
 }
 
 impl DomPlugin {
-    pub(crate) fn new() -> (Self, SharedUiDom) {
-        let state = Rc::new(RefCell::new(UiDomState {
+    pub(crate) fn new() -> (Self, SharedDomBindings) {
+        let state = Rc::new(RefCell::new(DomBindingState {
             dom: Dom::new(),
             wrapper_roots: SharedWrapperRoots::default(),
-            last_reclaim: ReclaimReport::default(),
             task_queue: None,
             presented_layout: RefCell::new(None),
-            pointer_active: false,
-            pointer_capture: None,
-            announced_pointer_capture: None,
-            hover_path: Vec::new(),
+            pointer: PointerState::default(),
         }));
         (
             Self {
@@ -233,17 +276,16 @@ impl DomPlugin {
     }
 
     #[cfg(test)]
-    #[cfg(test)]
-    fn reclaim_for_test(&self) {
+    fn reclaim_for_test(&self) -> crate::ui::elements::ReclaimReport {
         self.state
             .try_borrow_mut()
             .expect("DOM plugin state is not borrowed")
             .reclaim_detached()
-            .unwrap();
+            .unwrap()
     }
 
     #[cfg(test)]
-    fn state(&self) -> std::cell::Ref<'_, UiDomState> {
+    fn state(&self) -> std::cell::Ref<'_, DomBindingState> {
         self.state
             .try_borrow()
             .expect("DOM plugin state is not borrowed")
@@ -571,9 +613,9 @@ mod tests {
         // no FinalizationRegistry callback or JavaScript job is needed.
         assert_eq!(plugin.state().live_wrapper_count(), 1);
 
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
-        assert_eq!(plugin.state().last_reclaim.nodes.len(), 1);
+        assert_eq!(reclaimed.nodes.len(), 1);
         assert_eq!(plugin.state().dom.iter().count(), 1);
         context.with(|context| {
             assert!(context
@@ -606,9 +648,9 @@ mod tests {
 
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrapper_count(), 2);
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 4);
-        assert!(plugin.state().last_reclaim.nodes.is_empty());
+        assert!(reclaimed.nodes.is_empty());
 
         context.with(|context| {
             assert!(context
@@ -628,9 +670,9 @@ mod tests {
         collect_garbage(&runtime, &context);
         assert_eq!(plugin.state().live_wrapper_count(), 1);
 
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().dom.node_count(), 1);
-        assert_eq!(plugin.state().last_reclaim.nodes.len(), 3);
+        assert_eq!(reclaimed.nodes.len(), 3);
     }
 
     #[test]
@@ -754,8 +796,8 @@ mod tests {
                         presented_revision,
                         client_x: 0.0,
                         client_y: 0.0,
-                        button: Button::PRIMARY,
-                        buttons: Buttons::NONE,
+                        button: ChangedMouseButton::PRIMARY,
+                        buttons: PressedMouseButtons::NONE,
                         related_target: None,
                         wheel_delta: None,
                         pointer_id: None,
@@ -864,10 +906,14 @@ mod tests {
                         presented_revision,
                         client_x: 12.5,
                         client_y: 8.25,
-                        button: Button::SECONDARY,
-                        buttons: Buttons::from_bits(3),
+                        button: ChangedMouseButton::SECONDARY,
+                        buttons: PressedMouseButtons::from_bits(3),
                         related_target: Some(related_target),
-                        wheel_delta: (event_type == "wheel").then_some((4.5, -6.25, 1)),
+                        wheel_delta: (event_type == "wheel").then_some((
+                            4.5,
+                            -6.25,
+                            WheelDeltaMode::Line,
+                        )),
                         pointer_id: event_type.starts_with("pointer").then_some(1),
                     },
                 )
@@ -909,8 +955,8 @@ mod tests {
                 presented_revision,
                 client_x: 12.5,
                 client_y: 8.25,
-                button: Button::SECONDARY,
-                buttons: Buttons::from_bits(3),
+                button: ChangedMouseButton::SECONDARY,
+                buttons: PressedMouseButtons::from_bits(3),
                 related_target: None,
                 wheel_delta: None,
                 pointer_id: Some(1),
@@ -985,8 +1031,8 @@ mod tests {
                 presented_revision: revision,
                 client_x: 10.0,
                 client_y: 20.0,
-                button: Button::PRIMARY,
-                buttons: Buttons::from_bits(buttons),
+                button: ChangedMouseButton::PRIMARY,
+                buttons: PressedMouseButtons::from_bits(buttons),
                 related_target: None,
                 wheel_delta: None,
                 pointer_id: Some(1),
@@ -1199,36 +1245,29 @@ mod tests {
                     .unwrap();
                 assert!(state.borrow().dom.revision() > presented_revision);
 
-                state
-                    .borrow()
-                    .enqueue_mouse_events(vec![NativeMouseEvent {
-                        event_type: "click",
-                        target,
-                        presented_revision,
-                        client_x: 12.5,
-                        client_y: 8.25,
-                        button: Button::PRIMARY,
-                        buttons: Buttons::NONE,
-                        related_target: None,
-                        wheel_delta: None,
-                        pointer_id: None,
-                    }])
-                    .unwrap();
-                state
-                    .borrow()
-                    .enqueue_mouse_events(vec![NativeMouseEvent {
-                        event_type: "click",
-                        target: immediate_target,
-                        presented_revision,
-                        client_x: 20.0,
-                        client_y: 10.0,
-                        button: Button::PRIMARY,
-                        buttons: Buttons::NONE,
-                        related_target: None,
-                        wheel_delta: None,
-                        pointer_id: None,
-                    }])
-                    .unwrap();
+                for (target, client_x, client_y) in
+                    [(target, 12.5, 8.25), (immediate_target, 20.0, 10.0)]
+                {
+                    for (pressed, buttons) in [
+                        (true, PressedMouseButtons::from_bits(1)),
+                        (false, PressedMouseButtons::NONE),
+                    ] {
+                        state
+                            .borrow()
+                            .enqueue_mouse_input(NativeMouseInput {
+                                kind: NativeMouseInputKind::Button {
+                                    button: ChangedMouseButton::PRIMARY,
+                                    pressed,
+                                },
+                                hit_target: Some(target),
+                                presented_revision,
+                                client_x,
+                                client_y,
+                                buttons,
+                            })
+                            .unwrap();
+                    }
+                }
                 let result: Vec<String> = runtime
                     .eval(
                         "[...clickResult,\n\
@@ -1328,10 +1367,10 @@ mod tests {
         assert_eq!(plugin.state().dom.node_count(), 101);
 
         collect_garbage(&runtime, &context);
-        plugin.reclaim_for_test();
+        let reclaimed = plugin.reclaim_for_test();
         assert_eq!(plugin.state().live_wrapper_count(), 1);
         assert_eq!(plugin.state().dom.node_count(), 1);
-        assert_eq!(plugin.state().last_reclaim.nodes.len(), 100);
+        assert_eq!(reclaimed.nodes.len(), 100);
     }
 
     fn run_framework_fixture(prefix: &str, bundle: &str) {
