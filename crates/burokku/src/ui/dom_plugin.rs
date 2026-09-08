@@ -63,6 +63,23 @@ impl DomBindingState {
                 }
             }))
     }
+
+    pub(crate) fn pointer_capture_target(&self) -> Option<NodeId> {
+        self.pointer.capture_target(&self.dom)
+    }
+
+    pub(crate) fn clear_disconnected_pointer_capture(&mut self) {
+        self.pointer.clear_disconnected_capture(&self.dom);
+    }
+
+    pub(crate) fn clear_hover_path(&mut self) {
+        self.pointer.clear_hover_path();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hover_path(&self) -> &[NodeId] {
+        self.pointer.hover_path()
+    }
 }
 
 /// Installs bindings backed by the UI thread's live DOM.
