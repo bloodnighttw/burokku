@@ -421,7 +421,7 @@ impl ApplicationHost {
         };
         let input = pointer_input_for_input(&frame.plan, position, buttons, input);
         let scale = frame.plan.scale_factor();
-        self.queue_hover_and_mouse(input, scale)
+        self.queue_pointer_input(input, scale)
     }
 
     fn queue_pointer_cancel(&self) -> Result<(), HostError> {
@@ -456,7 +456,7 @@ impl ApplicationHost {
         };
         let input =
             wheel_input_for_input(&frame.plan, position, delta_x, delta_y, precise, buttons);
-        self.queue_hover_and_mouse(input, frame.plan.scale_factor())
+        self.queue_pointer_input(input, frame.plan.scale_factor())
     }
 
     fn queue_keyboard_input(&self, event: KeyEvent) -> Result<(), HostError> {
@@ -499,7 +499,7 @@ impl ApplicationHost {
             return Ok(());
         };
         let scale = frame.plan.scale_factor();
-        self.queue_hover_and_mouse(
+        self.queue_pointer_input(
             NativeMouseInput {
                 kind: NativeMouseInputKind::Hover,
                 hit_target: frame.plan.hit_test_physical(position.x, position.y),
@@ -533,7 +533,7 @@ impl ApplicationHost {
             .map_err(|_| HostError::DomBorrowConflict)?
             .dom
             .revision();
-        self.queue_hover_and_mouse(
+        self.queue_pointer_input(
             NativeMouseInput {
                 kind: NativeMouseInputKind::Hover,
                 hit_target: None,
@@ -546,7 +546,7 @@ impl ApplicationHost {
         )
     }
 
-    fn queue_hover_and_mouse(
+    fn queue_pointer_input(
         &mut self,
         input: NativeMouseInput,
         scale: f64,
@@ -1518,7 +1518,7 @@ mod tests {
         presented: (u64, f64),
         event_type: Option<&'static str>,
     ) -> Result<(), HostError> {
-        host.queue_hover_and_mouse(
+        host.queue_pointer_input(
             test_mouse_input(target, position, buttons, presented, event_type),
             presented.1,
         )
@@ -2216,7 +2216,7 @@ mod tests {
                     assert_eq!(native.presented_revision, plan.revision());
                     assert_eq!((native.client_x, native.client_y), (12.5, 10.0));
                     assert_eq!(native.buttons.bits(), buttons);
-                    host.queue_hover_and_mouse(native, plan.scale_factor())
+                    host.queue_pointer_input(native, plan.scale_factor())
                         .unwrap();
                 }
                 let log: Vec<String> = runtime.eval("inputLog").await.unwrap();

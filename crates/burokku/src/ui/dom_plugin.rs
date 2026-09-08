@@ -85,17 +85,17 @@ impl WheelDeltaMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct NativeMouseEvent {
-    pub(crate) event_type: &'static str,
-    pub(crate) target: NodeId,
-    pub(crate) presented_revision: u64,
-    pub(crate) client_x: f64,
-    pub(crate) client_y: f64,
-    pub(crate) button: Button,
-    pub(crate) buttons: Buttons,
-    pub(crate) related_target: Option<NodeId>,
-    pub(crate) wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
-    pub(crate) pointer_id: Option<u32>,
+struct NativeMouseEvent {
+    event_type: &'static str,
+    target: NodeId,
+    presented_revision: u64,
+    client_x: f64,
+    client_y: f64,
+    button: Button,
+    buttons: Buttons,
+    related_target: Option<NodeId>,
+    wheel_delta: Option<(f64, f64, WheelDeltaMode)>,
+    pointer_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -191,21 +191,6 @@ impl DomBindingState {
     #[cfg(test)]
     pub(crate) fn hover_path(&self) -> &[NodeId] {
         &self.pointer.hover_path
-    }
-
-    pub(crate) fn enqueue_mouse_events(
-        &self,
-        events: Vec<NativeMouseEvent>,
-    ) -> Result<(), JsTaskQueueError> {
-        self.task_queue
-            .as_ref()
-            .ok_or(JsTaskQueueError::Closed)?
-            .try_enqueue(move |context| {
-                for event in events {
-                    classes::dispatch_mouse_event(context, event)?;
-                }
-                Ok(())
-            })
     }
 
     pub(crate) fn enqueue_pointer_cancel(&self) -> Result<(), JsTaskQueueError> {
@@ -1260,36 +1245,28 @@ mod tests {
                     .unwrap();
                 assert!(state.borrow().dom.revision() > presented_revision);
 
-                state
-                    .borrow()
-                    .enqueue_mouse_events(vec![NativeMouseEvent {
-                        event_type: "click",
-                        target,
-                        presented_revision,
-                        client_x: 12.5,
-                        client_y: 8.25,
-                        button: Button::PRIMARY,
-                        buttons: Buttons::NONE,
-                        related_target: None,
-                        wheel_delta: None,
-                        pointer_id: None,
-                    }])
-                    .unwrap();
-                state
-                    .borrow()
-                    .enqueue_mouse_events(vec![NativeMouseEvent {
-                        event_type: "click",
-                        target: immediate_target,
-                        presented_revision,
-                        client_x: 20.0,
-                        client_y: 10.0,
-                        button: Button::PRIMARY,
-                        buttons: Buttons::NONE,
-                        related_target: None,
-                        wheel_delta: None,
-                        pointer_id: None,
-                    }])
-                    .unwrap();
+                for (target, client_x, client_y) in
+                    [(target, 12.5, 8.25), (immediate_target, 20.0, 10.0)]
+                {
+                    for (pressed, buttons) in
+                        [(true, Buttons::from_bits(1)), (false, Buttons::NONE)]
+                    {
+                        state
+                            .borrow()
+                            .enqueue_mouse_input(NativeMouseInput {
+                                kind: NativeMouseInputKind::Button {
+                                    button: Button::PRIMARY,
+                                    pressed,
+                                },
+                                hit_target: Some(target),
+                                presented_revision,
+                                client_x,
+                                client_y,
+                                buttons,
+                            })
+                            .unwrap();
+                    }
+                }
                 let result: Vec<String> = runtime
                     .eval(
                         "[...clickResult,\n\
