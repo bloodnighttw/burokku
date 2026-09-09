@@ -8,6 +8,7 @@ pub(crate) mod host;
 )]
 pub(crate) mod js_bindings;
 pub(crate) mod layout;
+pub mod resize_observer;
 pub(crate) mod scene;
 pub(crate) mod text;
 pub(crate) mod window_host;
