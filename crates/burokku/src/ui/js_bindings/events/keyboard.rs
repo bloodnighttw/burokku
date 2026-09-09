@@ -176,7 +176,7 @@ pub(super) fn execute_keyboard_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::dom_plugin::DomPlugin;
+    use crate::plugins::dom::DomPlugin;
     use runtime::{
         rquickjs::{Context, Runtime as JsRuntime},
         Plugin,
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn keyboard_dispatch_preserves_payload_and_bubbles() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
         context.with(|context| {
             plugin.install(&context).unwrap();

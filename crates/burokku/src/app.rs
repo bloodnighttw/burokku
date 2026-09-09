@@ -8,8 +8,9 @@ use tokio::sync::oneshot;
 use winit::event_loop::EventLoopWaker;
 
 use crate::{
+    plugins::dom::DomPlugin,
     runtime::{Plugin, RuntimeBuilder},
-    ui::{dom_plugin::DomPlugin, host::ApplicationHost, text::TextEngine},
+    ui::{host::ApplicationHost, text::TextEngine},
 };
 
 fn install_llrt_globals(context: &runtime::rquickjs::Ctx<'_>) -> runtime::Result<()> {
@@ -164,7 +165,8 @@ impl Burokku {
         let waker = event_loop.loop_waker();
         let local_set = tokio::task::LocalSet::new();
 
-        let (dom_plugin, dom) = DomPlugin::new();
+        let dom_plugin = DomPlugin::new();
+        let dom = dom_plugin.bindings();
         let (lifecycle, shutdown) = RuntimeLifecycle::new(waker);
 
         let mut text = TextEngine::new();
@@ -302,7 +304,7 @@ mod tests {
     async fn app_script_commits_a_window_and_text_for_the_native_host() {
         LocalSet::new()
             .run_until(async {
-                let (plugin, dom) = DomPlugin::new();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
                 let initial_revision = dom.borrow().dom.revision();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(install_llrt_globals)
@@ -363,7 +365,7 @@ mod tests {
     async fn detached_window_may_be_mounted_by_a_later_timer_batch() {
         LocalSet::new()
             .run_until(async {
-                let (plugin, dom) = DomPlugin::new();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(install_llrt_globals)
                     .plugin(plugin)
@@ -395,7 +397,7 @@ mod tests {
     async fn llrt_counter_example_updates_from_an_interval() {
         LocalSet::new()
             .run_until(async {
-                let (plugin, dom) = DomPlugin::new();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(install_llrt_globals)
                     .plugin(plugin)

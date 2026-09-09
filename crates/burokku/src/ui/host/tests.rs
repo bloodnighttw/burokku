@@ -152,7 +152,7 @@ fn test_surface(
 
 #[test]
 fn windowless_host_does_not_initialize_graphics() {
-    let (_plugin, dom) = crate::ui::dom_plugin::DomPlugin::new();
+    let (_plugin, dom) = crate::plugins::dom::DomPlugin::new_with_bindings();
     let lifecycle = RuntimeLifecycle::for_test();
     let host = ApplicationHost::new(dom, TextEngine::without_system_fonts(), lifecycle);
 
@@ -185,7 +185,7 @@ fn pending_window_status_detects_removal_replacement_and_same_window_updates() {
 async fn hover_transitions_handle_ancestors_reparenting_and_detachment() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+            let (plugin, state) = crate::plugins::dom::DomPlugin::new_with_bindings();
             let (runtime, driver) = runtime::Runtime::builder()
                 .plugin(plugin)
                 .build_driven()
@@ -345,7 +345,7 @@ async fn hover_transitions_handle_ancestors_reparenting_and_detachment() {
 async fn release_without_a_presented_frame_cancels_pointer_capture() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+            let (plugin, state) = crate::plugins::dom::DomPlugin::new_with_bindings();
             let (runtime, driver) = runtime::Runtime::builder()
                 .plugin(plugin)
                 .build_driven()
@@ -415,7 +415,7 @@ async fn release_without_a_presented_frame_cancels_pointer_capture() {
 async fn full_task_queue_does_not_drop_pointer_cancellation() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+            let (plugin, state) = crate::plugins::dom::DomPlugin::new_with_bindings();
             let (runtime, driver) = runtime::Runtime::builder()
                 .macrotask_capacity(1)
                 .plugin(plugin)
@@ -484,7 +484,7 @@ async fn full_task_queue_does_not_drop_pointer_cancellation() {
 async fn pointer_capture_uses_dispatch_time_state_and_reconciles_boundaries() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+            let (plugin, state) = crate::plugins::dom::DomPlugin::new_with_bindings();
             let (runtime, driver) = runtime::Runtime::builder()
                 .plugin(plugin)
                 .build_driven()
@@ -638,7 +638,7 @@ async fn pointer_capture_uses_dispatch_time_state_and_reconciles_boundaries() {
 async fn pointer_input_reaches_dom_in_order_with_presented_coordinates() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (plugin, state) = crate::ui::dom_plugin::DomPlugin::new();
+            let (plugin, state) = crate::plugins::dom::DomPlugin::new_with_bindings();
             let (runtime, driver) = runtime::Runtime::builder()
                 .plugin(plugin)
                 .build_driven()

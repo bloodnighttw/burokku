@@ -9,6 +9,7 @@
 mod app;
 pub mod ui;
 
+pub mod plugins;
 pub use app::{Burokku, BurokkuBuilder, BurokkuError};
 pub use runtime;
 pub use runtime::{Plugin, RuntimeBuilder};

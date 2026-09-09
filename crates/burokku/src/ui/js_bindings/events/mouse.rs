@@ -106,7 +106,7 @@ fn js_event_type(kind: MouseEventKind) -> &'static str {
     }
 }
 
-pub(in crate::ui::dom_plugin) fn execute_mouse_event(
+pub(in crate::ui::js_bindings) fn execute_mouse_event(
     context: &Ctx<'_>,
     mouse: DomMouseEvent,
 ) -> JsResult<()> {
@@ -244,7 +244,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::ui::dom_plugin::DomPlugin;
+    use crate::plugins::dom::DomPlugin;
     use crate::ui::host::{ChangedMouseButton, PressedMouseButtons, WheelDeltaMode};
 
     fn context() -> (JsRuntime, Context) {
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn mouse_dispatch_preserves_payload_and_propagation() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
         context.with(|context| {
             plugin.install(&context).unwrap();

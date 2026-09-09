@@ -1,5 +1,15 @@
 # Examples
 
+The high-level `Burokku` runner used below installs the DOM bindings
+automatically. Code that builds the JavaScript runtime directly can install the
+moved plugin explicitly:
+
+```rust
+use burokku::{plugins::dom::DomPlugin, RuntimeBuilder};
+
+let builder = RuntimeBuilder::new().plugin(DomPlugin::new());
+```
+
 ## Event dispatch showcase
 
 `example/events` renders an interactive UI element and displays click, pointer,

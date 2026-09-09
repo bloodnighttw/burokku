@@ -16,8 +16,8 @@ use winit::{ActiveEventLoop, PhysicalPosition, WindowId};
 use crate::app::RuntimeLifecycle;
 
 use super::{
-    dom_plugin::SharedDomBindings,
     gpu::{GraphicsContext, GraphicsError, WindowRenderer},
+    js_bindings::SharedDomBindings,
     layout::{LayoutEngine, LayoutError},
     scene::SceneError,
     text::TextEngine,

@@ -96,7 +96,7 @@ fn execute_pointer_event_inner(context: &Ctx<'_>, pointer: DomPointerEvent) -> J
     )
 }
 
-pub(in crate::ui::dom_plugin) fn execute_pointer_event(
+pub(in crate::ui::js_bindings) fn execute_pointer_event(
     context: &Ctx<'_>,
     pointer: DomPointerEvent,
 ) -> JsResult<()> {
@@ -139,8 +139,8 @@ mod tests {
     };
 
     use super::*;
+    use crate::plugins::dom::DomPlugin;
     use crate::ui::{
-        dom_plugin::DomPlugin,
         host::{ChangedMouseButton, NativeMouseInputKind, PressedMouseButtons},
         layout::{LayoutEngine, LogicalViewport},
         text::TextEngine,
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn pointer_capture_retargets_and_releases() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
         context.with(|context| {
             plugin.install(&context).unwrap();
@@ -269,7 +269,7 @@ mod tests {
     async fn queued_click_bubbles_and_honors_dispatch_controls() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (plugin, state) = DomPlugin::new();
+                let (plugin, state) = DomPlugin::new_with_bindings();
                 let (runtime, driver) = runtime::Runtime::builder()
                     .plugin(plugin)
                     .build_driven()
