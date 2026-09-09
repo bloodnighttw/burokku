@@ -1,8 +1,12 @@
 //! UI-thread-only QuickJS binding state around one live [`Dom`].
 //! This module integrates the document model; it is not the document model itself.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+};
 
+use rquickjs::{object::Property, Class};
 use runtime::JsTaskQueue;
 
 use super::{
@@ -10,17 +14,19 @@ use super::{
     layout::ComputedLayout,
 };
 
-mod classes;
 mod errors;
 mod events;
-mod lifetime;
+mod facade;
+mod node;
+mod style;
+mod wrapper;
 
 use crate::ui::events::PointerState;
 #[cfg(test)]
 use crate::ui::events::{DomMouseEvent, MouseEventKind};
 #[cfg(test)]
 use crate::ui::host::{ChangedMouseButton, PressedMouseButtons};
-use lifetime::SharedWrapperRoots;
+use wrapper::SharedWrapperRoots;
 
 pub(crate) type SharedDomBindings = Rc<RefCell<DomBindingState>>;
 
@@ -92,6 +98,24 @@ pub(crate) fn new_state() -> SharedDomBindings {
     }))
 }
 
+pub(super) fn borrow<'a>(
+    context: &runtime::rquickjs::Ctx<'_>,
+    state: &'a SharedDomBindings,
+) -> runtime::rquickjs::Result<Ref<'a, DomBindingState>> {
+    state
+        .try_borrow()
+        .map_err(|_| errors::borrow_conflict(context))
+}
+
+pub(super) fn borrow_mut<'a>(
+    context: &runtime::rquickjs::Ctx<'_>,
+    state: &'a SharedDomBindings,
+) -> runtime::rquickjs::Result<std::cell::RefMut<'a, DomBindingState>> {
+    state
+        .try_borrow_mut()
+        .map_err(|_| errors::borrow_conflict(context))
+}
+
 pub(crate) fn install<'js>(
     context: &runtime::rquickjs::Ctx<'js>,
     state: SharedDomBindings,
@@ -100,7 +124,20 @@ pub(crate) fn install<'js>(
         .try_borrow_mut()
         .map_err(|_| runtime::rquickjs::Error::Unknown)?
         .task_queue = JsTaskQueue::from_context(context).ok();
-    classes::install(context, state)
+    wrapper::install(context)?;
+
+    let node_methods = Class::<node::NativeNode<'js>>::prototype(context)?
+        .expect("macro-backed Node class has a prototype");
+    let style_methods = Class::<style::NativeStyleDeclaration>::prototype(context)?
+        .expect("macro-backed style class has a prototype");
+    facade::install(context, &node_methods, &style_methods)?;
+
+    let root = borrow(context, &state)?.dom.root();
+    let app = wrapper::wrap_node(context, &state, root)?;
+    context
+        .globals()
+        .prop("app", Property::from(app).enumerable())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -153,7 +190,7 @@ mod tests {
         context.with(|context| {
             plugin.install(&context).unwrap();
             let app: Object = context.globals().get("app").unwrap();
-            assert!(app.instance_of::<classes::NativeNode>());
+            assert!(app.instance_of::<node::NativeNode>());
             let values: Vec<bool> = context
                 .eval(
                     "[\

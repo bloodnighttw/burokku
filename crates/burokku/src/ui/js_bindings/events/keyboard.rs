@@ -1,9 +1,6 @@
 //! JavaScript keyboard-event construction and listener execution.
 
-use super::super::{
-    classes::{borrow, wrap_node, NativeNode},
-    errors,
-};
+use super::super::{borrow, errors, node::NativeNode, wrapper::wrap_node};
 use crate::ui::events::{DomKeyboardEvent, KeyboardEventKind};
 use rquickjs::{
     class::Trace, prelude::This, CatchResultExt, Class, Ctx, IntoJs, JsLifetime, Null, Object,
@@ -107,12 +104,7 @@ pub(super) fn execute_keyboard_event(
         let current = wrap_node(context, &state, id)?;
         let node =
             Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
-        let callbacks = node
-            .borrow()
-            .listeners
-            .get(event_type)
-            .cloned()
-            .unwrap_or_default();
+        let callbacks = node.borrow().listeners.matching(event_type);
         listeners.push((current, callbacks));
     }
     if listeners.iter().all(|(_, callbacks)| callbacks.is_empty()) {
@@ -146,11 +138,7 @@ pub(super) fn execute_keyboard_event(
         for listener in callbacks {
             let node =
                 Class::<NativeNode>::from_object(&current).expect("wrapped nodes use NativeNode");
-            let still_registered = node
-                .borrow()
-                .listeners
-                .get(event_type)
-                .is_some_and(|listeners| listeners.iter().any(|item| item.id == listener.id));
+            let still_registered = node.borrow().listeners.contains(event_type, listener.id);
             if !still_registered {
                 continue;
             }

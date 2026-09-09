@@ -2,10 +2,7 @@
 
 use rquickjs::{Class, Ctx, Object, Result as JsResult};
 
-use super::super::{
-    classes::{borrow, borrow_mut, NativeNode},
-    errors,
-};
+use super::super::{borrow, borrow_mut, errors, node::NativeNode};
 use super::mouse::{execute_mouse_event, execute_pointing_event, PointingEvent};
 use crate::ui::{
     events::{DomPointerEvent, PointerEventKind},

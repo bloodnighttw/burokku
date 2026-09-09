@@ -1,56 +1,19 @@
-use std::{cell::Ref, collections::HashMap, rc::Rc};
+//! JavaScript-facing DOM node bindings.
+
+use std::rc::Rc;
 
 use rquickjs::{
-    class::Trace, object::Property, prelude::This, Class, Coerced, Constructor, Ctx, Function,
-    IntoJs, JsLifetime, Null, Object, Result, Value,
+    class::Trace, prelude::This, Class, Coerced, Ctx, Function, IntoJs, JsLifetime, Null, Object,
+    Result, Value,
 };
 
-use super::{errors, lifetime::SharedWrapperRoots, DomBindingState, LayoutRect, SharedDomBindings};
+use super::{
+    borrow, borrow_mut, errors,
+    events::listeners::ListenerRegistry,
+    wrapper::{self, WrapperRoot},
+    DomBindingState, LayoutRect, SharedDomBindings,
+};
 use crate::ui::elements::{DomError, ElementTag, NodeId, NodeKind};
-
-#[derive(Trace, JsLifetime)]
-struct WrapperEntry<'js> {
-    #[qjs(skip_trace)]
-    id: NodeId,
-    reference: Object<'js>,
-}
-
-#[derive(Trace, JsLifetime)]
-struct ListenerRoot<'js> {
-    #[qjs(skip_trace)]
-    id: NodeId,
-    wrapper: Object<'js>,
-}
-
-#[derive(Trace, JsLifetime)]
-#[rquickjs::class]
-struct WrapperCache<'js> {
-    // ponytail: linear lookup; add a traced index only if large DOMs make this measurable.
-    entries: Vec<WrapperEntry<'js>>,
-    listener_roots: Vec<ListenerRoot<'js>>,
-    weak_ref: Constructor<'js>,
-    weak_ref_deref: Function<'js>,
-}
-
-impl<'js> WrapperCache<'js> {
-    fn reference(&self, id: NodeId) -> Option<Object<'js>> {
-        self.entries
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.reference.clone())
-    }
-
-    fn remove(&mut self, id: NodeId) {
-        self.entries.retain(|entry| entry.id != id);
-        self.listener_roots.retain(|entry| entry.id != id);
-    }
-}
-
-#[derive(Clone, Trace, JsLifetime)]
-pub(super) struct EventListener<'js> {
-    pub(super) id: u64,
-    pub(super) callback: Function<'js>,
-}
 
 #[derive(Trace, JsLifetime)]
 #[rquickjs::class(rename = "NativeNode")]
@@ -58,17 +21,10 @@ pub(super) struct NativeNode<'js> {
     #[qjs(skip_trace)]
     pub(super) state: SharedDomBindings,
     #[qjs(skip_trace)]
-    id: NodeId,
+    pub(super) id: NodeId,
     #[qjs(skip_trace)]
-    wrapper_roots: SharedWrapperRoots,
-    pub(super) listeners: HashMap<String, Vec<EventListener<'js>>>,
-    next_listener_id: u64,
-}
-
-impl Drop for NativeNode<'_> {
-    fn drop(&mut self) {
-        self.wrapper_roots.borrow_mut().release(self.id);
-    }
+    pub(super) _wrapper_root: WrapperRoot,
+    pub(super) listeners: ListenerRegistry<'js>,
 }
 #[rquickjs::methods]
 impl<'js> NativeNode<'js> {
@@ -91,7 +47,7 @@ impl<'js> NativeNode<'js> {
         };
         errors::map_dom(&context, "read childNodes", children)?
             .into_iter()
-            .map(|id| wrap_node(&context, &self.state, id))
+            .map(|id| wrapper::wrap_node(&context, &self.state, id))
             .collect()
     }
 
@@ -139,25 +95,11 @@ impl<'js> NativeNode<'js> {
         let state = this.0.borrow().state.clone();
         {
             let mut node = this.0.borrow_mut();
-            let event_type = event_type.0;
-            if node
-                .listeners
-                .get(&event_type)
-                .is_some_and(|listeners| listeners.iter().any(|item| item.callback == callback))
-            {
+            if !node.listeners.add(event_type.0, callback) {
                 return Ok(());
             }
-            let id = node.next_listener_id;
-            node.next_listener_id = node
-                .next_listener_id
-                .checked_add(1)
-                .expect("event listener IDs exhausted");
-            node.listeners
-                .entry(event_type)
-                .or_default()
-                .push(EventListener { id, callback });
         }
-        sync_connected_listener_roots(&context, &state)
+        wrapper::sync_connected_listener_roots(&context, &state)
     }
 
     #[qjs(rename = "removeEventListener")]
@@ -173,16 +115,11 @@ impl<'js> NativeNode<'js> {
         let state = this.0.borrow().state.clone();
         {
             let mut node = this.0.borrow_mut();
-            let event_type = event_type.0;
-            let Some(callbacks) = node.listeners.get_mut(&event_type) else {
+            if !node.listeners.remove(&event_type.0, &callback) {
                 return Ok(());
-            };
-            callbacks.retain(|candidate| candidate.callback != callback);
-            if callbacks.is_empty() {
-                node.listeners.remove(&event_type);
             }
         }
-        sync_connected_listener_roots(&context, &state)
+        wrapper::sync_connected_listener_roots(&context, &state)
     }
 
     #[qjs(rename = "setPointerCapture")]
@@ -232,7 +169,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .append_child(self.id, child_id);
         errors::map_dom(&context, "appendChild", result)?;
-        sync_connected_listener_roots(&context, &self.state)?;
+        wrapper::sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -253,7 +190,7 @@ impl<'js> NativeNode<'js> {
                 .dom
                 .insert_before(self.id, child_id, reference_id);
         errors::map_dom(&context, "insertBefore", result)?;
-        sync_connected_listener_roots(&context, &self.state)?;
+        wrapper::sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -268,7 +205,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .remove_child(self.id, child_id);
         errors::map_dom(&context, "removeChild", result)?;
-        sync_connected_listener_roots(&context, &self.state)?;
+        wrapper::sync_connected_listener_roots(&context, &self.state)?;
         Ok(child)
     }
 
@@ -285,7 +222,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .replace_child(self.id, new_id, old_id);
         errors::map_dom(&context, "replaceChild", result)?;
-        sync_connected_listener_roots(&context, &self.state)?;
+        wrapper::sync_connected_listener_roots(&context, &self.state)?;
         Ok(old_child)
     }
 
@@ -309,7 +246,7 @@ impl<'js> NativeNode<'js> {
             .dom
             .set_text_content(self.id, text.0);
         errors::map_dom(&context, "set textContent", result)?;
-        sync_connected_listener_roots(&context, &self.state)
+        wrapper::sync_connected_listener_roots(&context, &self.state)
     }
 
     #[qjs(get, rename = "nodeValue")]
@@ -368,7 +305,7 @@ impl<'js> NativeNode<'js> {
             }
             state.dom.create_element_tag(tag)
         };
-        wrap_node(&context, &self.state, id)
+        wrapper::wrap_node(&context, &self.state, id)
     }
 
     #[qjs(rename = "createTextNode")]
@@ -383,7 +320,7 @@ impl<'js> NativeNode<'js> {
             }
             state.dom.create_text(text.0)
         };
-        wrap_node(&context, &self.state, id)
+        wrapper::wrap_node(&context, &self.state, id)
     }
 
     #[qjs(get, rename = "data")]
@@ -491,7 +428,7 @@ impl<'js> NativeNode<'js> {
             read(&state)
         };
         match errors::map_dom(context, operation, result)? {
-            Some(id) => Ok(wrap_node(context, &self.state, id)?.into_value()),
+            Some(id) => Ok(wrapper::wrap_node(context, &self.state, id)?.into_value()),
             None => Null.into_js(context),
         }
     }
@@ -506,363 +443,6 @@ impl<'js> NativeNode<'js> {
     }
 }
 
-#[derive(Trace, JsLifetime)]
-#[rquickjs::class(rename = "NativeStyleDeclaration", frozen)]
-struct NativeStyleDeclaration {
-    #[qjs(skip_trace)]
-    state: SharedDomBindings,
-    #[qjs(skip_trace)]
-    id: NodeId,
-}
-
-#[rquickjs::methods]
-impl NativeStyleDeclaration {
-    #[qjs(rename = "supportsProperty")]
-    fn supports_property(&self, context: Ctx<'_>, name: Coerced<String>) -> Result<bool> {
-        let result = borrow(&context, &self.state)?
-            .dom
-            .supports_style_property(self.id, &name.0);
-        errors::map_dom(&context, "check style property", result)
-    }
-
-    #[qjs(rename = "setProperty")]
-    fn set_property(
-        &self,
-        context: Ctx<'_>,
-        name: Coerced<String>,
-        value: Coerced<String>,
-    ) -> Result<()> {
-        let result = borrow_mut(&context, &self.state)?
-            .dom
-            .set_style_property(self.id, &name.0, &value.0);
-        errors::map_style(&context, "set style property", result).map(|_| ())
-    }
-
-    #[qjs(rename = "removeProperty")]
-    fn remove_property(&self, context: Ctx<'_>, name: Coerced<String>) -> Result<()> {
-        let result = borrow_mut(&context, &self.state)?
-            .dom
-            .remove_style_property(self.id, &name.0);
-        errors::map_style(&context, "remove style property", result).map(|_| ())
-    }
-}
-
-const WRAPPER_CACHE: &str = "__burokkuWrapperCache";
-
-pub(super) fn install<'js>(context: &Ctx<'js>, state: SharedDomBindings) -> Result<()> {
-    let weak_ref: Constructor = context.globals().get("WeakRef")?;
-    let weak_ref_deref: Function = weak_ref.get::<_, Object>("prototype")?.get("deref")?;
-    let node_methods = Class::<NativeNode<'js>>::prototype(context)?
-        .expect("macro-backed Node class has a prototype");
-    node_methods.prop(
-        WRAPPER_CACHE,
-        Class::instance(
-            context.clone(),
-            WrapperCache {
-                entries: Vec::new(),
-                listener_roots: Vec::new(),
-                weak_ref,
-                weak_ref_deref,
-            },
-        )?,
-    )?;
-    let style_methods = Class::<NativeStyleDeclaration>::prototype(context)?
-        .expect("macro-backed style class has a prototype");
-    install_facade(context, &node_methods, &style_methods)?;
-
-    let root = borrow(context, &state)?.dom.root();
-    let app = wrap_node(context, &state, root)?;
-    context
-        .globals()
-        .prop("app", Property::from(app).enumerable())?;
-    Ok(())
-}
-
-fn install_facade<'js>(
-    context: &Ctx<'js>,
-    node_methods: &Object<'js>,
-    style_methods: &Object<'js>,
-) -> Result<()> {
-    let node = dom_constructor(context, "Node", None)?;
-    let app = dom_constructor(context, "AppNode", Some(&node))?;
-    let text_node = dom_constructor(context, "TextNode", Some(&node))?;
-    let element = dom_constructor(context, "Element", Some(&node))?;
-    let window = dom_constructor(context, "Window", Some(&element))?;
-    let div = dom_constructor(context, "Div", Some(&element))?;
-    let flex = dom_constructor(context, "Flex", Some(&element))?;
-    let grid = dom_constructor(context, "Grid", Some(&element))?;
-    let text_element = dom_constructor(context, "TextElement", Some(&element))?;
-    let style = dom_constructor(context, "BurokkuStyleDeclaration", None)?;
-
-    let node_prototype: Object = node.get("prototype")?;
-    copy_properties(
-        context,
-        &node_prototype,
-        node_methods,
-        &[
-            "parentNode",
-            "childNodes",
-            "firstChild",
-            "lastChild",
-            "nextSibling",
-            "previousSibling",
-            "isConnected",
-            "appendChild",
-            "insertBefore",
-            "removeChild",
-            "replaceChild",
-            "contains",
-            "textContent",
-            "nodeValue",
-            "addEventListener",
-            "removeEventListener",
-        ],
-    )?;
-
-    copy_properties(
-        context,
-        &app.get("prototype")?,
-        node_methods,
-        &["createElement", "createTextNode"],
-    )?;
-    copy_properties(
-        context,
-        &text_node.get("prototype")?,
-        node_methods,
-        &["data"],
-    )?;
-    copy_properties(
-        context,
-        &element.get("prototype")?,
-        node_methods,
-        &[
-            "setPointerCapture",
-            "releasePointerCapture",
-            "hasPointerCapture",
-            "localName",
-            "getBoundingClientRect",
-            "getAttribute",
-            "hasAttribute",
-            "setAttribute",
-            "removeAttribute",
-        ],
-    )?;
-    copy_properties(
-        context,
-        &style.get("prototype")?,
-        style_methods,
-        &["supportsProperty", "setProperty", "removeProperty"],
-    )?;
-
-    for (name, constructor) in [
-        ("Node", node),
-        ("AppNode", app),
-        ("TextNode", text_node),
-        ("Element", element),
-        ("Window", window),
-        ("Div", div),
-        ("Flex", flex),
-        ("Grid", grid),
-        ("TextElement", text_element),
-        ("BurokkuStyleDeclaration", style),
-    ] {
-        context.globals().prop(name, constructor)?;
-    }
-    Ok(())
-}
-
-fn dom_constructor<'js>(
-    context: &Ctx<'js>,
-    name: &str,
-    parent: Option<&Constructor<'js>>,
-) -> Result<Constructor<'js>> {
-    let parent_prototype = parent
-        .map(|constructor| constructor.get::<_, Object>("prototype"))
-        .transpose()?;
-    let prototype = Object::new_proto(context.clone(), parent_prototype.as_ref())?;
-    let constructor = Constructor::new_prototype(context, prototype, illegal_constructor)?;
-    constructor.set_name(name)?;
-    if let Some(parent) = parent {
-        let parent: &Object = parent.as_inner().as_inner();
-        constructor.set_prototype(Some(parent))?;
-    }
-    Ok(constructor)
-}
-
-fn illegal_constructor<'js>(context: Ctx<'js>) -> Result<Object<'js>> {
-    Err(rquickjs::Exception::throw_type(
-        &context,
-        "Illegal constructor",
-    ))
-}
-
-fn copy_properties<'js>(
-    context: &Ctx<'js>,
-    target: &Object<'js>,
-    source: &Object<'js>,
-    names: &[&str],
-) -> Result<()> {
-    let object: Object = context.globals().get("Object")?;
-    let descriptor: Function = object.get("getOwnPropertyDescriptor")?;
-    let define: Function = object.get("defineProperty")?;
-    for name in names {
-        let property: Object = descriptor.call((source.clone(), *name))?;
-        define.call::<_, Object>((target.clone(), *name, property))?;
-    }
-    Ok(())
-}
-
-fn wrapper_cache<'js>(context: &Ctx<'js>) -> Result<Class<'js, WrapperCache<'js>>> {
-    Class::<NativeNode<'js>>::prototype(context)?
-        .expect("macro-backed Node class has a prototype")
-        .get(WRAPPER_CACHE)
-}
-
-fn sync_connected_listener_roots<'js>(context: &Ctx<'js>, state: &SharedDomBindings) -> Result<()> {
-    // ponytail: linear scan; index listener-bearing wrappers only if mutations make this measurable.
-    // ponytail: detached descendants survive only while their wrappers are live; root detached
-    // component groups if browser-compatible subtree retention becomes necessary.
-    let cache = wrapper_cache(context)?;
-    borrow_mut(context, state)?.clear_disconnected_pointer_capture();
-    let (candidates, deref) = {
-        let cache = cache.borrow();
-        (
-            cache
-                .entries
-                .iter()
-                .map(|entry| (entry.id, entry.reference.clone()))
-                .collect::<Vec<_>>(),
-            cache.weak_ref_deref.clone(),
-        )
-    };
-    let candidates: Vec<_> = {
-        let state = borrow(context, state)?;
-        candidates
-            .into_iter()
-            .filter(|(id, _)| matches!(state.dom.is_connected(*id), Ok(true)))
-            .collect()
-    };
-
-    let mut roots = Vec::new();
-    for (id, reference) in candidates {
-        let Some(wrapper) = deref.call::<_, Option<Object>>((This(reference),))? else {
-            continue;
-        };
-        let node =
-            Class::<NativeNode>::from_object(&wrapper).expect("wrapped nodes use NativeNode");
-        if !node.borrow().listeners.is_empty() {
-            roots.push(ListenerRoot { id, wrapper });
-        }
-    }
-    cache.borrow_mut().listener_roots = roots;
-    Ok(())
-}
-
-fn cached_wrapper<'js>(
-    cache: &Class<'js, WrapperCache<'js>>,
-    id: NodeId,
-) -> Result<Option<Object<'js>>> {
-    let (reference, deref) = {
-        let cache = cache.borrow();
-        (cache.reference(id), cache.weak_ref_deref.clone())
-    };
-    let Some(reference) = reference else {
-        return Ok(None);
-    };
-    deref.call((This(reference),))
-}
-
-fn cache_wrapper<'js>(
-    cache: &Class<'js, WrapperCache<'js>>,
-    id: NodeId,
-    wrapper: &Object<'js>,
-) -> Result<()> {
-    let weak_ref = cache.borrow().weak_ref.clone();
-    let reference = weak_ref.construct((wrapper.clone(),))?;
-    cache
-        .borrow_mut()
-        .entries
-        .push(WrapperEntry { id, reference });
-    Ok(())
-}
-
-pub(super) fn wrap_node<'js>(
-    context: &Ctx<'js>,
-    state: &SharedDomBindings,
-    id: NodeId,
-) -> Result<Object<'js>> {
-    let cache = wrapper_cache(context)?;
-    let released = borrow(context, state)?.take_released_wrappers();
-    if !released.is_empty() {
-        let mut cache = cache.borrow_mut();
-        for id in released {
-            cache.remove(id);
-        }
-    }
-    if let Some(cached) = cached_wrapper(&cache, id)? {
-        return Ok(cached);
-    }
-
-    let (constructor_name, is_element) = {
-        let state = borrow(context, state)?;
-        let kind = state.dom.kind(id).ok_or(DomError::NodeNotFound(id));
-        let kind = errors::map_dom(context, "wrap node", kind)?;
-        match kind {
-            NodeKind::App => ("AppNode", false),
-            NodeKind::Text(_) => ("TextNode", false),
-            NodeKind::Element(element) => match element.tag() {
-                ElementTag::Window => ("Window", true),
-                ElementTag::Div => ("Div", true),
-                ElementTag::Flex => ("Flex", true),
-                ElementTag::Grid => ("Grid", true),
-                ElementTag::Text => ("TextElement", true),
-            },
-        }
-    };
-    let constructor: Object = context.globals().get(constructor_name)?;
-    let prototype: Object = constructor.get("prototype")?;
-    let style_prototype = if is_element {
-        let constructor: Object = context.globals().get("BurokkuStyleDeclaration")?;
-        Some(constructor.get("prototype")?)
-    } else {
-        None
-    };
-    let wrapper_roots = {
-        let state = borrow(context, state)?;
-        errors::map_dom(context, "acquire node wrapper", state.acquire_wrapper(id))?
-    };
-    let node = Class::instance_proto(
-        NativeNode {
-            state: state.clone(),
-            id,
-            wrapper_roots,
-            listeners: HashMap::new(),
-            next_listener_id: 0,
-        },
-        prototype,
-    )?;
-
-    if let Some(prototype) = style_prototype {
-        let style = Class::instance_proto(
-            NativeStyleDeclaration {
-                state: state.clone(),
-                id,
-            },
-            prototype,
-        )?;
-        node.prop("style", Property::from(style))?;
-    }
-
-    cache_wrapper(
-        &cache,
-        id,
-        node.as_value()
-            .as_object()
-            .expect("class instance is an object"),
-    )?;
-    Ok(node.into_inner())
-}
-
 fn layout_rect_object<'js>(context: &Ctx<'js>, rect: LayoutRect) -> Result<Object<'js>> {
     let object = Object::new(context.clone())?;
     for (name, value) in [
@@ -875,25 +455,7 @@ fn layout_rect_object<'js>(context: &Ctx<'js>, rect: LayoutRect) -> Result<Objec
         ("bottom", rect.y + rect.height),
         ("left", rect.x),
     ] {
-        object.prop(name, Property::from(value).enumerable())?;
+        object.prop(name, rquickjs::object::Property::from(value).enumerable())?;
     }
     Ok(object)
-}
-
-pub(super) fn borrow<'a>(
-    context: &Ctx<'_>,
-    state: &'a SharedDomBindings,
-) -> Result<Ref<'a, DomBindingState>> {
-    state
-        .try_borrow()
-        .map_err(|_| errors::borrow_conflict(context))
-}
-
-pub(super) fn borrow_mut<'a>(
-    context: &Ctx<'_>,
-    state: &'a SharedDomBindings,
-) -> Result<std::cell::RefMut<'a, DomBindingState>> {
-    state
-        .try_borrow_mut()
-        .map_err(|_| errors::borrow_conflict(context))
 }

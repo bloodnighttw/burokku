@@ -14,7 +14,7 @@ Relevant code:
 
 - `crates/burokku/src/ui/host.rs:83-167`
 - `crates/burokku/src/ui/host.rs:500-726`
-- `crates/burokku/src/ui/js_bindings/classes.rs:1000-1077`
+- `crates/burokku/src/ui/js_bindings/events/pointer.rs`
 
 The host resolves hit targets, hover transitions, clicks, and sampled capture before enqueueing work. The DOM dispatcher later resolves capture again while executing the queued task.
 
@@ -77,7 +77,7 @@ Relevant code:
 
 - `crates/burokku/src/ui/host.rs:529-540`
 - `crates/burokku/src/ui/host.rs:703-724`
-- `crates/burokku/src/ui/js_bindings/classes.rs:1014-1019`
+- `crates/burokku/src/ui/js_bindings/node.rs:125-159`
 
 The host samples capture before a queued `pointerdown` handler can establish it. A following native movement can therefore be dropped or can enqueue `pointerleave`/`pointerenter` events that fire after capture is active.
 
@@ -91,7 +91,7 @@ Relevant code:
 - `crates/burokku/src/ui/host.rs:551-588`
 - `crates/burokku/src/ui/host.rs:662-686`
 - `crates/burokku/src/ui/host.rs:1321-1328`
-- `crates/burokku/src/ui/js_bindings/classes.rs:1023-1029`
+- `crates/burokku/src/ui/js_bindings/node.rs:125-159`
 
 A release during resize or another period without a usable presented frame clears host state without dispatching `pointerup` or `pointercancel`. A full bounded task queue can similarly reject cancellation after `active_pointer` has already been consumed.
 
@@ -160,7 +160,7 @@ Relevant code:
 
 - `crates/burokku/src/ui/host.rs:83-101`
 - `crates/burokku/src/ui/host.rs:113-165`
-- `crates/burokku/src/ui/js_bindings/classes.rs:1001-1007`
+- `crates/burokku/src/ui/js_bindings/events/pointer.rs`
 
 Current click recognition requires identical raw hit targets and does not account for pointer capture. Browser Pointer Events instead target active capture, or otherwise the nearest common inclusive ancestor of the down/up targets.
 
@@ -170,8 +170,8 @@ Even without full browser compatibility, the current behavior should be document
 
 Relevant code:
 
-- `crates/burokku/src/ui/js_bindings/classes.rs:1042-1074`
-- `crates/burokku/src/ui/js_bindings/classes.rs:1089-1091`
+- `crates/burokku/src/ui/js_bindings/wrapper.rs:111-150`
+- `crates/burokku/src/ui/js_bindings/events/pointer.rs`
 
 Capture is cleared when its target disconnects, but the resulting `lostpointercapture` is dispatched to the disconnected target and dropped. A browser-compatible implementation would notify the connected document/app fallback.
 

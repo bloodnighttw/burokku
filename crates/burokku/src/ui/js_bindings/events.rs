@@ -1,6 +1,7 @@
 //! Queue boundary between native host input and DOM event dispatch.
 
 mod keyboard;
+pub(super) mod listeners;
 mod mouse;
 mod pointer;
 
