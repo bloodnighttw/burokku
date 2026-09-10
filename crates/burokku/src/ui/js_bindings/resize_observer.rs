@@ -841,10 +841,18 @@ mod tests {
         let runtime = JsRuntime::new().unwrap();
         let context = Context::full(&runtime).unwrap();
         context.with(|ctx| {
-            assert!(install(&ctx).catch(&ctx).is_err());
+            assert!(crate::plugins::resize_observer::ResizeObserverPlugin
+                .install(&ctx)
+                .catch(&ctx)
+                .is_err());
             DomPlugin::new().install(&ctx).unwrap();
-            install(&ctx).unwrap();
-            assert!(install(&ctx).catch(&ctx).is_err());
+            crate::plugins::resize_observer::ResizeObserverPlugin
+                .install(&ctx)
+                .unwrap();
+            assert!(crate::plugins::resize_observer::ResizeObserverPlugin
+                .install(&ctx)
+                .catch(&ctx)
+                .is_err());
         });
     }
 

@@ -1,14 +1,49 @@
 # Examples
 
-The high-level `Burokku` runner used below installs the DOM bindings
-automatically. Code that builds the JavaScript runtime directly can install the
-moved plugin explicitly:
+The high-level `Burokku` runner used below installs the DOM and JavaScript
+`ResizeObserver` bindings automatically. Code that builds the JavaScript runtime
+directly installs the observer plugin after the DOM plugin:
 
 ```rust
-use burokku::{plugins::dom::DomPlugin, RuntimeBuilder};
+use burokku::{
+    plugins::{dom::DomPlugin, resize_observer::ResizeObserverPlugin},
+    RuntimeBuilder,
+};
 
-let builder = RuntimeBuilder::new().plugin(DomPlugin::new());
+let builder = RuntimeBuilder::new()
+    .plugin(DomPlugin::new())
+    .plugin(ResizeObserverPlugin);
 ```
+
+Standalone installation exposes the JS API; it does not create a native window
+or compute layout. Observations require a native host supplying completed layouts
+for the existing DOM.
+
+## Resize observation
+
+```js
+const win = app.createElement("window");
+const panel = app.createElement("div");
+panel.style.setProperty("width", "50%");
+win.appendChild(panel);
+app.appendChild(win);
+
+const observer = new ResizeObserver(entries => {
+  for (const entry of entries) {
+    console.log(entry.target.localName, entry.size.width, entry.size.height);
+  }
+});
+observer.observe(win);
+observer.observe(panel);
+
+// Later: observer.unobserve(panel) or observer.disconnect().
+```
+
+Entries contain immutable layout sizes in logical pixels. Delivery is asynchronous
+and is not guaranteed before paint. Box-selection options are future work.
+`@burokku/runtime` declares the global constructor and exports the
+`BurokkuResizeObserver`, `BurokkuResizeObserverEntry`, and
+`BurokkuResizeObserverCallback` types.
 
 ## Event dispatch showcase
 

@@ -1,10 +1,10 @@
 # Native ResizeObserver API and JavaScript bridge proposal
 
-Status: steps 1–4 are approved and committed as `fd282cabd`, `8131c2bcd`,
-`74df7305d`, and `bb65a183e`. Step 5 is approved: installed
-bindings use the runtime's JS task queue with coalescing, capacity waiting, and
-shutdown cleanup. Public plugin/application installation and TypeScript types
-remain step 6.
+Status: steps 1–5 are approved and committed as `fd282cabd`, `8131c2bcd`,
+`74df7305d`, `bb65a183e`, and `25a6806e0`. Step 6 is approved:
+`Burokku::run` installs the public `ResizeObserverPlugin` after `DomPlugin`, and
+`@burokku/runtime` exports matching TypeScript types. Final native-window verification
+remains step 7.
 
 ## Feasibility and recommendation
 
@@ -40,10 +40,10 @@ Browser-equivalent delivery before painting is a separate, larger render-loop ch
 
 | Location | Relevant behavior today |
 | --- | --- |
-| `plugins/resize_observer.rs` | Still empty; public plugin wiring is deferred to step 6. |
+| `plugins/resize_observer.rs` | Public unit plugin; delegates to the existing context-bound JS installer. |
 | `ui/js_bindings/resize_observer.rs` | JS constructor and registration methods, traced callback/target roots, immutable entries, and a controlled delivery hook; coalesced task scheduling when a runtime queue is available. |
 | `ui/resize_observer.rs` | Native subscriptions, layout-size measurements, prepared batches, native callbacks, record consumption, and registration lifetimes; contains no QuickJS values. |
-| `plugins/dom.rs` and `app.rs` | `DomPlugin` owns shared DOM bindings; `Burokku::run` wires them to the host and runtime without an observer plugin. |
+| `plugins/dom.rs` and `app.rs` | `DomPlugin` owns shared DOM bindings; `Burokku::run` wires them to the host and installs `ResizeObserverPlugin` immediately after `DomPlugin` during runtime bootstrap. |
 | `ui/layout/engine.rs` | Computes and caches layouts by DOM revision, viewport, and text generation; publishes successful layouts to the native observer registry. |
 | `ui/layout/computed.rs` | Exposes per-node Taffy layout sizes, used directly by the observer. |
 | `ui/layout/reconcile.rs` | Forces the window root's layout size to the logical viewport. |
@@ -121,7 +121,7 @@ The internal prepare/commit interface separates entry construction from consumpt
 Preparing or dropping a batch does not advance reported sizes. Commit checks the
 observer identity, registration generations, current DOM revision, and latest layout
 snapshot. An invalidated batch is discarded without consuming valid pending changes.
-The future JS adapter can therefore construct entries before committing, and native
+The JS adapter constructs entries before committing, and native
 callback delivery uses the same mechanism and invokes user code after releasing
 DOM and registry borrows.
 
@@ -131,17 +131,16 @@ flowchart TD
     Layout[Successful native layout] --> Registry
     Registry --> Records[Native take_records]
     Registry --> Native[Deferred Rust callbacks]
-    Registry -. Later step .-> Plugin[JS plugin and task queue]
+    Registry --> Plugin[JS plugin and task queue]
     Plugin --> JS[JavaScript callbacks]
 ```
 
 ## JavaScript binding API
 
-The following bindings are implemented behind the crate-owned installation hook.
-They are not installed by `Burokku::run` yet. When installed after `DomPlugin` in a
-`runtime::Runtime`, successful native layouts automatically queue delivery. Bare
-QuickJS contexts without a task queue can still use the internal delivery hook for
-controlled tests.
+The following global bindings are installed automatically by `Burokku::run`.
+Standalone runtime builders install `ResizeObserverPlugin` after `DomPlugin` and
+still need a native layout driver. Successful native layouts queue delivery through
+the existing runtime. Bare QuickJS contexts can use the internal controlled hook.
 
 
 ```js
@@ -457,7 +456,7 @@ application installation belongs to step 6.
 
 **Review checkpoint:** approved. Step 5 is authorized.
 
-### Step 5 — JavaScript task delivery (approved)
+### Step 5 — JavaScript task delivery (approved; committed as `25a6806e0`)
 
 Deliverable: connect native delivery signals to `JsTaskQueue`, retaining one pending
 task and one saturation waiter per adapter. Construct entries before committing;
@@ -496,7 +495,7 @@ still step 6; no browser-equivalent before-paint guarantee is introduced.
 
 **Review checkpoint:** approved. Public plugin/application wiring and types are next.
 
-### Step 6 — Application wiring and TypeScript declarations
+### Step 6 — Application wiring and TypeScript declarations (approved)
 
 Deliverable: implement plugin pairing and automatic installation in `Burokku::run`,
 export matching runtime types, and document standalone runtime use with a native
@@ -505,7 +504,26 @@ layout driver. Both native and JS consumers use the same DOM registry.
 Check: plugin installation failures, TypeScript usage, independent native/JS
 subscriptions, and runtime teardown with surviving native ownership where supported.
 
-**Review checkpoint:** review the complete public integration.
+Implementation: `ResizeObserverPlugin` is a unit plugin, with no document field or
+extra identity. It obtains the existing DOM through the installed `app` binding.
+The application bootstrap appends it immediately after `DomPlugin`, before running
+the application script. Standalone builders can register the same public plugin.
+`packages/runtime/src/index.ts` declares the global constructor and exports
+`BurokkuResizeObserver`, `BurokkuResizeObserverEntry`, and
+`BurokkuResizeObserverCallback`. Types expose only element targets and immutable
+`size.width`/`size.height`; box options and browser-specific entry fields stay absent.
+The examples README and plugin rustdoc document automatic and standalone use.
+
+Verification: all 210 library tests pass. The bootstrap integration test constructs
+an observer in the actual application startup path, receives a native layout size
+through JS, verifies independent native consumption on the same target, and checks
+that JS runtime teardown preserves the native subscription. The installation test
+now exercises the public plugin, including missing-DOM and duplicate-install errors.
+The public plugin doctest passes. Runtime package typechecking and its full build
+pass, including positive and negative type tests for targets, callbacks, immutable
+entries, and unsupported APIs. Formatting and whitespace checks pass.
+
+**Review checkpoint:** approved. Further work waits for the user's next instructions.
 
 ### Step 7 — End-to-end verification and examples
 
@@ -567,4 +585,5 @@ before-paint guarantee; requiring browser-equivalent timing expands the scope in
 a render-loop project.
 
 Implementation follows the steps and mandatory review checkpoints above. Step 1
-through step 4 are committed; step 5 is approved. Step 6 remains pending.
+through step 5 are committed; step 6 is approved. Further work waits for the
+user's next instructions.
