@@ -1,9 +1,8 @@
 # Native ResizeObserver API and JavaScript bridge proposal
 
-Status: step 1 is approved and committed as `fd282cabd`. Step 2 is implemented
-and awaiting review. The existing `Dom`/`NodeId` observer core now receives host
-measurements before GPU resize and presentation checks. Automatic callbacks,
-observation wakeups, and the JS adapter remain later review steps.
+Status: steps 1 and 2 are approved and committed as `fd282cabd` and `8131c2bcd`.
+Step 3 is approved: native callbacks and coalesced host
+wakeups use the existing DOM registry. The JavaScript adapter remains a later step.
 
 ## Feasibility and recommendation
 
@@ -31,7 +30,8 @@ so the proposed API uses that existing target. See the
 
 The current scope observes only the existing layout width and height in logical
 pixels. Content-box/border-box selection is deferred; keep only a TODO until the
-required style behavior is implemented. Deferred callbacks remain a later step.
+required style behavior is implemented. Native callbacks are deferred to the host
+event-loop phase.
 Browser-equivalent delivery before painting is a separate, larger render-loop change.
 
 ## Existing integration points
@@ -39,21 +39,22 @@ Browser-equivalent delivery before painting is a separate, larger render-loop ch
 | Location | Relevant behavior today |
 | --- | --- |
 | `plugins/resize_observer.rs` | Currently empty; its module is exported. |
-| `ui/resize_observer.rs` | Native subscriptions, layout-size measurements, prepared batches, record consumption, and registration lifetimes; contains no QuickJS values. |
+| `ui/resize_observer.rs` | Native subscriptions, layout-size measurements, prepared batches, native callbacks, record consumption, and registration lifetimes; contains no QuickJS values. |
 | `plugins/dom.rs` and `app.rs` | `DomPlugin` owns shared DOM bindings; `Burokku::run` wires them to the host and runtime without an observer plugin. |
 | `ui/layout/engine.rs` | Computes and caches layouts by DOM revision, viewport, and text generation; publishes successful layouts to the native observer registry. |
 | `ui/layout/computed.rs` | Exposes per-node Taffy layout sizes, used directly by the observer. |
 | `ui/layout/reconcile.rs` | Forces the window root's layout size to the logical viewport. |
-| `ui/host/events.rs` | Resize/scale events measure before GPU checks, including zero-size surfaces and pending GPU initialization. |
+| `ui/host/events.rs` | Resize/scale events measure before GPU checks; `about_to_wait` handles requested measurements and deferred native callbacks. |
 | `ui/host/render.rs` | `measure_layout` computes independently of GPU resources; redraw measures before resize/presentation and reuses that layout for the scene. |
 | `ui/js_bindings.rs` | Publishes presented geometry for `getBoundingClientRect()`. |
 | `runtime::JsTaskQueue` | Runs native-scheduled JavaScript work as macrotasks, followed by microtasks. |
 
 Completed layout computations publish native observation snapshots. Both redraw
 and native resize/scale events call the host measurement method before GPU work.
-A new observation does not yet request host work or schedule a callback.
-A plugin alone cannot detect resizing: the native service needs a host hook that
-supplies completed measurements and schedules delivery.
+New observations and DOM mutations with active registrations request host work
+through the existing event-loop waker. Requests coalesce until measurement runs.
+Successful layout publication schedules native callback delivery without invoking
+user code inside layout computation.
 
 ## Native Rust API
 
@@ -61,39 +62,50 @@ The existing `Dom` already works without a JavaScript context. Keep its ownershi
 and mutation API. `ui::resize_observer` implements observation directly against
 that DOM; there is no new document wrapper or replacement element-handle system.
 
-The implemented API is:
+The implemented callback API is:
 
 ```rust
 // `dom` and `panel` come from the existing native application DOM.
 let observer = dom.resize_observer();
+observer.set_callback(|entries| {
+    for entry in entries {
+        println!("{:?}: {} x {}", entry.target, entry.size.width, entry.size.height);
+    }
+})?;
 observer.observe(&dom, panel)?;
+// Keep `observer` alive while watching the panel.
 
-// After the existing layout engine completes layout:
-for entry in observer.take_records(&dom)? {
-    println!("{:?}: {:?}", entry.target, entry.size);
-}
-
-observer.unobserve(panel);
-observer.disconnect(); // Reusable; observe again for a fresh initial measurement.
-// Dropping the observer removes its registrations and retention roots.
+// Later: observer.unobserve(panel), observer.disconnect(), or drop(observer).
 ```
 
-`take_records` explicitly consumes records; it does not compute layout or schedule
-callbacks. It returns an empty batch before a successful layout or when the DOM
-revision has advanced beyond the latest layout. Automatic deferred callback
-delivery and host wakeups are subsequent steps, not part of this first review.
+`set_callback` accepts `FnMut(&[ResizeObserverEntry]) + 'static` without `Send`.
+The host invokes it after successful measurement, outside DOM and registry borrows. A DOM borrow conflict during native delivery is an
+invariant violation and panics with context; delivery does not return a host error.
+Replacing a callback invalidates any prepared delivery for the old callback. Each
+host phase snapshots eligible registrations before invoking user code; changes made
+by callbacks request another measurement turn rather than recursive delivery.
+
+Without a callback, native consumers can keep using `take_records(&dom)`. It
+explicitly consumes pending records and never computes layout or invokes user code.
+It returns an empty batch before a successful layout or when the DOM revision has
+advanced beyond the latest layout. Manually consuming records also consumes them
+for that observer's callback; the two mechanisms share the same delivery state.
+
+A compilable native usage example is included in `ResizeObserver::set_callback`'s
+Rust documentation. It accepts the existing `Dom` and returns the owned subscription.
 
 | Type or operation | Contract |
 | --- | --- |
 | `Dom::resize_observer()` | Creates an owned native subscription in this DOM's registry. |
 | `ResizeObserver::observe(&Dom, NodeId)` | Validates the element, then adds or replaces a registration. |
+| `set_callback(F)` | Installs or replaces a native callback and requests a host check for active registrations. |
 | `unobserve(NodeId)` / `disconnect()` | Idempotent cancellation; disconnect leaves the observer reusable. |
 | `take_records(&Dom)` | Returns changed native records from the latest successful layout and advances only this observer's reported sizes. |
 | `ResizeObserverEntry` | Target `NodeId` and `size: taffy::geometry::Size<f32>` with width and height in logical pixels. No custom size/rect type or box-selection enum. |
-| `ResizeObserverError` | Closed document or invalid/stale/non-element target. |
+| `ResizeObserverError` | Closed observer or invalid/stale/non-element target. |
 
 The registry belongs to the existing `Dom`. Observer handles refer to it weakly;
-dropping the DOM closes them. Registrations retain detached components through the
+dropping the DOM or shutting down its host closes them. Registrations retain detached components through the
 existing reclamation routine, alongside live wrapper roots. Returned records carry
 non-owning node IDs and do not extend target lifetime after cancellation.
 
@@ -107,14 +119,15 @@ Preparing or dropping a batch does not advance reported sizes. Commit checks the
 observer identity, registration generations, current DOM revision, and latest layout
 snapshot. An invalidated batch is discarded without consuming valid pending changes.
 The future JS adapter can therefore construct entries before committing, and native
-callback delivery can use the same mechanism with all Rust borrows released.
+callback delivery uses the same mechanism and invokes user code after releasing
+DOM and registry borrows.
 
 ```mermaid
 flowchart TD
     Dom[Existing Dom] --> Registry[Native observer registry]
     Layout[Successful native layout] --> Registry
     Registry --> Records[Native take_records]
-    Registry -. Later step .-> Native[Deferred Rust callbacks]
+    Registry --> Native[Deferred Rust callbacks]
     Registry -. Later step .-> Plugin[JS plugin and task queue]
     Plugin --> JS[JavaScript callbacks]
 ```
@@ -343,7 +356,7 @@ wakeups, and measurement independent of redraw are not implemented yet.
 
 **Review checkpoint:** review the native core before changing host scheduling.
 
-### Step 2 — Separate host measurement from presentation (implemented; awaiting review)
+### Step 2 — Separate host measurement from presentation (approved; committed as `8131c2bcd`)
 
 Deliverable: extract successful layout measurement from the redraw-only path while
 preserving cache reuse and presented geometry. Permit measurement when presentation
@@ -364,10 +377,9 @@ layout preserving previous state until a successful retry. Formatting and whites
 checks passed. Actual macOS drag/minimize testing remains in the final verification
 step; this step adds no callbacks or observation-triggered wakeups.
 
-**Review checkpoint:** review the host/render refactor independently. These changes
-remain uncommitted until review.
+**Review checkpoint:** approved; committed as `8131c2bcd`.
 
-### Step 3 — Native wakeups and deferred callbacks
+### Step 3 — Native wakeups and deferred callbacks (approved)
 
 Deliverable: connect DOM/native size/scale changes and new observations to host
 measurement. Add deferred native callback delivery using prepare/commit, releasing
@@ -376,7 +388,25 @@ all borrows before user code. Add a small native example using the existing DOM.
 Check: idle observations request work, callbacks can mutate the DOM and registrations,
 stale work waits for remeasurement, and handle/host teardown cancels pending work.
 
-**Review checkpoint:** review functioning automatic native delivery before JS work.
+Implementation: `set_callback` stores native callbacks on the existing registry.
+DOM mutations and new registrations request one pending measurement through a
+standard Rust `Waker` backed by the existing event loop. Successful layouts mark
+native delivery pending; `about_to_wait` measures requested work and then dispatches
+prepared callbacks. Callback-driven changes wake a later turn. Failed measurements
+clear pending work without advancing reported sizes or busy-retrying the failure.
+Host exit/drop clears subscriptions and releases callbacks. The host keeps a shared
+handle to the same registry so cleanup does not require borrowing the DOM.
+
+Verification: all 191 library tests pass, including seven new callback/wakeup
+regressions. These cover idle cache reuse, coalesced wakeups, DOM mutation during a
+callback, invalidation of later callbacks, callback replacement, cancellation after
+preparation, and host teardown while the DOM is borrowed. The native usage doctest
+also passes. After changing delivery borrow conflicts to invariant panics, all 37
+host tests pass, including the new expected-panic regression. Formatting and
+whitespace checks pass. Manual macOS window testing
+remains in the final verification step; no JS binding has been added here.
+
+**Review checkpoint:** approved. JavaScript adapter work remains the next step.
 
 ### Step 4 — JavaScript registration and entry bindings
 
@@ -472,4 +502,4 @@ before-paint guarantee; requiring browser-equivalent timing expands the scope in
 a render-loop project.
 
 Implementation follows the steps and mandatory review checkpoints above. Step 1
-is committed; step 2 is implemented and awaiting review. Step 3 remains pending.
+and step 2 are committed; step 3 is approved. Step 4 remains pending.

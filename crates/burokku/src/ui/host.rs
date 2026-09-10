@@ -19,6 +19,7 @@ use super::{
     gpu::{GraphicsContext, GraphicsError, WindowRenderer},
     js_bindings::SharedDomBindings,
     layout::{LayoutEngine, LayoutError},
+    resize_observer::ResizeObserverRegistry,
     scene::SceneError,
     text::TextEngine,
     window_host::{WindowHostError, WindowManager},
@@ -31,6 +32,8 @@ use self::{
 
 pub(crate) struct ApplicationHost {
     dom_bindings: SharedDomBindings,
+    // Shared handle to the DOM's registry, also usable during borrow-error cleanup.
+    resize_observers: ResizeObserverRegistry,
     observed_revision: Option<u64>,
     graphics: Option<GraphicsContext>,
     pending_graphics: Option<PendingGraphicsInitialization>,
@@ -54,8 +57,10 @@ impl ApplicationHost {
         text: TextEngine,
         lifecycle: RuntimeLifecycle,
     ) -> Self {
+        let resize_observers = dom_bindings.borrow().dom.resize_observers.clone();
         Self {
             dom_bindings,
+            resize_observers,
             observed_revision: None,
             // GPU allocation is delayed until a native Window exists, so its
             // surface can constrain adapter selection.
@@ -90,6 +95,7 @@ impl ApplicationHost {
 
     fn request_exit(&mut self) {
         self.exit_requested = true;
+        self.resize_observers.shutdown();
         self.lifecycle.request_shutdown();
     }
 
@@ -101,6 +107,12 @@ impl ApplicationHost {
         self.renderer = None;
         self.windows.close();
         self.request_exit();
+    }
+}
+
+impl Drop for ApplicationHost {
+    fn drop(&mut self) {
+        self.resize_observers.shutdown();
     }
 }
 

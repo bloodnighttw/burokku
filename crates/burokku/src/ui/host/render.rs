@@ -179,6 +179,7 @@ impl ApplicationHost {
             .try_borrow()
             .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?;
         self.layout.compute(&state.dom, viewport).map_err(|error| {
+            state.dom.resize_observers.measurement_failed();
             classify_candidate_failure(
                 state.dom.revision(),
                 has_presented_frame,
@@ -191,6 +192,33 @@ impl ApplicationHost {
             .layout
             .current_shared()
             .expect("a successful layout computation installs current state"))
+    }
+
+    /// One deferred phase per event-loop turn. Callback mutations request a new
+    /// measurement turn rather than recursively entering layout or delivery.
+    /// A DOM borrow conflict here is a violated host invariant, not a runtime error.
+    pub(super) fn deliver_resize_callbacks(&mut self) {
+        let deliveries = {
+            let state = self
+                .dom_bindings
+                .try_borrow()
+                // this should be rare, or never happen, if we follow the contract that
+                // callbacks are not allowed to borrow the DOM during delivery.
+                .expect("DOM must not be mutably borrowed when preparing resize callbacks");
+            state.dom.resize_observers.prepare_callbacks(&state.dom)
+        };
+        for delivery in deliveries {
+            let callback = {
+                let state = self
+                    .dom_bindings
+                    .try_borrow()
+                    .expect("resize callbacks must release DOM borrows before returning");
+                delivery.commit(&state.dom)
+            };
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
     }
 
     pub(super) fn redraw(&mut self) -> Result<PresentationOutcome, RedrawFailure> {

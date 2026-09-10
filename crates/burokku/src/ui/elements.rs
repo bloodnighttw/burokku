@@ -1073,6 +1073,7 @@ impl Dom {
 
     fn bump_revision(&mut self) {
         bump(&mut self.revision);
+        self.resize_observers.request_measurement();
     }
 }
 

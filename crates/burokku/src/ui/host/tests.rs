@@ -1,4 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
 use tokio::sync::oneshot;
 use winit::{ElementState, MouseButton, PhysicalPosition, PhysicalSize};
@@ -186,6 +190,214 @@ fn measurement_host() -> (ApplicationHost, NodeId, NodeId) {
 }
 
 #[test]
+#[should_panic(expected = "DOM must not be mutably borrowed when preparing resize callbacks")]
+fn resize_delivery_panics_if_its_dom_borrow_invariant_is_violated() {
+    let (mut host, _, _) = measurement_host();
+    let bindings = host.dom_bindings.clone();
+    let _borrow = bindings.borrow_mut();
+    host.deliver_resize_callbacks();
+}
+
+#[test]
+fn native_resize_callbacks_defer_mutations_until_the_next_measurement() {
+    let (mut host, _, panel) = measurement_host();
+    let bindings = Rc::downgrade(&host.dom_bindings);
+    let sizes = Rc::new(RefCell::new(Vec::new()));
+    let observer = host.dom_bindings.borrow().dom.resize_observer();
+    let recorded = sizes.clone();
+    observer
+        .set_callback(move |entries| {
+            recorded.borrow_mut().push(entries[0].size.width);
+            // This would panic if the host retained its DOM borrow across callbacks.
+            let bindings = bindings.upgrade().unwrap();
+            let mut state = bindings.borrow_mut();
+            if entries[0].size.width == 100.0 {
+                state
+                    .dom
+                    .set_style_property(panel, "width", "150px")
+                    .unwrap();
+            }
+        })
+        .unwrap();
+    observer
+        .observe(&host.dom_bindings.borrow().dom, panel)
+        .unwrap();
+    let size = PhysicalSize::new(320, 240);
+    host.measure_layout(size, 1.0).unwrap();
+    assert!(sizes.borrow().is_empty());
+    host.deliver_resize_callbacks();
+    assert_eq!(*sizes.borrow(), [100.0]);
+    assert!(host
+        .dom_bindings
+        .borrow()
+        .dom
+        .resize_observers
+        .measurement_requested());
+    host.deliver_resize_callbacks();
+    assert_eq!(*sizes.borrow(), [100.0]);
+    host.measure_layout(size, 1.0).unwrap();
+    host.deliver_resize_callbacks();
+    assert_eq!(*sizes.borrow(), [100.0, 150.0]);
+    assert!(!host
+        .dom_bindings
+        .borrow()
+        .dom
+        .resize_observers
+        .measurement_requested());
+}
+
+#[test]
+fn native_callback_added_after_idle_layout_uses_the_cache_and_only_fires_once() {
+    let (mut host, _, panel) = measurement_host();
+    let size = PhysicalSize::new(320, 240);
+    let cached = host.measure_layout(size, 1.0).unwrap();
+    let observer = host.dom_bindings.borrow().dom.resize_observer();
+    let sizes = Rc::new(RefCell::new(Vec::new()));
+    let recorded = sizes.clone();
+    observer
+        .set_callback(move |entries| recorded.borrow_mut().push(entries[0].size))
+        .unwrap();
+    observer
+        .observe(&host.dom_bindings.borrow().dom, panel)
+        .unwrap();
+    assert!(host
+        .dom_bindings
+        .borrow()
+        .dom
+        .resize_observers
+        .measurement_requested());
+    assert!(Rc::ptr_eq(
+        &cached,
+        &host.measure_layout(size, 1.0).unwrap()
+    ));
+    host.deliver_resize_callbacks();
+    host.measure_layout(size, 1.0).unwrap();
+    host.deliver_resize_callbacks();
+    assert_eq!(sizes.borrow().len(), 1);
+}
+
+#[test]
+fn native_callback_mutation_invalidates_later_batches_until_remeasurement() {
+    let (mut host, _, panel) = measurement_host();
+    let first = host.dom_bindings.borrow().dom.resize_observer();
+    let second = host.dom_bindings.borrow().dom.resize_observer();
+    let bindings = Rc::downgrade(&host.dom_bindings);
+    let sizes = Rc::new(RefCell::new(Vec::new()));
+    first
+        .set_callback(move |_| {
+            bindings
+                .upgrade()
+                .unwrap()
+                .borrow_mut()
+                .dom
+                .set_style_property(panel, "width", "150px")
+                .unwrap();
+        })
+        .unwrap();
+    let recorded = sizes.clone();
+    second
+        .set_callback(move |entries| recorded.borrow_mut().push(entries[0].size.width))
+        .unwrap();
+    for observer in [&first, &second] {
+        observer
+            .observe(&host.dom_bindings.borrow().dom, panel)
+            .unwrap();
+    }
+    host.measure_layout(PhysicalSize::new(320, 240), 1.0)
+        .unwrap();
+    host.deliver_resize_callbacks();
+    assert!(sizes.borrow().is_empty());
+    host.measure_layout(PhysicalSize::new(320, 240), 1.0)
+        .unwrap();
+    host.deliver_resize_callbacks();
+    assert_eq!(*sizes.borrow(), [150.0]);
+}
+
+#[test]
+fn replacing_a_native_callback_invalidates_its_prepared_delivery() {
+    let (mut host, _, panel) = measurement_host();
+    let first = host.dom_bindings.borrow().dom.resize_observer();
+    let second = Rc::new(host.dom_bindings.borrow().dom.resize_observer());
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let recorded = log.clone();
+    second
+        .set_callback(move |_| recorded.borrow_mut().push("old"))
+        .unwrap();
+    let later = second.clone();
+    let recorded = log.clone();
+    first
+        .set_callback(move |_| {
+            let recorded = recorded.clone();
+            later
+                .set_callback(move |_| recorded.borrow_mut().push("new"))
+                .unwrap();
+        })
+        .unwrap();
+    for observer in [&first, second.as_ref()] {
+        observer
+            .observe(&host.dom_bindings.borrow().dom, panel)
+            .unwrap();
+    }
+    let size = PhysicalSize::new(320, 240);
+    host.measure_layout(size, 1.0).unwrap();
+    host.deliver_resize_callbacks();
+    assert!(log.borrow().is_empty());
+    host.measure_layout(size, 1.0).unwrap();
+    host.deliver_resize_callbacks();
+    assert_eq!(*log.borrow(), ["new"]);
+}
+
+#[test]
+fn dropping_a_native_observer_cancels_its_already_prepared_callback() {
+    let (mut host, _, panel) = measurement_host();
+    let first = host.dom_bindings.borrow().dom.resize_observer();
+    let second = host.dom_bindings.borrow().dom.resize_observer();
+    second
+        .set_callback(|_| panic!("cancelled observer must not fire"))
+        .unwrap();
+    for observer in [&first, &second] {
+        observer
+            .observe(&host.dom_bindings.borrow().dom, panel)
+            .unwrap();
+    }
+    let second = Rc::new(RefCell::new(Some(second)));
+    let cancelled = second.clone();
+    first
+        .set_callback(move |_| {
+            cancelled.borrow_mut().take();
+        })
+        .unwrap();
+    host.measure_layout(PhysicalSize::new(320, 240), 1.0)
+        .unwrap();
+    host.deliver_resize_callbacks();
+    assert!(second.borrow().is_none());
+}
+
+#[test]
+fn dropping_host_releases_native_callbacks_and_closes_surviving_handles() {
+    let (mut host, _, panel) = measurement_host();
+    let bindings = host.dom_bindings.clone();
+    let observer = bindings.borrow().dom.resize_observer();
+    let retained = Rc::new(());
+    let weak = Rc::downgrade(&retained);
+    observer
+        .set_callback(move |_| {
+            let _ = &retained;
+        })
+        .unwrap();
+    observer.observe(&bindings.borrow().dom, panel).unwrap();
+    host.measure_layout(PhysicalSize::new(320, 240), 1.0)
+        .unwrap();
+    let state = bindings.borrow_mut();
+    drop(host);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(
+        observer.take_records(&state.dom),
+        Err(crate::ui::resize_observer::ResizeObserverError::Closed)
+    );
+}
+
+#[test]
 fn host_measurement_reuses_layout_without_gpu_or_updating_presented_geometry() {
     let (mut host, _, panel) = measurement_host();
     let observer = {
@@ -320,6 +532,12 @@ fn failed_host_measurement_preserves_previous_layout_and_observer_state() {
         &previous,
         &host.layout.current_shared().unwrap()
     ));
+    assert!(!host
+        .dom_bindings
+        .borrow()
+        .dom
+        .resize_observers
+        .measurement_requested());
     {
         let mut state = host.dom_bindings.borrow_mut();
         assert!(observer.take_records(&state.dom).unwrap().is_empty());

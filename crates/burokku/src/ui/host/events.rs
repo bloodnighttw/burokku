@@ -1,6 +1,6 @@
 //! Native event translation and `winit` callback dispatch.
 
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc, task::Waker};
 
 use winit::{
     application::ApplicationHandler, ActiveEventLoop, ElementState, KeyEvent, Modifiers,
@@ -387,6 +387,8 @@ impl ApplicationHost {
 
 impl ApplicationHandler for ApplicationHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.resize_observers
+            .set_waker(Waker::from(Arc::new(event_loop.loop_waker())));
         if let Err(error) = self.sync_dom(event_loop) {
             self.fail(event_loop, error);
             return;
@@ -635,7 +637,28 @@ impl ApplicationHandler for ApplicationHost {
             .and_then(|()| self.sync_dom(event_loop))
         {
             self.fail(event_loop, error);
+            return;
         }
+        if self.exit_requested {
+            return;
+        }
+
+        let requested = self.resize_observers.measurement_requested();
+        if requested {
+            let (size, scale) = self
+                .windows
+                .current()
+                .map_or((winit::PhysicalSize::new(0, 0), 1.0), |native| {
+                    (native.window().inner_size(), native.window().scale_factor())
+                });
+            if let Err(failure) = self.measure_layout(size, scale) {
+                self.handle_redraw_failure(event_loop, failure);
+                return;
+            }
+        }
+        // Callbacks return (); a DOM borrow conflict during delivery violates
+        // the host invariant and panics.
+        self.deliver_resize_callbacks();
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
