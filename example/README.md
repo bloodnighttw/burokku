@@ -47,8 +47,10 @@ and is not guaranteed before paint. Box-selection options are future work.
 
 ## Event dispatch showcase
 
-`example/events` renders an interactive UI element and displays click, pointer,
-wheel, keyboard, bubbling, and pointer-capture events as they are dispatched.
+`example/events` renders an interactive div and displays click, pointer, wheel,
+keyboard, bubbling, and pointer-capture events as they are dispatched. A single
+resize observer watches both the div and the native window, showing their current
+layout sizes in the UI and logging changes. Resize the window to see both update.
 
 ```sh
 cargo run -p burokku-example-events
