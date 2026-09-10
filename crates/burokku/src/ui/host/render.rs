@@ -1,11 +1,13 @@
-//! Frame validity, failure policy, layout, scene construction, and presentation.
+//! Host measurement, frame validity, scene construction, and presentation.
+
+use std::rc::Rc;
 
 use winit::{ActiveEventLoop, PhysicalSize, WindowId};
 
 use super::{
     super::{
         gpu::{GraphicsError, PresentationOutcome},
-        layout::LogicalViewport,
+        layout::{ComputedLayout, LogicalViewport},
         scene::{BuiltScene, ScenePlan},
     },
     ApplicationHost, HostError,
@@ -162,6 +164,35 @@ impl ApplicationHost {
         }
     }
 
+    /// Measures the DOM without requiring a renderer or publishing presented geometry.
+    /// Successful computations publish observer sizes through the layout engine.
+    pub(super) fn measure_layout(
+        &mut self,
+        physical_size: PhysicalSize<u32>,
+        scale_factor: f64,
+    ) -> Result<Rc<ComputedLayout>, RedrawFailure> {
+        let viewport =
+            logical_viewport(physical_size, scale_factor).map_err(RedrawFailure::Fatal)?;
+        let has_presented_frame = self.has_usable_presented_frame();
+        let state = self
+            .dom_bindings
+            .try_borrow()
+            .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?;
+        self.layout.compute(&state.dom, viewport).map_err(|error| {
+            classify_candidate_failure(
+                state.dom.revision(),
+                has_presented_frame,
+                FailureKind::Layout,
+                FrameStage::Layout,
+                error.into(),
+            )
+        })?;
+        Ok(self
+            .layout
+            .current_shared()
+            .expect("a successful layout computation installs current state"))
+    }
+
     pub(super) fn redraw(&mut self) -> Result<PresentationOutcome, RedrawFailure> {
         let native = self
             .windows
@@ -170,6 +201,9 @@ impl ApplicationHost {
         let window_id = native.id();
         let physical_size = native.window().inner_size();
         let scale_factor = native.window().scale_factor();
+        // Measurement must survive zero-size surfaces and GPU resize/present failures.
+        let computed = self.measure_layout(physical_size, scale_factor)?;
+        let revision = computed.revision();
         let graphics = self
             .graphics
             .as_ref()
@@ -201,12 +235,6 @@ impl ApplicationHost {
         if !presentation.usable_frame {
             self.presented = None;
         }
-        let mut revision = self
-            .dom_bindings
-            .try_borrow()
-            .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?
-            .dom
-            .revision();
         if let Err(error) = resize_result {
             return Err(classify_resize_failure(
                 revision,
@@ -218,28 +246,11 @@ impl ApplicationHost {
         if physical_size.width == 0 || physical_size.height == 0 {
             return Ok(PresentationOutcome::Occluded);
         }
-        let viewport = logical_viewport(physical_size, scale_factor).map_err(|error| {
-            classify_fatal_failure(has_presented_frame, FailureKind::Invariant, error)
-        })?;
-        let (frame, computed) = {
+        let frame = {
             let state = self
                 .dom_bindings
                 .try_borrow()
                 .map_err(|_| RedrawFailure::Fatal(HostError::DomBorrowConflict))?;
-            revision = state.dom.revision();
-            self.layout.compute(&state.dom, viewport).map_err(|error| {
-                classify_candidate_failure(
-                    revision,
-                    has_presented_frame,
-                    FailureKind::Layout,
-                    FrameStage::Layout,
-                    error.into(),
-                )
-            })?;
-            let computed = self
-                .layout
-                .current_shared()
-                .expect("a successful layout computation installs current state");
             let frame = BuiltScene::build(
                 &state.dom,
                 &computed,
@@ -257,7 +268,7 @@ impl ApplicationHost {
                 )
             })?;
             debug_assert_eq!(state.dom.revision(), revision);
-            (frame, computed)
+            frame
         };
         debug_assert!(frame.glyph_runs() <= frame.glyphs());
         let outcome = renderer.present(graphics, &frame).map_err(|error| {

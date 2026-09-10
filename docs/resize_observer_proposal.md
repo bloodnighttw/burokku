@@ -1,10 +1,9 @@
 # Native ResizeObserver API and JavaScript bridge proposal
 
-Status: the first native observer implementation is approved. It uses the
-existing `Dom` and `NodeId` directly. The unnecessary `ui/document.rs` wrapper has
-been removed. Native subscriptions, layout-backed records, batching, and retention
-are implemented; automatic callbacks, host wakeups, and the JS adapter remain later
-review steps.
+Status: step 1 is approved and committed as `fd282cabd`. Step 2 is implemented
+and awaiting review. The existing `Dom`/`NodeId` observer core now receives host
+measurements before GPU resize and presentation checks. Automatic callbacks,
+observation wakeups, and the JS adapter remain later review steps.
 
 ## Feasibility and recommendation
 
@@ -45,14 +44,14 @@ Browser-equivalent delivery before painting is a separate, larger render-loop ch
 | `ui/layout/engine.rs` | Computes and caches layouts by DOM revision, viewport, and text generation; publishes successful layouts to the native observer registry. |
 | `ui/layout/computed.rs` | Exposes per-node Taffy layout sizes, used directly by the observer. |
 | `ui/layout/reconcile.rs` | Forces the window root's layout size to the logical viewport. |
-| `ui/host/events.rs` | Handles `Resized` and `ScaleFactorChanged`. |
-| `ui/host/render.rs` | Currently computes layout inside redraw, after renderer resize and a zero-size early return. |
+| `ui/host/events.rs` | Resize/scale events measure before GPU checks, including zero-size surfaces and pending GPU initialization. |
+| `ui/host/render.rs` | `measure_layout` computes independently of GPU resources; redraw measures before resize/presentation and reuses that layout for the scene. |
 | `ui/js_bindings.rs` | Publishes presented geometry for `getBoundingClientRect()`. |
 | `runtime::JsTaskQueue` | Runs native-scheduled JavaScript work as macrotasks, followed by microtasks. |
 
-Completed layout computations now publish native observation snapshots. The host
-still computes layout through redraw and does not yet schedule observer callbacks
-or independent measurement on a new observation.
+Completed layout computations publish native observation snapshots. Both redraw
+and native resize/scale events call the host measurement method before GPU work.
+A new observation does not yet request host work or schedule a callback.
 A plugin alone cannot detect resizing: the native service needs a host hook that
 supplies completed measurements and schedules delivery.
 
@@ -324,7 +323,7 @@ checkpoint below replaces that earlier plan. At the end of every step, present t
 changed files, behavior, verification results, and remaining limitations, then stop
 for explicit user review. Do not start the next step until the user approves.
 
-### Step 1 — Native observer core (approved)
+### Step 1 — Native observer core (approved; committed as `fd282cabd`)
 
 Deliverable: native `ResizeObserver` subscriptions on the existing `Dom`, using
 existing `NodeId`s. Implement observe/unobserve/disconnect, layout sizes, initial
@@ -344,7 +343,7 @@ wakeups, and measurement independent of redraw are not implemented yet.
 
 **Review checkpoint:** review the native core before changing host scheduling.
 
-### Step 2 — Separate host measurement from presentation
+### Step 2 — Separate host measurement from presentation (implemented; awaiting review)
 
 Deliverable: extract successful layout measurement from the redraw-only path while
 preserving cache reuse and presented geometry. Permit measurement when presentation
@@ -353,7 +352,20 @@ fails or the native surface is zero-sized.
 Check: rendering and presented geometry remain correct; failed layouts preserve
 previous state; zero-size viewports can still contain fixed-size children.
 
-**Review checkpoint:** review the host/render refactor independently.
+Implementation: `ApplicationHost::measure_layout` in `ui/host/render.rs` returns
+the existing shared computed layout without publishing presented geometry. Redraw
+uses it before GPU resize and the zero-size early return; resize/scale events use
+it before the pending-GPU early return. Scene construction reuses the same snapshot.
+
+Verification: `cargo test -p burokku --lib` passed all 184 tests. Four host regression
+tests cover cache reuse without GPU resources, unchanged presented geometry, zero
+viewports with fixed-size children, a scene target too large to present, and failed
+layout preserving previous state until a successful retry. Formatting and whitespace
+checks passed. Actual macOS drag/minimize testing remains in the final verification
+step; this step adds no callbacks or observation-triggered wakeups.
+
+**Review checkpoint:** review the host/render refactor independently. These changes
+remain uncommitted until review.
 
 ### Step 3 — Native wakeups and deferred callbacks
 
@@ -460,4 +472,4 @@ before-paint guarantee; requiring browser-equivalent timing expands the scope in
 a render-loop project.
 
 Implementation follows the steps and mandatory review checkpoints above. Step 1
-is approved; the user has authorized step 2. Stop for review when step 2 is complete.
+is committed; step 2 is implemented and awaiting review. Step 3 remains pending.

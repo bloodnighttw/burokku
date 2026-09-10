@@ -434,17 +434,24 @@ impl ApplicationHandler for ApplicationHost {
                 new_inner_size: size,
                 ..
             } => {
-                if self.pending_graphics.is_some() {
-                    return;
-                }
-                let dom_bindings = Rc::clone(&self.dom_bindings);
-                let revision = match dom_bindings.try_borrow() {
-                    Ok(state) => state.dom.revision(),
-                    Err(_) => {
-                        self.fail(event_loop, HostError::DomBorrowConflict);
+                let scale_factor = self
+                    .windows
+                    .current()
+                    .expect("the event belongs to the current window")
+                    .window()
+                    .scale_factor();
+                // A minimized surface or pending GPU initialization must not
+                // suppress native size measurements.
+                let revision = match self.measure_layout(size, scale_factor) {
+                    Ok(computed) => computed.revision(),
+                    Err(failure) => {
+                        self.handle_redraw_failure(event_loop, failure);
                         return;
                     }
                 };
+                if self.pending_graphics.is_some() {
+                    return;
+                }
                 let Some(graphics) = self.graphics.as_ref() else {
                     self.fail(event_loop, HostError::MissingGraphicsContext);
                     return;

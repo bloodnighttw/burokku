@@ -161,6 +161,180 @@ fn windowless_host_does_not_initialize_graphics() {
     assert!(host.renderer.is_none());
 }
 
+fn measurement_host() -> (ApplicationHost, NodeId, NodeId) {
+    let (_plugin, bindings) = crate::plugins::dom::DomPlugin::new_with_bindings();
+    let (window, panel) = {
+        let mut state = bindings.borrow_mut();
+        let dom = &mut state.dom;
+        let window = dom.create_element_tag(ElementTag::Window);
+        let panel = dom.create_element_tag(ElementTag::Div);
+        dom.set_style_property(panel, "width", "100px").unwrap();
+        dom.set_style_property(panel, "height", "50px").unwrap();
+        dom.append_child(window, panel).unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        (window, panel)
+    };
+    (
+        ApplicationHost::new(
+            bindings,
+            TextEngine::without_system_fonts(),
+            RuntimeLifecycle::for_test(),
+        ),
+        window,
+        panel,
+    )
+}
+
+#[test]
+fn host_measurement_reuses_layout_without_gpu_or_updating_presented_geometry() {
+    let (mut host, _, panel) = measurement_host();
+    let observer = {
+        let state = host.dom_bindings.borrow();
+        let observer = state.dom.resize_observer();
+        observer.observe(&state.dom, panel).unwrap();
+        observer
+    };
+    let initial = host
+        .measure_layout(PhysicalSize::new(640, 480), 2.0)
+        .unwrap();
+    let cached = host
+        .measure_layout(PhysicalSize::new(640, 480), 2.0)
+        .unwrap();
+    assert!(std::rc::Rc::ptr_eq(&initial, &cached));
+    {
+        let mut state = host.dom_bindings.borrow_mut();
+        assert!(state.layout_rect(panel).unwrap().is_none());
+        // Simulate the previously presented layout. Measurement must not replace it.
+        state.publish_presented_layout(initial);
+        observer.take_records(&state.dom).unwrap();
+        state
+            .dom
+            .set_style_property(panel, "width", "150px")
+            .unwrap();
+    }
+    let measured = host
+        .measure_layout(PhysicalSize::new(800, 480), 2.0)
+        .unwrap();
+    assert_eq!(measured.viewport().width(), 400.0);
+    let state = host.dom_bindings.borrow();
+    assert_eq!(
+        observer.take_records(&state.dom).unwrap()[0].size.width,
+        150.0
+    );
+    assert_eq!(state.layout_rect(panel).unwrap().unwrap().width, 100.0);
+    assert!(host.graphics.is_none());
+    assert!(host.renderer.is_none());
+    assert!(host.presented.is_none());
+}
+
+#[test]
+fn host_measures_zero_viewport_without_collapsing_fixed_children() {
+    let (mut host, window, panel) = measurement_host();
+    let observer = {
+        let state = host.dom_bindings.borrow();
+        let observer = state.dom.resize_observer();
+        observer.observe(&state.dom, window).unwrap();
+        observer.observe(&state.dom, panel).unwrap();
+        observer
+    };
+    host.measure_layout(PhysicalSize::new(320, 240), 1.0)
+        .unwrap();
+    observer
+        .take_records(&host.dom_bindings.borrow().dom)
+        .unwrap();
+    let measured = host.measure_layout(PhysicalSize::new(0, 0), 2.0).unwrap();
+    let entries = observer
+        .take_records(&host.dom_bindings.borrow().dom)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].target, window);
+    assert_eq!(entries[0].size, taffy::geometry::Size::ZERO);
+    assert_eq!(
+        measured.box_for(panel).unwrap().layout().size,
+        taffy::geometry::Size {
+            width: 100.0,
+            height: 50.0
+        }
+    );
+    assert!(host.renderer.is_none());
+}
+
+#[test]
+fn host_measurements_survive_a_target_too_large_to_present() {
+    let (mut host, window, _) = measurement_host();
+    let observer = {
+        let state = host.dom_bindings.borrow();
+        let observer = state.dom.resize_observer();
+        observer.observe(&state.dom, window).unwrap();
+        observer
+    };
+    let size = PhysicalSize::new(70_000, 240);
+    let measured = host.measure_layout(size, 1.0).unwrap();
+    let state = host.dom_bindings.borrow();
+    assert!(matches!(
+        ScenePlan::from_layout(&state.dom, &measured, size, 1.0),
+        Err(crate::ui::scene::SceneError::TargetTooLarge { .. })
+    ));
+    assert_eq!(
+        observer.take_records(&state.dom).unwrap()[0].size.width,
+        70_000.0
+    );
+    assert!(state.layout_rect(window).unwrap().is_none());
+    assert!(host.presented.is_none());
+}
+
+#[test]
+fn failed_host_measurement_preserves_previous_layout_and_observer_state() {
+    let (mut host, _, panel) = measurement_host();
+    let observer = {
+        let state = host.dom_bindings.borrow();
+        let observer = state.dom.resize_observer();
+        observer.observe(&state.dom, panel).unwrap();
+        observer
+    };
+    let size = PhysicalSize::new(320, 240);
+    let previous = host.measure_layout(size, 1.0).unwrap();
+    let deep_root = {
+        let mut state = host.dom_bindings.borrow_mut();
+        observer.take_records(&state.dom).unwrap();
+        state.publish_presented_layout(previous.clone());
+        let dom = &mut state.dom;
+        dom.set_style_property(panel, "width", "150px").unwrap();
+        let deep_root = dom.create_element_tag(ElementTag::Div);
+        dom.append_child(panel, deep_root).unwrap();
+        let mut parent = deep_root;
+        for _ in 0..260 {
+            let child = dom.create_element_tag(ElementTag::Div);
+            dom.append_child(parent, child).unwrap();
+            parent = child;
+        }
+        deep_root
+    };
+    assert!(matches!(
+        host.measure_layout(size, 1.0),
+        Err(RedrawFailure::Fatal(HostError::Layout(
+            crate::ui::layout::LayoutError::TreeTooDeep { .. }
+        )))
+    ));
+    assert!(std::rc::Rc::ptr_eq(
+        &previous,
+        &host.layout.current_shared().unwrap()
+    ));
+    {
+        let mut state = host.dom_bindings.borrow_mut();
+        assert!(observer.take_records(&state.dom).unwrap().is_empty());
+        assert_eq!(state.layout_rect(panel).unwrap().unwrap().width, 100.0);
+        state.dom.detach(deep_root).unwrap();
+    }
+    host.measure_layout(size, 1.0).unwrap();
+    let state = host.dom_bindings.borrow();
+    assert_eq!(
+        observer.take_records(&state.dom).unwrap()[0].size.width,
+        150.0
+    );
+    assert_eq!(state.layout_rect(panel).unwrap().unwrap().width, 100.0);
+}
+
 #[test]
 fn pending_window_status_detects_removal_replacement_and_same_window_updates() {
     let mut dom = Dom::new();
