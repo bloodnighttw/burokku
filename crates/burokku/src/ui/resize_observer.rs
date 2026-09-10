@@ -53,6 +53,7 @@ type Callback = Rc<RefCell<dyn FnMut(&[ResizeObserverEntry])>>;
 struct ObserverState {
     observations: Vec<Observation>,
     callback: Option<Callback>,
+    delivery_notify: Option<Rc<dyn Fn()>>,
 }
 
 impl std::fmt::Debug for ObserverState {
@@ -60,6 +61,7 @@ impl std::fmt::Debug for ObserverState {
         f.debug_struct("ObserverState")
             .field("observations", &self.observations)
             .field("has_callback", &self.callback.is_some())
+            .field("has_delivery_notify", &self.delivery_notify.is_some())
             .finish()
     }
 }
@@ -92,7 +94,7 @@ impl ResizeObserverRegistry {
 
     /// Called only after a successful layout, including valid cache hits.
     pub(crate) fn publish(&self, layout: Rc<ComputedLayout>) {
-        let wake = {
+        let (wake, delivery_notifications) = {
             let mut state = self.0.borrow_mut();
             let changed = state
                 .latest
@@ -100,7 +102,17 @@ impl ResizeObserverRegistry {
                 .is_none_or(|old| !Rc::ptr_eq(old, &layout));
             let requested = std::mem::take(&mut state.measurement_requested);
             state.latest = Some(layout);
-            if (changed || requested)
+            let delivery_notifications = if changed || requested {
+                state
+                    .observers
+                    .values()
+                    .filter(|observer| !observer.observations.is_empty())
+                    .filter_map(|observer| observer.delivery_notify.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let wake = if (changed || requested)
                 && !state.delivery_pending
                 && state
                     .observers
@@ -111,10 +123,15 @@ impl ResizeObserverRegistry {
                 state.waker.clone()
             } else {
                 None
-            }
+            };
+            (wake, delivery_notifications)
         };
         if let Some(waker) = wake {
             waker.wake();
+        }
+        // Adapter signals never consume sizes or run JavaScript inside layout.
+        for notify in delivery_notifications {
+            notify();
         }
     }
 
@@ -186,6 +203,11 @@ impl ResizeObserverRegistry {
                 .map(|(_, observer)| observer)
                 .collect::<Vec<_>>()
         };
+        for observer in &observers {
+            if let Some(notify) = &observer.delivery_notify {
+                notify();
+            }
+        }
         drop(observers);
     }
 
@@ -199,8 +221,23 @@ impl ResizeObserverRegistry {
     }
 
     pub(crate) fn prune(&self, dom: &Dom) {
-        for observer in self.0.borrow_mut().observers.values_mut() {
-            observer.observations.retain(|o| dom.contains(o.target));
+        let delivery_notifications = {
+            let mut state = self.0.borrow_mut();
+            let mut notifications = Vec::new();
+            for observer in state.observers.values_mut() {
+                let before = observer.observations.len();
+                observer.observations.retain(|o| dom.contains(o.target));
+                if before != observer.observations.len() {
+                    if let Some(notify) = &observer.delivery_notify {
+                        notifications.push(notify.clone());
+                    }
+                }
+            }
+            notifications
+        };
+        // Also wake when the last target was destroyed, so adapters release roots.
+        for notify in delivery_notifications {
+            notify();
         }
     }
 }
@@ -225,6 +262,23 @@ impl Drop for ResizeObserver {
 }
 
 impl ResizeObserver {
+    /// Notifies a UI-thread adapter to prepare/commit in its own delivery phase.
+    /// Unlike a native callback, this notification does not advance reported sizes.
+    pub(crate) fn set_delivery_notify<F>(&self, notify: F) -> Result<(), ResizeObserverError>
+    where
+        F: Fn() + 'static,
+    {
+        let registry = self.registry()?;
+        registry
+            .borrow_mut()
+            .observers
+            .get_mut(self.id)
+            .ok_or(ResizeObserverError::Closed)?
+            .delivery_notify = Some(Rc::new(notify));
+        ResizeObserverRegistry(registry).request_measurement();
+        Ok(())
+    }
+
     /// Sets a native callback, invoked by the host after successful measurement.
     /// The callback runs with no DOM or observer-registry borrow held. Captures
     /// may be UI-thread `Rc` values; `Send` is not required.

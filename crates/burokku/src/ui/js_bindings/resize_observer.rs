@@ -1,7 +1,11 @@
 //! JavaScript adapter over the native DOM resize observer.
 //!
-//! Installation and delivery are crate-owned hooks. Automatic task scheduling
-//! is added separately; no JavaScript values are stored in the native registry.
+//! Installation is crate-owned. Runtime-backed contexts receive coalesced delivery
+//! tasks; no JavaScript values are captured in the native signal or task queue.
+
+use std::{cell::Cell, rc::Rc};
+
+use runtime::{JsTaskQueue, JsTaskQueueError};
 
 use rquickjs::{
     class::Trace,
@@ -17,6 +21,98 @@ use crate::ui::{
 };
 
 const REGISTRY: &str = "__burokkuResizeObservers";
+
+/// One pending task or capacity waiter per adapter. This contains no JS values.
+struct DeliverySignal {
+    queue: JsTaskQueue,
+    pending: Cell<bool>,
+    dirty: Cell<bool>,
+    closed: Cell<bool>,
+}
+
+impl DeliverySignal {
+    fn new(queue: JsTaskQueue) -> Rc<Self> {
+        Rc::new(Self {
+            queue,
+            pending: Cell::new(false),
+            dirty: Cell::new(false),
+            closed: Cell::new(false),
+        })
+    }
+
+    fn close(&self) {
+        self.closed.set(true);
+        self.pending.set(false);
+        self.dirty.set(false);
+    }
+
+    fn schedule(self: &Rc<Self>, allow_retry: bool) {
+        if self.closed.get() || self.pending.replace(true) {
+            return;
+        }
+        match self
+            .queue
+            .try_enqueue(move |ctx| Self::run(ctx, allow_retry))
+        {
+            Ok(()) => {}
+            Err(JsTaskQueueError::Closed) => self.close(),
+            Err(JsTaskQueueError::Full) => {
+                // Keep pending set while waiting, so further layouts only update
+                // the native snapshot. The waiter stays on the UI thread; only
+                // the retry flag is captured by the Send queue closure.
+                let queue = self.queue.clone();
+                let signal = Rc::downgrade(self);
+                tokio::task::spawn_local(async move {
+                    if queue
+                        .enqueue(move |ctx| Self::run(ctx, allow_retry))
+                        .await
+                        .is_err()
+                    {
+                        if let Some(signal) = signal.upgrade() {
+                            signal.close();
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    fn run(ctx: &Ctx<'_>, allow_retry: bool) -> Result<()> {
+        // Resolve context-owned state here instead of capturing an Rc in the
+        // queue's Send closure. All state access stays on the runtime/UI thread.
+        let signal = registry(ctx)?.borrow().signal.clone();
+        let Some(signal) = signal else {
+            return Ok(());
+        };
+        if signal.closed.get() {
+            return Ok(());
+        }
+        signal.dirty.set(false);
+        let failed = if let Err(error) = deliver(ctx).catch(ctx) {
+            eprintln!("Burokku ResizeObserver delivery failed: {error}");
+            true
+        } else {
+            false
+        };
+        signal.pending.set(false);
+        let dirty = signal.dirty.replace(false);
+        // Do not lose a layout published during a callback. A conversion failure
+        // gets one immediate retry; persistent failures wait for another signal
+        // rather than spinning. Native records remain unconsumed on failure.
+        if dirty || (failed && allow_retry) {
+            signal.schedule(dirty);
+        }
+        Ok(())
+    }
+
+    fn request(self: &Rc<Self>) {
+        if self.closed.get() {
+            return;
+        }
+        self.dirty.set(true);
+        self.schedule(true);
+    }
+}
 
 #[derive(Trace, JsLifetime)]
 struct Target<'js> {
@@ -39,8 +135,18 @@ struct JsResizeObserver<'js> {
 struct ObserverRegistry<'js> {
     #[qjs(skip_trace)]
     dom: SharedDomBindings,
+    #[qjs(skip_trace)]
+    signal: Option<Rc<DeliverySignal>>,
     active: Vec<Class<'js, JsResizeObserver<'js>>>,
     freeze: Function<'js>,
+}
+
+impl Drop for ObserverRegistry<'_> {
+    fn drop(&mut self) {
+        if let Some(signal) = &self.signal {
+            signal.close();
+        }
+    }
 }
 
 fn registry<'js>(ctx: &Ctx<'js>) -> Result<Class<'js, ObserverRegistry<'js>>> {
@@ -74,8 +180,23 @@ fn map_native<T>(ctx: &Ctx<'_>, result: std::result::Result<T, ResizeObserverErr
 impl<'js> JsResizeObserver<'js> {
     #[qjs(constructor)]
     fn new(ctx: Ctx<'js>, callback: Function<'js>) -> Result<Self> {
-        let dom = registry(&ctx)?.borrow().dom.clone();
+        let (dom, signal) = {
+            let registry = registry(&ctx)?;
+            let registry = registry.borrow();
+            (registry.dom.clone(), registry.signal.clone())
+        };
         let native = borrow(&ctx, &dom)?.dom.resize_observer();
+        if let Some(signal) = signal {
+            let signal = Rc::downgrade(&signal);
+            map_native(
+                &ctx,
+                native.set_delivery_notify(move || {
+                    if let Some(signal) = signal.upgrade() {
+                        signal.request();
+                    }
+                }),
+            )?;
+        }
         Ok(Self {
             native,
             callback,
@@ -178,6 +299,8 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> Result<()> {
         ctx.clone(),
         ObserverRegistry {
             dom,
+            // Bare QuickJS contexts can still use the controlled delivery hook.
+            signal: JsTaskQueue::from_context(ctx).ok().map(DeliverySignal::new),
             active: Vec::new(),
             freeze: object.get("freeze")?,
         },
@@ -196,7 +319,7 @@ struct PendingDelivery<'js> {
 
 /// Prepares all registrations before invoking any JS callback. The native commit
 /// check rejects batches invalidated by an earlier callback or entry construction.
-/// The future JS task will call this hook; tests invoke it directly for now.
+/// Runtime delivery tasks call this hook; bare-context tests can invoke it directly.
 pub(crate) fn deliver(ctx: &Ctx<'_>) -> Result<()> {
     let (dom, observers, freeze) = {
         let registry = registry(ctx)?;
@@ -217,7 +340,14 @@ pub(crate) fn deliver(ctx: &Ctx<'_>) -> Result<()> {
                 .borrow_mut()
                 .targets
                 .retain(|target| state.dom.contains(target.id));
-            let batch = map_native(ctx, observer.borrow().native.prepare(&state.dom))?;
+            let prepared = observer.borrow().native.prepare(&state.dom);
+            let batch = match prepared {
+                Err(ResizeObserverError::Closed) => {
+                    observer.borrow_mut().targets.clear();
+                    continue;
+                }
+                result => map_native(ctx, result)?,
+            };
             let Some(batch) = batch else {
                 continue;
             };
@@ -255,14 +385,15 @@ pub(crate) fn deliver(ctx: &Ctx<'_>) -> Result<()> {
         let entries = make_entries(ctx, &freeze, &pending.batch.entries, pending.targets)?;
         let committed = {
             let state = borrow(ctx, &dom)?;
-            map_native(
-                ctx,
-                pending
-                    .observer
-                    .borrow()
-                    .native
-                    .commit(&state.dom, pending.batch),
-            )?
+            let result = pending
+                .observer
+                .borrow()
+                .native
+                .commit(&state.dom, pending.batch);
+            match result {
+                Err(ResizeObserverError::Closed) => continue,
+                result => map_native(ctx, result)?,
+            }
         };
         if committed.is_empty() {
             continue;
@@ -298,6 +429,342 @@ fn make_entries<'js>(
     }
     freeze.call::<_, ()>((entries.clone(),))?;
     Ok(entries)
+}
+
+#[cfg(test)]
+mod queued_tests {
+    use super::*;
+    use crate::{
+        plugins::dom::DomPlugin,
+        ui::{
+            layout::{LayoutEngine, LogicalViewport},
+            text::TextEngine,
+        },
+    };
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        time::Duration,
+    };
+    use tokio::{
+        sync::mpsc,
+        task::{JoinHandle, LocalSet},
+    };
+
+    struct QueuedTest {
+        runtime: runtime::Runtime,
+        driver: JoinHandle<()>,
+        bindings: SharedDomBindings,
+        delivered: mpsc::UnboundedReceiver<f64>,
+        signal: Rc<DeliverySignal>,
+    }
+
+    impl QueuedTest {
+        async fn new(capacity: usize) -> Self {
+            let (plugin, bindings) = DomPlugin::new_with_bindings();
+            let (sender, delivered) = mpsc::unbounded_channel();
+            let signal_slot = Rc::new(RefCell::new(None));
+            let installed_signal = signal_slot.clone();
+            let native = Rc::downgrade(&bindings);
+            let (runtime, driver) = runtime::Runtime::builder()
+                .macrotask_capacity(capacity)
+                .plugin(plugin)
+                .plugin(move |ctx: &Ctx<'_>| {
+                    install(ctx)?;
+                    *installed_signal.borrow_mut() = registry(ctx)?.borrow().signal.clone();
+                    let sender = sender.clone();
+                    ctx.globals().set(
+                        "__recordResize",
+                        Function::new(ctx.clone(), move |width: f64| {
+                            let _ = sender.send(width);
+                        })?,
+                    )?;
+                    let native = native.clone();
+                    ctx.globals().set(
+                        "__publishDuringCallback",
+                        Function::new(ctx.clone(), move |width: f64| {
+                            let bindings = native.upgrade().unwrap();
+                            set_width(&bindings, width);
+                            measure(&bindings);
+                        })?,
+                    )?;
+                    Ok(())
+                })
+                .build_driven()
+                .await
+                .unwrap();
+            let driver = tokio::task::spawn_local(driver.run());
+            runtime
+                .eval::<()>(
+                    r#"
+                globalThis.win = app.createElement('window');
+                globalThis.panel = app.createElement('div');
+                panel.style.setProperty('width', '100px');
+                panel.style.setProperty('height', '50px');
+                win.appendChild(panel);
+                app.appendChild(win);
+                globalThis.sizes = [];
+                globalThis.observer = new ResizeObserver(entries => {
+                    for (const entry of entries) {
+                        sizes.push(entry.size.width);
+                        __recordResize(entry.size.width);
+                    }
+                });
+                observer.observe(panel);
+            "#,
+                )
+                .await
+                .unwrap();
+            let signal = signal_slot.borrow_mut().take().unwrap();
+            Self {
+                runtime,
+                driver,
+                bindings,
+                delivered,
+                signal,
+            }
+        }
+
+        async fn next(&mut self) -> f64 {
+            tokio::time::timeout(Duration::from_secs(2), self.delivered.recv())
+                .await
+                .expect("resize delivery timed out")
+                .expect("runtime closed")
+        }
+
+        async fn stop(self) {
+            self.runtime.shutdown().await.unwrap();
+            self.driver.await.unwrap();
+        }
+    }
+
+    fn panel_id(bindings: &SharedDomBindings) -> NodeId {
+        let state = bindings.borrow();
+        let window = state.dom.first_child(state.dom.root()).unwrap().unwrap();
+        state.dom.first_child(window).unwrap().unwrap()
+    }
+
+    fn set_width(bindings: &SharedDomBindings, width: f64) {
+        let panel = panel_id(bindings);
+        bindings
+            .borrow_mut()
+            .dom
+            .set_style_property(panel, "width", &format!("{width}px"))
+            .unwrap();
+    }
+
+    fn measure(bindings: &SharedDomBindings) {
+        LayoutEngine::new(TextEngine::without_system_fonts())
+            .compute(
+                &bindings.borrow().dom,
+                LogicalViewport::new(320.0, 240.0).unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_delivery_coalesces_layouts_to_the_latest_size() {
+        LocalSet::new()
+            .run_until(async {
+                let mut test = QueuedTest::new(8).await;
+                for width in [100.0, 120.0, 150.0] {
+                    set_width(&test.bindings, width);
+                    measure(&test.bindings);
+                }
+                assert_eq!(test.runtime.macrotask_queue().depth(), 1);
+                assert!(test.signal.pending.get());
+                assert!(matches!(
+                    test.delivered.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                assert_eq!(test.next().await, 150.0);
+                assert_eq!(
+                    test.runtime.eval::<Vec<f64>>("sizes").await.unwrap(),
+                    [150.0]
+                );
+                assert!(!test.signal.pending.get());
+                test.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_queue_delivers_the_final_size_without_blocking_native_callbacks() {
+        LocalSet::new()
+            .run_until(async {
+                let mut test = QueuedTest::new(1).await;
+                let panel = panel_id(&test.bindings);
+                let native = test.bindings.borrow().dom.resize_observer();
+                let native_width = Rc::new(Cell::new(0.0));
+                let recorded = native_width.clone();
+                native
+                    .set_callback(move |entries| recorded.set(entries[0].size.width))
+                    .unwrap();
+                native.observe(&test.bindings.borrow().dom, panel).unwrap();
+                test.runtime
+                    .macrotask_queue()
+                    .try_enqueue(|_| Ok(()))
+                    .unwrap();
+                for width in [100.0, 130.0, 180.0] {
+                    set_width(&test.bindings, width);
+                    measure(&test.bindings);
+                }
+                assert_eq!(test.runtime.macrotask_queue().depth(), 1);
+                let deliveries = {
+                    let state = test.bindings.borrow();
+                    state.dom.resize_observers.prepare_callbacks(&state.dom)
+                };
+                for delivery in deliveries {
+                    let callback = delivery.commit(&test.bindings.borrow().dom);
+                    if let Some(callback) = callback {
+                        callback();
+                    }
+                }
+                assert_eq!(native_width.get(), 180.0);
+                assert!(matches!(
+                    test.delivered.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                // No further host/layout work occurs while capacity becomes available.
+                assert_eq!(test.next().await, 180.0);
+                assert_eq!(
+                    test.runtime.eval::<Vec<f64>>("sizes").await.unwrap(),
+                    [180.0]
+                );
+                test.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_disconnect_cancels_delivery_and_reobserve_remains_reusable() {
+        LocalSet::new()
+            .run_until(async {
+                let mut test = QueuedTest::new(8).await;
+                test.runtime
+                    .macrotask_queue()
+                    .try_enqueue(|ctx| ctx.eval::<(), _>("observer.disconnect()"))
+                    .unwrap();
+                measure(&test.bindings);
+                assert_eq!(test.runtime.eval::<i32>("sizes.length").await.unwrap(), 0);
+                test.runtime
+                    .eval::<()>("observer.observe(panel)")
+                    .await
+                    .unwrap();
+                measure(&test.bindings);
+                assert_eq!(test.next().await, 100.0);
+                test.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn layout_published_during_a_js_callback_gets_another_task() {
+        LocalSet::new()
+            .run_until(async {
+                let mut test = QueuedTest::new(8).await;
+                test.runtime
+                    .eval::<()>(
+                        r#"
+                observer.disconnect();
+                observer = new ResizeObserver(entries => {
+                    const width = entries[0].size.width;
+                    sizes.push(width);
+                    __recordResize(width);
+                    if (width === 100) __publishDuringCallback(150);
+                });
+                observer.observe(panel);
+            "#,
+                    )
+                    .await
+                    .unwrap();
+                measure(&test.bindings);
+                assert_eq!(test.next().await, 100.0);
+                assert_eq!(test.next().await, 150.0);
+                assert_eq!(
+                    test.runtime.eval::<Vec<f64>>("sizes").await.unwrap(),
+                    [100.0, 150.0]
+                );
+                test.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn conversion_failure_retries_once_and_preserves_records_after_persistent_failure() {
+        LocalSet::new().run_until(async {
+            let mut test = QueuedTest::new(8).await;
+            test.runtime.macrotask_queue().try_enqueue(|ctx| {
+                registry(ctx)?.borrow_mut().freeze = ctx.eval(r#"value => {
+                    if (!globalThis.failedOnce) { globalThis.failedOnce = true; throw new Error('temporary'); }
+                    return Object.freeze(value);
+                }"#)?;
+                Ok(())
+            }).unwrap();
+            measure(&test.bindings);
+            assert_eq!(test.next().await, 100.0);
+            test.runtime.macrotask_queue().try_enqueue(|ctx| {
+                registry(ctx)?.borrow_mut().freeze = ctx.eval("() => { __recordResize(-1); throw new Error('persistent'); }")?;
+                Ok(())
+            }).unwrap();
+            set_width(&test.bindings, 150.0);
+            measure(&test.bindings);
+            assert_eq!(test.next().await, -1.0);
+            assert_eq!(test.next().await, -1.0);
+            assert_eq!(test.runtime.eval::<Vec<f64>>("sizes").await.unwrap(), [100.0]);
+            assert!(!test.signal.pending.get());
+            assert!(matches!(test.delivered.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+            test.runtime.macrotask_queue().try_enqueue(|ctx| {
+                registry(ctx)?.borrow_mut().freeze = ctx.eval("Object.freeze")?;
+                Ok(())
+            }).unwrap();
+            test.signal.request();
+            assert_eq!(test.next().await, 150.0);
+            test.stop().await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_closure_cancels_a_capacity_waiter_and_releases_js_subscriptions() {
+        LocalSet::new()
+            .run_until(async {
+                let test = QueuedTest::new(1).await;
+                let signal = test.signal.clone();
+                let bindings = test.bindings.clone();
+                test.runtime
+                    .macrotask_queue()
+                    .try_enqueue(|_| Ok(()))
+                    .unwrap();
+                measure(&bindings);
+                assert!(signal.pending.get());
+                test.stop().await;
+                assert!(signal.closed.get());
+                assert!(!signal.pending.get());
+                assert!(bindings
+                    .borrow()
+                    .dom
+                    .resize_observers
+                    .retained_targets()
+                    .is_empty());
+                signal.request();
+                assert!(!signal.pending.get());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_shutdown_discards_already_queued_js_work() {
+        LocalSet::new()
+            .run_until(async {
+                let test = QueuedTest::new(8).await;
+                measure(&test.bindings);
+                test.bindings.borrow().dom.resize_observers.shutdown();
+                assert_eq!(test.runtime.eval::<i32>("sizes.length").await.unwrap(), 0);
+                assert!(!test.signal.pending.get());
+                test.stop().await;
+            })
+            .await;
+    }
 }
 
 #[cfg(test)]

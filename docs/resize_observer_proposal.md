@@ -1,10 +1,10 @@
 # Native ResizeObserver API and JavaScript bridge proposal
 
-Status: steps 1–3 are approved and committed as `fd282cabd`, `8131c2bcd`, and
-`dd52d117e`. Step 4 is approved: JS registration, traced
-callback/target ownership, and immutable entries delegate to the native core.
-Installation and delivery hooks are tested directly; automatic JS task scheduling
-and application/plugin installation remain later steps.
+Status: steps 1–4 are approved and committed as `fd282cabd`, `8131c2bcd`,
+`74df7305d`, and `bb65a183e`. Step 5 is approved: installed
+bindings use the runtime's JS task queue with coalescing, capacity waiting, and
+shutdown cleanup. Public plugin/application installation and TypeScript types
+remain step 6.
 
 ## Feasibility and recommendation
 
@@ -41,7 +41,7 @@ Browser-equivalent delivery before painting is a separate, larger render-loop ch
 | Location | Relevant behavior today |
 | --- | --- |
 | `plugins/resize_observer.rs` | Still empty; public plugin wiring is deferred to step 6. |
-| `ui/js_bindings/resize_observer.rs` | JS constructor and registration methods, traced callback/target roots, immutable entries, and a controlled delivery hook; no automatic task scheduling yet. |
+| `ui/js_bindings/resize_observer.rs` | JS constructor and registration methods, traced callback/target roots, immutable entries, and a controlled delivery hook; coalesced task scheduling when a runtime queue is available. |
 | `ui/resize_observer.rs` | Native subscriptions, layout-size measurements, prepared batches, native callbacks, record consumption, and registration lifetimes; contains no QuickJS values. |
 | `plugins/dom.rs` and `app.rs` | `DomPlugin` owns shared DOM bindings; `Burokku::run` wires them to the host and runtime without an observer plugin. |
 | `ui/layout/engine.rs` | Computes and caches layouts by DOM revision, viewport, and text generation; publishes successful layouts to the native observer registry. |
@@ -138,9 +138,10 @@ flowchart TD
 ## JavaScript binding API
 
 The following bindings are implemented behind the crate-owned installation hook.
-They are not installed by `Burokku::run` yet, and no automatic JS delivery task is
-scheduled in step 4. Tests install them after `DomPlugin`, publish native layouts,
-and invoke the delivery hook explicitly.
+They are not installed by `Burokku::run` yet. When installed after `DomPlugin` in a
+`runtime::Runtime`, successful native layouts automatically queue delivery. Bare
+QuickJS contexts without a task queue can still use the internal delivery hook for
+controlled tests.
 
 
 ```js
@@ -282,14 +283,19 @@ that resolves context-owned state when executed; do not capture `Rc`, borrowed l
 or QuickJS values inside the queued closure.
 
 On a full JS queue, retain the latest snapshot in the native service and use one
-pending asynchronous enqueue waiter. Do not mark sizes delivered or silently lose the final resize.
+pending asynchronous enqueue waiter. Additional layouts coalesce into that task
+and do not spawn more waiters. Sizes are committed only when the task constructs
+valid entries and delivers them, so the final resize survives a full queue.
 On queue closure, discard pending work during shutdown. New observations need a
 host wakeup independent of DOM revision changes, including when no redraw is pending.
 
 Before each callback, the native service revalidates registration generations and
 node identity so `unobserve`, `disconnect`, or re-observation can invalidate pending entries.
 Update last-delivered sizes immediately before invocation, after adapter entry
-construction succeeds. A failed entry conversion must not consume the native batch.
+construction succeeds. A failed entry conversion does not consume the native batch.
+The task reports the failure and retries once immediately. If that also fails,
+records stay pending until another native delivery signal; this avoids a busy loop
+for persistent failures.
 Report a JavaScript callback exception and continue with other observers; it must
 not become a fatal host error. Rust callback panics follow the host's normal panic
 policy; this API does not introduce a panic-isolation guarantee.
@@ -388,7 +394,7 @@ step; this step adds no callbacks or observation-triggered wakeups.
 
 **Review checkpoint:** approved; committed as `8131c2bcd`.
 
-### Step 3 — Native wakeups and deferred callbacks (approved; committed as `dd52d117e`)
+### Step 3 — Native wakeups and deferred callbacks (approved; committed as `74df7305d`)
 
 Deliverable: connect DOM/native size/scale changes and new observations to host
 measurement. Add deferred native callback delivery using prepare/commit, releasing
@@ -417,7 +423,7 @@ remains in the final verification step; no JS binding has been added here.
 
 **Review checkpoint:** approved. JavaScript adapter work remains the next step.
 
-### Step 4 — JavaScript registration and entry bindings (approved)
+### Step 4 — JavaScript registration and entry bindings (approved; committed as `bb65a183e`)
 
 Deliverable: implement JS registration as an adapter over native subscriptions.
 Keep callbacks and canonical target wrappers in traced JS storage; convert immutable
@@ -451,7 +457,7 @@ application installation belongs to step 6.
 
 **Review checkpoint:** approved. Step 5 is authorized.
 
-### Step 5 — JavaScript task delivery
+### Step 5 — JavaScript task delivery (approved)
 
 Deliverable: connect native delivery signals to `JsTaskQueue`, retaining one pending
 task and one saturation waiter per adapter. Construct entries before committing;
@@ -461,7 +467,34 @@ Check: saturated queues eventually deliver the latest size after the host goes i
 failed entry construction preserves pending changes; stale registrations do not fire;
 slow JS delivery does not block native consumers.
 
-**Review checkpoint:** review asynchronous delivery, retry behavior, and cleanup.
+Implementation: native subscriptions have an internal UI-thread notification for
+adapters. Publishing a layout invokes it without preparing or consuming records.
+Each JS registry owns an `Rc` signal with the queue and `Cell<bool>` scheduling
+flags. Queue closures capture only the retry flag and resolve the signal from their
+JS context when executed, satisfying the queue's `Send` bound without sharing the
+adapter state across threads. The capacity waiter uses `spawn_local` and a weak
+`Rc` reference. No atomics or cross-thread executor are needed for adapter state.
+Multiple observers and layouts share one pending task or waiter. The task reads the latest native snapshot when it runs.
+A layout published during a callback marks further work and queues a subsequent
+task. Native destruction also signals cleanup when the final target is removed.
+
+Queue closure and registry destruction close the signal. Native host shutdown
+invalidates queued batches; the JS task releases their adapter roots and skips
+callbacks. Entry-construction failures get one immediate retry while retaining
+native records; persistent failures wait for another signal. Callback exceptions
+continue to be reported without suppressing other observers.
+
+Verification: all 209 library tests pass. Seven real-runtime queue tests cover
+latest-size coalescing, a saturated capacity-one queue while native callbacks keep
+working, queued disconnect/re-observe, publication during a JS callback, transient
+and persistent conversion failures, queue closure with a capacity waiter, and
+native shutdown with JS work already queued. Formatting and whitespace checks pass.
+
+Boundary: tests install the bindings through the runtime plugin hook. Automatic
+application installation, the public plugin type, and TypeScript declarations are
+still step 6; no browser-equivalent before-paint guarantee is introduced.
+
+**Review checkpoint:** approved. Public plugin/application wiring and types are next.
 
 ### Step 6 — Application wiring and TypeScript declarations
 
@@ -534,5 +567,4 @@ before-paint guarantee; requiring browser-equivalent timing expands the scope in
 a render-loop project.
 
 Implementation follows the steps and mandatory review checkpoints above. Step 1
-through step 3 are committed; step 4 is approved. Step 5 is authorized and will
-stop for review when complete.
+through step 4 are committed; step 5 is approved. Step 6 remains pending.
