@@ -1,8 +1,10 @@
 # Native ResizeObserver API and JavaScript bridge proposal
 
-Status: steps 1 and 2 are approved and committed as `fd282cabd` and `8131c2bcd`.
-Step 3 is approved: native callbacks and coalesced host
-wakeups use the existing DOM registry. The JavaScript adapter remains a later step.
+Status: steps 1–3 are approved and committed as `fd282cabd`, `8131c2bcd`, and
+`dd52d117e`. Step 4 is approved: JS registration, traced
+callback/target ownership, and immutable entries delegate to the native core.
+Installation and delivery hooks are tested directly; automatic JS task scheduling
+and application/plugin installation remain later steps.
 
 ## Feasibility and recommendation
 
@@ -38,7 +40,8 @@ Browser-equivalent delivery before painting is a separate, larger render-loop ch
 
 | Location | Relevant behavior today |
 | --- | --- |
-| `plugins/resize_observer.rs` | Currently empty; its module is exported. |
+| `plugins/resize_observer.rs` | Still empty; public plugin wiring is deferred to step 6. |
+| `ui/js_bindings/resize_observer.rs` | JS constructor and registration methods, traced callback/target roots, immutable entries, and a controlled delivery hook; no automatic task scheduling yet. |
 | `ui/resize_observer.rs` | Native subscriptions, layout-size measurements, prepared batches, native callbacks, record consumption, and registration lifetimes; contains no QuickJS values. |
 | `plugins/dom.rs` and `app.rs` | `DomPlugin` owns shared DOM bindings; `Burokku::run` wires them to the host and runtime without an observer plugin. |
 | `ui/layout/engine.rs` | Computes and caches layouts by DOM revision, viewport, and text generation; publishes successful layouts to the native observer registry. |
@@ -132,7 +135,13 @@ flowchart TD
     Plugin --> JS[JavaScript callbacks]
 ```
 
-## Proposed JavaScript API
+## JavaScript binding API
+
+The following bindings are implemented behind the crate-owned installation hook.
+They are not installed by `Burokku::run` yet, and no automatic JS delivery task is
+scheduled in step 4. Tests install them after `DomPlugin`, publish native layouts,
+and invoke the delivery hook explicitly.
+
 
 ```js
 const win = app.createElement('window');
@@ -157,7 +166,7 @@ observer.observe(panel);
 // observer.disconnect();
 ```
 
-Proposed entry shape:
+Implemented entry shape:
 
 ```ts
 interface ResizeObserverEntry {
@@ -218,8 +227,8 @@ require QuickJS types or JavaScript installation.
 Retain `ResizeObserverPlugin` as the JS adapter. Register it automatically after
 `DomPlugin` in `Burokku::run`, connecting both to the same native document and
 observer service. Standalone JavaScript runtimes explicitly pair it with an
-existing `DomPlugin` using `ResizeObserverPlugin::new(&dom_plugin)`; installation
-validates that the matching DOM plugin is installed. Standalone usage still needs
+existing `DomPlugin`. The internal binding installer resolves the existing DOM
+from the installed `app` wrapper; it accepts no separate document or arena identity. Standalone usage still needs
 a native layout driver; installing plugins does not create one.
 
 Keep JavaScript bindings in `ui/js_bindings/resize_observer.rs` so they can reuse
@@ -379,7 +388,7 @@ step; this step adds no callbacks or observation-triggered wakeups.
 
 **Review checkpoint:** approved; committed as `8131c2bcd`.
 
-### Step 3 — Native wakeups and deferred callbacks (approved)
+### Step 3 — Native wakeups and deferred callbacks (approved; committed as `dd52d117e`)
 
 Deliverable: connect DOM/native size/scale changes and new observations to host
 measurement. Add deferred native callback delivery using prepare/commit, releasing
@@ -408,16 +417,39 @@ remains in the final verification step; no JS binding has been added here.
 
 **Review checkpoint:** approved. JavaScript adapter work remains the next step.
 
-### Step 4 — JavaScript registration and entry bindings
+### Step 4 — JavaScript registration and entry bindings (approved)
 
 Deliverable: implement JS registration as an adapter over native subscriptions.
 Keep callbacks and canonical target wrappers in traced JS storage; convert immutable
-entries and delegate generations, and change detection to Rust.
+entries and delegate generations and change detection to Rust.
 
 Check: target ownership, unsupported options, wrapper identity, entry shape,
 re-observation, disconnect, and GC retention/release using controlled delivery tests.
 
-**Review checkpoint:** review the JS adapter boundary and lifetime rules.
+Implementation: `ui/js_bindings/resize_observer.rs` defines the JS constructor and
+`observe`, `unobserve`, and `disconnect`. Its traced registry retains active JS
+observers; each observer retains its callback and canonical target wrappers plus
+one native subscription. It duplicates no native sizes or registration generations.
+The delivery hook snapshots native batches and JS targets, constructs immutable
+`{ target, size: { width, height } }` entries, then asks the native core to commit
+before invoking callbacks with all binding borrows released. An invalidated batch
+is skipped; entry-construction failure leaves it unconsumed. Callback exceptions
+are reported without suppressing other observers. Explicit native destruction
+releases stale adapter roots at the next delivery check.
+
+Verification: all 10 adapter tests pass. They cover installation requirements,
+argument validation and unsupported options, canonical wrappers and immutable
+layout sizes, cancellation/re-observation between callbacks, conversion failure,
+callback exceptions, active/passive GC lifetimes, per-target unobserve, native
+subtree destruction, and runtime teardown preserving independent native observers.
+The teardown test drops the actual QuickJS runtime, whose class-prototype storage
+outlives individual contexts. Formatting and whitespace checks pass.
+
+Boundary: installation/delivery remain internal hooks exercised directly by tests.
+Automatic native-to-JS queue signaling belongs to step 5, and public plugin plus
+application installation belongs to step 6.
+
+**Review checkpoint:** approved. Step 5 is authorized.
 
 ### Step 5 — JavaScript task delivery
 
@@ -502,4 +534,5 @@ before-paint guarantee; requiring browser-equivalent timing expands the scope in
 a render-loop project.
 
 Implementation follows the steps and mandatory review checkpoints above. Step 1
-and step 2 are committed; step 3 is approved. Step 4 remains pending.
+through step 3 are committed; step 4 is approved. Step 5 is authorized and will
+stop for review when complete.

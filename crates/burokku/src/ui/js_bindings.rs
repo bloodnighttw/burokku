@@ -18,6 +18,7 @@ mod errors;
 mod events;
 mod facade;
 mod node;
+pub(crate) mod resize_observer;
 mod style;
 mod wrapper;
 
