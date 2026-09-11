@@ -347,10 +347,20 @@ impl ResizeObserver {
 
     /// Removes a registration. Missing targets and closed documents are no-ops.
     pub fn unobserve(&self, target: NodeId) {
-        if let Some(registry) = self.registry.upgrade() {
-            if let Some(observer) = registry.borrow_mut().observers.get_mut(self.id) {
-                observer.observations.retain(|o| o.target != target);
-            }
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let should_retry = {
+            let mut state = registry.borrow_mut();
+            let Some(observer) = state.observers.get_mut(self.id) else {
+                return;
+            };
+            let before = observer.observations.len();
+            observer.observations.retain(|o| o.target != target);
+            !observer.observations.is_empty() && observer.observations.len() != before
+        };
+        if should_retry {
+            ResizeObserverRegistry(registry).request_measurement();
         }
     }
 
