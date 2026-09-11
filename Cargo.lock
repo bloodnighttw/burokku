@@ -236,6 +236,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "burokku-example-positioning"
+version = "0.1.0"
+dependencies = [
+ "burokku",
+]
+
+[[package]]
 name = "burokku-winit"
 version = "0.1.0"
 dependencies = [
