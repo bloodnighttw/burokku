@@ -314,6 +314,48 @@ fn native_callback_mutation_invalidates_later_batches_until_remeasurement() {
 }
 
 #[test]
+fn partial_unobserve_during_an_earlier_callback_retries_remaining_entries() {
+    let (mut host, window, panel) = measurement_host();
+    let first = host.dom_bindings.borrow().dom.resize_observer();
+    let second = Rc::new(host.dom_bindings.borrow().dom.resize_observer());
+    let delivered = Rc::new(RefCell::new(Vec::new()));
+    let later = second.clone();
+    first.set_callback(move |_| later.unobserve(panel)).unwrap();
+    let recorded = delivered.clone();
+    second
+        .set_callback(move |entries| {
+            recorded
+                .borrow_mut()
+                .push(entries.iter().map(|entry| entry.target).collect::<Vec<_>>());
+        })
+        .unwrap();
+    first
+        .observe(&host.dom_bindings.borrow().dom, panel)
+        .unwrap();
+    for target in [panel, window] {
+        second
+            .observe(&host.dom_bindings.borrow().dom, target)
+            .unwrap();
+    }
+
+    let size = PhysicalSize::new(320, 240);
+    host.measure_layout(size, 1.0).unwrap();
+    host.deliver_resize_callbacks();
+
+    assert!(delivered.borrow().is_empty());
+    assert!(host
+        .dom_bindings
+        .borrow()
+        .dom
+        .resize_observers
+        .measurement_requested());
+
+    host.measure_layout(size, 1.0).unwrap();
+    host.deliver_resize_callbacks();
+    assert_eq!(*delivered.borrow(), [vec![window]]);
+}
+
+#[test]
 fn replacing_a_native_callback_invalidates_its_prepared_delivery() {
     let (mut host, _, panel) = measurement_host();
     let first = host.dom_bindings.borrow().dom.resize_observer();

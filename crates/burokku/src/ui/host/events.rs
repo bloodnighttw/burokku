@@ -1,6 +1,6 @@
 //! Native event translation and `winit` callback dispatch.
 
-use std::{rc::Rc, sync::Arc, task::Waker};
+use std::rc::Rc;
 
 use winit::{
     application::ApplicationHandler, ActiveEventLoop, ElementState, KeyEvent, Modifiers,
@@ -387,8 +387,8 @@ impl ApplicationHost {
 
 impl ApplicationHandler for ApplicationHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.resize_observers
-            .set_waker(Waker::from(Arc::new(event_loop.loop_waker())));
+        let waker = event_loop.loop_waker();
+        self.resize_observers.set_wake(move || waker.wake_up());
         if let Err(error) = self.sync_dom(event_loop) {
             self.fail(event_loop, error);
             return;

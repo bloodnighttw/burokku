@@ -6,7 +6,6 @@
 use std::{
     cell::RefCell,
     rc::{Rc, Weak},
-    task::Waker,
 };
 
 use slotmap::{new_key_type, SlotMap};
@@ -66,14 +65,27 @@ impl std::fmt::Debug for ObserverState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct RegistryState {
     observers: SlotMap<ObserverId, ObserverState>,
     generation: u64,
     latest: Option<Rc<ComputedLayout>>,
-    waker: Option<Waker>,
+    wake: Option<Rc<dyn Fn()>>,
     measurement_requested: bool,
     delivery_pending: bool,
+}
+
+impl std::fmt::Debug for RegistryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryState")
+            .field("observers", &self.observers)
+            .field("generation", &self.generation)
+            .field("latest", &self.latest)
+            .field("has_wake", &self.wake.is_some())
+            .field("measurement_requested", &self.measurement_requested)
+            .field("delivery_pending", &self.delivery_pending)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -120,14 +132,14 @@ impl ResizeObserverRegistry {
                     .any(|o| o.callback.is_some() && !o.observations.is_empty())
             {
                 state.delivery_pending = true;
-                state.waker.clone()
+                state.wake.clone()
             } else {
                 None
             };
             (wake, delivery_notifications)
         };
-        if let Some(waker) = wake {
-            waker.wake();
+        if let Some(wake) = wake {
+            wake();
         }
         // Adapter signals never consume sizes or run JavaScript inside layout.
         for notify in delivery_notifications {
@@ -135,14 +147,18 @@ impl ResizeObserverRegistry {
         }
     }
 
-    pub(crate) fn set_waker(&self, waker: Waker) {
+    pub(crate) fn set_wake<F>(&self, wake: F)
+    where
+        F: Fn() + 'static,
+    {
+        let wake = Rc::new(wake) as Rc<dyn Fn()>;
         let pending = {
             let mut state = self.0.borrow_mut();
-            state.waker = Some(waker.clone());
+            state.wake = Some(wake.clone());
             state.measurement_requested || state.delivery_pending
         };
         if pending {
-            waker.wake();
+            wake();
         }
     }
 
@@ -155,10 +171,10 @@ impl ResizeObserverRegistry {
                 return;
             }
             state.measurement_requested = true;
-            state.waker.clone()
+            state.wake.clone()
         };
-        if let Some(waker) = wake {
-            waker.wake();
+        if let Some(wake) = wake {
+            wake();
         }
     }
 
@@ -193,7 +209,7 @@ impl ResizeObserverRegistry {
         // Drop captured application values after releasing the registry borrow.
         let observers = {
             let mut state = self.0.borrow_mut();
-            state.waker = None;
+            state.wake = None;
             state.latest = None;
             state.measurement_requested = false;
             state.delivery_pending = false;
@@ -347,10 +363,20 @@ impl ResizeObserver {
 
     /// Removes a registration. Missing targets and closed documents are no-ops.
     pub fn unobserve(&self, target: NodeId) {
-        if let Some(registry) = self.registry.upgrade() {
-            if let Some(observer) = registry.borrow_mut().observers.get_mut(self.id) {
-                observer.observations.retain(|o| o.target != target);
-            }
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let should_retry = {
+            let mut state = registry.borrow_mut();
+            let Some(observer) = state.observers.get_mut(self.id) else {
+                return;
+            };
+            let before = observer.observations.len();
+            observer.observations.retain(|o| o.target != target);
+            !observer.observations.is_empty() && observer.observations.len() != before
+        };
+        if should_retry {
+            ResizeObserverRegistry(registry).request_measurement();
         }
     }
 
@@ -551,13 +577,6 @@ fn measure(layout: &ComputedLayout, target: NodeId, connected: bool) -> ResizeOb
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        task::Wake,
-    };
 
     use super::*;
     use crate::ui::{
@@ -585,33 +604,26 @@ mod tests {
             .unwrap();
     }
 
-    #[derive(Default)]
-    struct WakeCount(AtomicUsize);
-
-    impl Wake for WakeCount {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
     #[test]
     fn observer_and_dom_changes_coalesce_wakeups_and_idle_callbacks_reuse_layout() {
         let (mut dom, _, panel) = fixture("100px");
-        let wakes = Arc::new(WakeCount::default());
-        dom.resize_observers.set_waker(Waker::from(wakes.clone()));
+        let wakes = Rc::new(Cell::new(0));
+        let wake_count = wakes.clone();
+        dom.resize_observers
+            .set_wake(move || wake_count.set(wake_count.get() + 1));
         let observer = dom.resize_observer();
         observer.observe(&dom, panel).unwrap();
         observer.observe(&dom, panel).unwrap();
         dom.set_style_property(panel, "width", "120px").unwrap();
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes.get(), 1);
         let mut engine = LayoutEngine::new(TextEngine::without_system_fonts());
         let viewport = LogicalViewport::new(320.0, 240.0).unwrap();
         engine.compute(&dom, viewport).unwrap();
         assert!(!dom.resize_observers.measurement_requested());
         // A manual subscription has no callback delivery to wake for.
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes.get(), 1);
         dom.set_style_property(panel, "width", "140px").unwrap();
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+        assert_eq!(wakes.get(), 2);
         engine.compute(&dom, viewport).unwrap();
         let cached = engine.current_shared().unwrap();
         let calls = Rc::new(Cell::new(0));
@@ -622,17 +634,17 @@ mod tests {
                 recorded.set(recorded.get() + 1);
             })
             .unwrap();
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 3);
+        assert_eq!(wakes.get(), 3);
         engine.compute(&dom, viewport).unwrap();
         assert!(Rc::ptr_eq(&cached, &engine.current_shared().unwrap()));
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 4);
+        assert_eq!(wakes.get(), 4);
         for delivery in dom.resize_observers.prepare_callbacks(&dom) {
             delivery.commit(&dom).unwrap()();
         }
         assert_eq!(calls.get(), 1);
         engine.compute(&dom, viewport).unwrap();
         assert!(dom.resize_observers.prepare_callbacks(&dom).is_empty());
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 4);
+        assert_eq!(wakes.get(), 4);
     }
 
     #[test]
