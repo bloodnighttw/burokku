@@ -1262,6 +1262,7 @@ mod tests {
         }
 
         for id in [div, flex, grid, text_element] {
+            assert_eq!(dom.supports_style_property(id, "position"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "grid-row"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "grid-column"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "justify-self"), Ok(true));
@@ -1270,6 +1271,7 @@ mod tests {
             dom.supports_style_property(window, "justify-self"),
             Ok(false)
         );
+        assert_eq!(dom.supports_style_property(window, "position"), Ok(false));
 
         assert_eq!(dom.supports_style_property(div, "gap"), Ok(false));
         assert_eq!(dom.supports_style_property(flex, "gap"), Ok(true));

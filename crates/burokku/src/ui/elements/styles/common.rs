@@ -10,6 +10,7 @@ use crate::ui::elements::{
             parse_length_percentage, parse_non_negative_dimension,
             parse_non_negative_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
         },
+        position::Position,
     },
     traits::Styles,
 };
@@ -17,6 +18,7 @@ use crate::ui::elements::{
 /// Layout and paint properties shared by regular layout elements.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommonStyle {
+    pub position: Position,
     pub size: Size<Dimension>,
     pub padding: Rect<LengthPercentage>,
     pub margin: Rect<LengthPercentage>,
@@ -30,6 +32,7 @@ impl Styles for CommonStyle {
             // Divs use CommonStyle directly and must not inherit Taffy's Flex default.
             // FlexStyle and GridStyle explicitly override this container display mode.
             display: taffy::Display::Block,
+            position: self.position.into(),
             size: Size {
                 width: self.size.width.to_taffy(),
                 height: self.size.height.to_taffy(),
@@ -55,12 +58,16 @@ impl Styles for CommonStyle {
     fn supports_property(property: &str) -> bool {
         matches!(
             property,
-            "width" | "height" | "padding" | "margin" | "background-color"
+            "position" | "width" | "height" | "padding" | "margin" | "background-color"
         ) || ItemStyle::supports_property(property)
     }
 
     fn set_property(&mut self, property: &str, value: &str) -> bool {
         match property {
+            "position" => Position::parse(value).is_some_and(|value| {
+                self.position = value;
+                true
+            }),
             "width" => parse_non_negative_dimension(value).is_some_and(|value| {
                 self.size.width = value;
                 true
@@ -93,6 +100,7 @@ impl Styles for CommonStyle {
     fn remove_property(&mut self, property: &str) -> bool {
         let defaults = Self::default();
         match property {
+            "position" => self.position = defaults.position,
             "width" => self.size.width = defaults.size.width,
             "height" => self.size.height = defaults.size.height,
             "padding" => self.padding = defaults.padding,
@@ -142,6 +150,7 @@ fn parse_padding(value: &str) -> Option<Rect<LengthPercentage>> {
 impl Default for CommonStyle {
     fn default() -> Self {
         Self {
+            position: Position::Static,
             size: Size {
                 width: Dimension::Auto,
                 height: Dimension::Auto,
@@ -173,6 +182,20 @@ mod tests {
         let style = CommonStyle::default().to_taffy_style();
 
         assert_eq!(style.display, taffy::Display::Block);
+        assert_eq!(style.position, taffy::Position::Relative);
+    }
+
+    #[test]
+    fn position_sets_converts_and_removes() {
+        let mut style = CommonStyle::default();
+
+        assert!(CommonStyle::supports_property("position"));
+        assert!(style.set_property("position", "fixed"));
+        assert_eq!(style.position, Position::Fixed);
+        assert_eq!(style.to_taffy_style().position, taffy::Position::Absolute);
+        assert!(!style.set_property("position", "sticky"));
+        assert!(style.remove_property("position"));
+        assert_eq!(style.position, Position::Static);
     }
 
     #[test]
