@@ -1437,6 +1437,49 @@ mod tests {
     }
 
     #[test]
+    fn position_style_rejects_invalid_values_and_only_revises_on_changes() {
+        // <div id="target" position="static" />
+        let mut dom = Dom::new();
+        let target = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let initial_revision = dom.revision();
+
+        assert_eq!(
+            dom.set_style_property(target, "position", "static"),
+            Ok(false)
+        );
+        assert_eq!(
+            dom.set_style_property(target, "position", "sticky"),
+            Err(StyleError::InvalidValue {
+                property: "position".into(),
+                value: "sticky".into(),
+            })
+        );
+        assert_eq!(dom.revision(), initial_revision);
+
+        assert_eq!(
+            dom.set_style_property(target, "position", "fixed"),
+            Ok(true)
+        );
+        let fixed_revision = dom.revision();
+        assert_eq!(
+            dom.set_style_property(target, "position", "fixed"),
+            Ok(false)
+        );
+        assert_eq!(dom.revision(), fixed_revision);
+
+        assert_eq!(dom.remove_style_property(target, "position"), Ok(true));
+        let removed_revision = dom.revision();
+        assert_eq!(dom.remove_style_property(target, "position"), Ok(false));
+        assert_eq!(dom.revision(), removed_revision);
+        let Some(Element::Div { style }) = dom.element(target) else {
+            panic!("expected div element");
+        };
+        assert_eq!(style.position, styles::position::Position::Static);
+    }
+
+    #[test]
     fn style_errors_distinguish_targets_properties_and_values() {
         let mut dom = Dom::new();
         let div = dom.create_element(Element::Div {

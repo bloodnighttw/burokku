@@ -626,7 +626,7 @@ mod tests {
         // <window>
         //   <div id="positioned" position="relative">
         //     <div id="wrapper" position="static">
-        //       <div id="absolute" position="absolute">
+        //       <div id="absolute" position="absolute" height="10px">
         //         <div id="nested-absolute" position="absolute" />
         //       </div>
         //     </div>
@@ -651,6 +651,7 @@ mod tests {
             dom.set_style_property(node, "position", "absolute")
                 .unwrap();
         }
+        dom.set_style_property(absolute, "height", "10px").unwrap();
         dom.set_style_property(fixed, "position", "fixed").unwrap();
         dom.append_child(dom.root(), window).unwrap();
         dom.append_child(window, positioned).unwrap();
@@ -694,6 +695,7 @@ mod tests {
             Some(vec![wrapper, absolute])
         );
         assert_eq!(computed.layout_children(wrapper), Some(Vec::new()));
+        assert_close(computed.box_for(wrapper).unwrap().layout().size.height, 0.0);
         assert_eq!(dom.parent(absolute), Some(wrapper));
         assert_eq!(dom.parent(fixed), Some(positioned));
 
@@ -708,6 +710,10 @@ mod tests {
         assert_eq!(
             computed.box_for(nested_absolute).unwrap().layout_parent(),
             Some(positioned)
+        );
+        assert_close(
+            computed.box_for(wrapper).unwrap().layout().size.height,
+            10.0,
         );
         assert_eq!(dom.parent(absolute), Some(wrapper));
     }
