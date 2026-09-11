@@ -58,6 +58,8 @@ impl<M: TextMeasurer> LayoutEngine<M> {
                 && current.viewport() == viewport
                 && current.text_generation() == text_generation
         }) {
+            dom.resize_observers
+                .publish(self.current.as_ref().expect("cached layout exists").clone());
             return Ok(self
                 .current
                 .as_deref()
@@ -93,6 +95,8 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         };
         self.measurer.retain_sources(&active_text_sources);
         self.current = Some(Rc::new(next));
+        dom.resize_observers
+            .publish(self.current.as_ref().expect("layout installed").clone());
         Ok(self
             .current
             .as_deref()

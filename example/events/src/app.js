@@ -42,7 +42,7 @@ shell.appendChild(makeText("UI element event dispatch", {
   "text-wrap": "nowrap",
 }));
 shell.appendChild(makeText(
-  "Interact with the element below and watch each native event update the UI.",
+  "Interact with the div below, or resize the window to watch both layout sizes.",
   { color: "#94a3b8ff" },
 ));
 
@@ -65,23 +65,29 @@ eventArea.appendChild(makeText("Event target", {
   "text-wrap": "nowrap",
 }));
 
-const target = app.createElement("flex");
+const target = app.createElement("div");
 target.setAttribute("data-testid", "event-target");
 target.setAttribute("role", "button");
 setStyles(target, {
   width: "100%",
   "flex-basis": "0px",
   "flex-grow": "1",
-  "align-items": "center",
-  "justify-content": "center",
   "background-color": "#0369a1ff",
 });
-target.appendChild(makeText("Click, drag, or scroll here", {
+const targetContent = app.createElement("flex");
+setStyles(targetContent, {
+  width: "100%",
+  height: "100%",
+  "align-items": "center",
+  "justify-content": "center",
+});
+targetContent.appendChild(makeText("Click, drag, or scroll here", {
   "font-size": "22px",
   "font-weight": "bold",
   color: "#ffffffff",
   "text-wrap": "nowrap",
 }));
+target.appendChild(targetContent);
 eventArea.appendChild(target);
 
 const status = makeText("Status: waiting for input", {
@@ -98,6 +104,20 @@ const bubbleStatus = makeText("Bubbling: waiting for input", {
 });
 bubbleStatus.setAttribute("data-testid", "bubble-status");
 eventArea.appendChild(bubbleStatus);
+
+const windowSize = makeText("Window size: waiting for layout", {
+  "font-size": "14px",
+  "text-wrap": "nowrap",
+});
+windowSize.setAttribute("data-testid", "window-size");
+eventArea.appendChild(windowSize);
+
+const divSize = makeText("Div size: waiting for layout", {
+  "font-size": "14px",
+  "text-wrap": "nowrap",
+});
+divSize.setAttribute("data-testid", "div-size");
+eventArea.appendChild(divSize);
 
 eventArea.appendChild(makeText(
   "Events bubble through the panel. Press any key while the window is focused.",
@@ -163,3 +183,21 @@ windowNode.addEventListener("keydown", event => {
 shell.appendChild(eventArea);
 windowNode.appendChild(shell);
 app.appendChild(windowNode);
+
+// Keep the size labels outside the observed div so updating them does not change
+// its contents. One observer receives changes for both targets in the same batch.
+const resizeObserver = new ResizeObserver(entries => {
+  for (const entry of entries) {
+    const { width, height } = entry.size;
+    const dimensions = `${width.toFixed(1)} × ${height.toFixed(1)} logical px`;
+    if (entry.target === windowNode) {
+      windowSize.textContent = `Window size: ${dimensions}`;
+      console.log(`[resize] window: ${width} × ${height}`);
+    } else if (entry.target === target) {
+      divSize.textContent = `Div size: ${dimensions}`;
+      console.log(`[resize] div: ${width} × ${height}`);
+    }
+  }
+});
+resizeObserver.observe(windowNode);
+resizeObserver.observe(target);

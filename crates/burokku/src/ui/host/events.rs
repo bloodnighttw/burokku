@@ -1,6 +1,6 @@
 //! Native event translation and `winit` callback dispatch.
 
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc, task::Waker};
 
 use winit::{
     application::ApplicationHandler, ActiveEventLoop, ElementState, KeyEvent, Modifiers,
@@ -387,6 +387,8 @@ impl ApplicationHost {
 
 impl ApplicationHandler for ApplicationHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.resize_observers
+            .set_waker(Waker::from(Arc::new(event_loop.loop_waker())));
         if let Err(error) = self.sync_dom(event_loop) {
             self.fail(event_loop, error);
             return;
@@ -434,17 +436,24 @@ impl ApplicationHandler for ApplicationHost {
                 new_inner_size: size,
                 ..
             } => {
-                if self.pending_graphics.is_some() {
-                    return;
-                }
-                let dom_bindings = Rc::clone(&self.dom_bindings);
-                let revision = match dom_bindings.try_borrow() {
-                    Ok(state) => state.dom.revision(),
-                    Err(_) => {
-                        self.fail(event_loop, HostError::DomBorrowConflict);
+                let scale_factor = self
+                    .windows
+                    .current()
+                    .expect("the event belongs to the current window")
+                    .window()
+                    .scale_factor();
+                // A minimized surface or pending GPU initialization must not
+                // suppress native size measurements.
+                let revision = match self.measure_layout(size, scale_factor) {
+                    Ok(computed) => computed.revision(),
+                    Err(failure) => {
+                        self.handle_redraw_failure(event_loop, failure);
                         return;
                     }
                 };
+                if self.pending_graphics.is_some() {
+                    return;
+                }
                 let Some(graphics) = self.graphics.as_ref() else {
                     self.fail(event_loop, HostError::MissingGraphicsContext);
                     return;
@@ -628,7 +637,28 @@ impl ApplicationHandler for ApplicationHost {
             .and_then(|()| self.sync_dom(event_loop))
         {
             self.fail(event_loop, error);
+            return;
         }
+        if self.exit_requested {
+            return;
+        }
+
+        let requested = self.resize_observers.measurement_requested();
+        if requested {
+            let (size, scale) = self
+                .windows
+                .current()
+                .map_or((winit::PhysicalSize::new(0, 0), 1.0), |native| {
+                    (native.window().inner_size(), native.window().scale_factor())
+                });
+            if let Err(failure) = self.measure_layout(size, scale) {
+                self.handle_redraw_failure(event_loop, failure);
+                return;
+            }
+        }
+        // Callbacks return (); a DOM borrow conflict during delivery violates
+        // the host invariant and panics.
+        self.deliver_resize_callbacks();
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

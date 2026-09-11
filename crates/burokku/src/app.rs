@@ -8,8 +8,9 @@ use tokio::sync::oneshot;
 use winit::event_loop::EventLoopWaker;
 
 use crate::{
+    plugins::{dom::DomPlugin, resize_observer::ResizeObserverPlugin},
     runtime::{Plugin, RuntimeBuilder},
-    ui::{dom_plugin::DomPlugin, host::ApplicationHost, text::TextEngine},
+    ui::{host::ApplicationHost, text::TextEngine},
 };
 
 fn install_llrt_globals(context: &runtime::rquickjs::Ctx<'_>) -> runtime::Result<()> {
@@ -85,11 +86,17 @@ impl RuntimeLifecycle {
 
 async fn bootstrap_runtime(
     builder: RuntimeBuilder,
+    dom_plugin: DomPlugin,
     script: Vec<u8>,
     lifecycle: RuntimeLifecycle,
     mut shutdown: oneshot::Receiver<()>,
 ) {
-    let (runtime, driver) = match builder.build_driven().await {
+    let (runtime, driver) = match builder
+        .plugin(dom_plugin)
+        .plugin(ResizeObserverPlugin)
+        .build_driven()
+        .await
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             lifecycle.set_status(RuntimeStatus::Failed(format!(
@@ -164,7 +171,8 @@ impl Burokku {
         let waker = event_loop.loop_waker();
         let local_set = tokio::task::LocalSet::new();
 
-        let (dom_plugin, dom) = DomPlugin::new();
+        let dom_plugin = DomPlugin::new();
+        let dom = dom_plugin.bindings();
         let (lifecycle, shutdown) = RuntimeLifecycle::new(waker);
 
         let mut text = TextEngine::new();
@@ -175,7 +183,8 @@ impl Burokku {
 
         let host = ApplicationHost::new(dom, text, lifecycle.clone());
         local_set.spawn_local(bootstrap_runtime(
-            self.runtime.plugin(dom_plugin),
+            self.runtime,
+            dom_plugin,
             self.script,
             lifecycle.clone(),
             shutdown,
@@ -299,10 +308,105 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn app_bootstrap_installs_resize_observer_and_preserves_native_subscriptions() {
+        LocalSet::new()
+            .run_until(async {
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let (resized_tx, resized_rx) = oneshot::channel();
+                let ready = Rc::new(RefCell::new(Some(ready_tx)));
+                let resized = Rc::new(RefCell::new(Some(resized_tx)));
+                let app = Burokku::builder()
+                    .runtime_plugin(move |ctx: &runtime::rquickjs::Ctx<'_>| {
+                        let ready = ready.clone();
+                        ctx.globals().set(
+                            "ready",
+                            runtime::rquickjs::Function::new(ctx.clone(), move || {
+                                if let Some(sender) = ready.borrow_mut().take() {
+                                    let _ = sender.send(());
+                                }
+                            })?,
+                        )?;
+                        let resized = resized.clone();
+                        ctx.globals().set(
+                            "resized",
+                            runtime::rquickjs::Function::new(ctx.clone(), move |width: f64| {
+                                if let Some(sender) = resized.borrow_mut().take() {
+                                    let _ = sender.send(width);
+                                }
+                            })?,
+                        )?;
+                        Ok(())
+                    })
+                    .script(
+                        r#"
+                    const win = app.createElement('window');
+                    app.appendChild(win);
+                    const observer = new ResizeObserver(entries => {
+                        if (entries[0].target !== win) throw new Error('wrong target');
+                        resized(entries[0].size.width);
+                    });
+                    observer.observe(win);
+                    ready();
+                "#,
+                    )
+                    .build();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
+                let lifecycle = RuntimeLifecycle::for_test();
+                let (shutdown_tx, shutdown_rx) = oneshot::channel();
+                // Exercise the same automatic plugin assembly that Burokku::run uses.
+                let task = tokio::task::spawn_local(bootstrap_runtime(
+                    app.runtime,
+                    plugin,
+                    app.script,
+                    lifecycle.clone(),
+                    shutdown_rx,
+                ));
+                tokio::time::timeout(std::time::Duration::from_secs(2), ready_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let (window, native) = {
+                    let state = dom.borrow();
+                    let window = state.dom.first_child(state.dom.root()).unwrap().unwrap();
+                    let native = state.dom.resize_observer();
+                    native.observe(&state.dom, window).unwrap();
+                    (window, native)
+                };
+                LayoutEngine::new(TextEngine::without_system_fonts())
+                    .compute(
+                        &dom.borrow().dom,
+                        LogicalViewport::new(800.0, 600.0).unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), resized_rx)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    800.0
+                );
+                let records = native.take_records(&dom.borrow().dom).unwrap();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].target, window);
+                assert_eq!(records[0].size.width, 800.0);
+                shutdown_tx.send(()).unwrap();
+                task.await.unwrap();
+                assert_eq!(lifecycle.status(), RuntimeStatus::Stopped);
+                assert_eq!(
+                    dom.borrow().dom.resize_observers.retained_targets(),
+                    [window]
+                );
+                native.observe(&dom.borrow().dom, window).unwrap();
+                assert_eq!(native.take_records(&dom.borrow().dom).unwrap().len(), 1);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn app_script_commits_a_window_and_text_for_the_native_host() {
         LocalSet::new()
             .run_until(async {
-                let (plugin, dom) = DomPlugin::new();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
                 let initial_revision = dom.borrow().dom.revision();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(install_llrt_globals)
@@ -363,7 +467,7 @@ mod tests {
     async fn detached_window_may_be_mounted_by_a_later_timer_batch() {
         LocalSet::new()
             .run_until(async {
-                let (plugin, dom) = DomPlugin::new();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(install_llrt_globals)
                     .plugin(plugin)
@@ -395,7 +499,7 @@ mod tests {
     async fn llrt_counter_example_updates_from_an_interval() {
         LocalSet::new()
             .run_until(async {
-                let (plugin, dom) = DomPlugin::new();
+                let (plugin, dom) = DomPlugin::new_with_bindings();
                 let (runtime, driver) = Runtime::builder()
                     .plugin(install_llrt_globals)
                     .plugin(plugin)

@@ -190,6 +190,28 @@ export type BurokkuElement<
   Tag extends BurokkuTagName = BurokkuTagName,
 > = BurokkuElementTagNameMap[Tag];
 
+/** An immutable layout measurement in logical pixels, which may precede painting. */
+export interface BurokkuResizeObserverEntry {
+  readonly target: BurokkuElement;
+  readonly size: {
+    readonly width: number;
+    readonly height: number;
+  };
+}
+
+export type BurokkuResizeObserverCallback = (
+  this: BurokkuResizeObserver,
+  entries: readonly BurokkuResizeObserverEntry[],
+  observer: BurokkuResizeObserver,
+) => void;
+
+/** Observes native layout width/height. Box-selection options are not supported yet. */
+export interface BurokkuResizeObserver {
+  observe(target: BurokkuElement): void;
+  unobserve(target: BurokkuElement): void;
+  disconnect(): void;
+}
+
 export type BurokkuDimension = "auto" | `${number}px` | `${number}%`;
 export type BurokkuLength = `${number}px` | `${number}%`;
 /** A CSS hexadecimal color: #rgb, #rgba, #rrggbb, or #rrggbbaa. */
@@ -304,4 +326,10 @@ export function setStyles<ElementType extends BurokkuElement>(
 declare global {
   /** The permanent Burokku application mount root. */
   var app: AppNode;
+
+  /** Installed automatically by Burokku after its DOM bindings. */
+  var ResizeObserver: {
+    readonly prototype: BurokkuResizeObserver;
+    new(callback: BurokkuResizeObserverCallback): BurokkuResizeObserver;
+  };
 }

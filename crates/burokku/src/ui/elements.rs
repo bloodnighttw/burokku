@@ -9,6 +9,8 @@ use self::styles::{color::RgbaColor, flex::FlexStyle, grid::GridStyle};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
+use super::resize_observer::{ResizeObserver, ResizeObserverRegistry};
+
 mod iter;
 pub use iter::DomIter;
 pub mod styles;
@@ -301,6 +303,7 @@ pub struct Dom {
     nodes: SlotMap<NodeId, Node>,
     root: NodeId,
     revision: u64,
+    pub(crate) resize_observers: ResizeObserverRegistry,
 }
 
 impl Dom {
@@ -324,7 +327,13 @@ impl Dom {
             nodes,
             root,
             revision: 0,
+            resize_observers: ResizeObserverRegistry::default(),
         }
+    }
+
+    /// Creates a native resize subscription for this arena, without JavaScript.
+    pub fn resize_observer(&self) -> ResizeObserver {
+        self.resize_observers.create()
     }
 
     pub fn root(&self) -> NodeId {
@@ -952,10 +961,11 @@ impl Dom {
             }
         }
         self.bump_revision();
+        self.resize_observers.prune(self);
         Ok(kind)
     }
 
-    /// Permanently removes detached components not retained by a live wrapper.
+    /// Permanently removes detached components not retained by wrappers or observers.
     ///
     /// A wrapper for any node retains its complete component because parent and
     /// sibling traversal makes every node in that component observable.
@@ -969,7 +979,8 @@ impl Dom {
         let mut marked = HashSet::new();
         self.mark_subtree(self.root, &mut marked);
 
-        for mut wrapper_root in wrapper_roots {
+        let observer_roots = self.resize_observers.retained_targets();
+        for mut wrapper_root in wrapper_roots.into_iter().chain(observer_roots) {
             self.node(wrapper_root)
                 .ok_or(DomError::NodeNotFound(wrapper_root))?;
             // Find the root of the component retained by this wrapper.
@@ -1062,6 +1073,7 @@ impl Dom {
 
     fn bump_revision(&mut self) {
         bump(&mut self.revision);
+        self.resize_observers.request_measurement();
     }
 }
 

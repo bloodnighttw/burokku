@@ -1,26 +1,33 @@
 //! UI-thread-only QuickJS binding state around one live [`Dom`].
 //! This module integrates the document model; it is not the document model itself.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+};
 
-use runtime::{rquickjs::Ctx, JsTaskQueue, Plugin};
+use rquickjs::{object::Property, Class};
+use runtime::JsTaskQueue;
 
 use super::{
     elements::{Dom, DomError, NodeId},
     layout::ComputedLayout,
 };
 
-mod classes;
 mod errors;
 mod events;
-mod lifetime;
+mod facade;
+mod node;
+pub(crate) mod resize_observer;
+mod style;
+mod wrapper;
 
 use crate::ui::events::PointerState;
 #[cfg(test)]
 use crate::ui::events::{DomMouseEvent, MouseEventKind};
 #[cfg(test)]
 use crate::ui::host::{ChangedMouseButton, PressedMouseButtons};
-use lifetime::SharedWrapperRoots;
+use wrapper::SharedWrapperRoots;
 
 pub(crate) type SharedDomBindings = Rc<RefCell<DomBindingState>>;
 
@@ -82,65 +89,68 @@ impl DomBindingState {
     }
 }
 
-/// Installs bindings backed by the UI thread's live DOM.
-pub(crate) struct DomPlugin {
+pub(crate) fn new_state() -> SharedDomBindings {
+    Rc::new(RefCell::new(DomBindingState {
+        dom: Dom::new(),
+        wrapper_roots: SharedWrapperRoots::default(),
+        task_queue: None,
+        presented_layout: RefCell::new(None),
+        pointer: PointerState::default(),
+    }))
+}
+
+pub(super) fn borrow<'a>(
+    context: &runtime::rquickjs::Ctx<'_>,
+    state: &'a SharedDomBindings,
+) -> runtime::rquickjs::Result<Ref<'a, DomBindingState>> {
+    state
+        .try_borrow()
+        .map_err(|_| errors::borrow_conflict(context))
+}
+
+pub(super) fn borrow_mut<'a>(
+    context: &runtime::rquickjs::Ctx<'_>,
+    state: &'a SharedDomBindings,
+) -> runtime::rquickjs::Result<std::cell::RefMut<'a, DomBindingState>> {
+    state
+        .try_borrow_mut()
+        .map_err(|_| errors::borrow_conflict(context))
+}
+
+pub(crate) fn install<'js>(
+    context: &runtime::rquickjs::Ctx<'js>,
     state: SharedDomBindings,
-}
+) -> runtime::Result<()> {
+    state
+        .try_borrow_mut()
+        .map_err(|_| runtime::rquickjs::Error::Unknown)?
+        .task_queue = JsTaskQueue::from_context(context).ok();
+    wrapper::install(context)?;
 
-impl DomPlugin {
-    pub(crate) fn new() -> (Self, SharedDomBindings) {
-        let state = Rc::new(RefCell::new(DomBindingState {
-            dom: Dom::new(),
-            wrapper_roots: SharedWrapperRoots::default(),
-            task_queue: None,
-            presented_layout: RefCell::new(None),
-            pointer: PointerState::default(),
-        }));
-        (
-            Self {
-                state: Rc::clone(&state),
-            },
-            state,
-        )
-    }
+    let node_methods = Class::<node::NativeNode<'js>>::prototype(context)?
+        .expect("macro-backed Node class has a prototype");
+    let style_methods = Class::<style::NativeStyleDeclaration>::prototype(context)?
+        .expect("macro-backed style class has a prototype");
+    facade::install(context, &node_methods, &style_methods)?;
 
-    #[cfg(test)]
-    fn reclaim_for_test(&self) -> crate::ui::elements::ReclaimReport {
-        self.state
-            .try_borrow_mut()
-            .expect("DOM plugin state is not borrowed")
-            .reclaim_detached()
-            .unwrap()
-    }
-
-    #[cfg(test)]
-    fn state(&self) -> std::cell::Ref<'_, DomBindingState> {
-        self.state
-            .try_borrow()
-            .expect("DOM plugin state is not borrowed")
-    }
-}
-
-impl Plugin for DomPlugin {
-    fn name(&self) -> &'static str {
-        "burokku-dom"
-    }
-
-    fn install<'js>(&self, context: &Ctx<'js>) -> runtime::Result<()> {
-        self.state
-            .try_borrow_mut()
-            .map_err(|_| runtime::rquickjs::Error::Unknown)?
-            .task_queue = JsTaskQueue::from_context(context).ok();
-        classes::install(context, Rc::clone(&self.state))
-    }
+    let root = borrow(context, &state)?.dom.root();
+    let app = wrapper::wrap_node(context, &state, root)?;
+    context
+        .globals()
+        .prop("app", Property::from(app).enumerable())?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
 
-    use runtime::rquickjs::{CatchResultExt, Context, Object, Runtime as JsRuntime};
+    use runtime::{
+        rquickjs::{CatchResultExt, Context, Object, Runtime as JsRuntime},
+        Plugin,
+    };
 
     use super::*;
+    use crate::plugins::dom::DomPlugin;
     use crate::ui::{
         elements::{Element, NodeKind},
         layout::{LayoutEngine, LogicalViewport},
@@ -175,13 +185,13 @@ mod tests {
 
     #[test]
     fn installs_permanent_app_and_host_only_node_classes() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
             plugin.install(&context).unwrap();
             let app: Object = context.globals().get("app").unwrap();
-            assert!(app.instance_of::<classes::NativeNode>());
+            assert!(app.instance_of::<node::NativeNode>());
             let values: Vec<bool> = context
                 .eval(
                     "[\
@@ -203,7 +213,7 @@ mod tests {
 
     #[test]
     fn facade_mutates_live_dom_synchronously() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -262,7 +272,7 @@ mod tests {
 
     #[test]
     fn element_exposes_last_presented_read_only_layout_rects() {
-        let (plugin, state) = DomPlugin::new();
+        let (plugin, state) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -340,7 +350,7 @@ mod tests {
 
     #[test]
     fn facade_enforces_text_only_raw_children_without_partial_mutation() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -423,7 +433,7 @@ mod tests {
 
     #[test]
     fn unreachable_detached_wrappers_release_and_reclaim_during_host_maintenance() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -455,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_live_descendant_wrapper_retains_its_complete_detached_component() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -506,7 +516,7 @@ mod tests {
 
     #[test]
     fn text_content_replacement_keeps_a_wrapped_old_child_valid_and_detached() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
@@ -541,7 +551,7 @@ mod tests {
 
     #[test]
     fn wrapper_listener_cycles_do_not_retain_detached_native_nodes() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -572,7 +582,7 @@ mod tests {
 
     #[test]
     fn connected_listener_wrapper_is_rooted_only_while_attached() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -655,7 +665,7 @@ mod tests {
 
     #[test]
     fn a_collected_attached_wrapper_is_recreated_canonically() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -694,7 +704,7 @@ mod tests {
 
     #[test]
     fn repeated_detached_wrapper_cycles_return_the_arena_to_baseline() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -719,7 +729,7 @@ mod tests {
     }
 
     fn run_framework_fixture(prefix: &str, bundle: &str) {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (runtime, context) = context();
 
         context.with(|context| {
@@ -782,7 +792,7 @@ mod tests {
 
     #[test]
     fn facade_reports_named_errors_without_partial_mutation() {
-        let (plugin, _) = DomPlugin::new();
+        let (plugin, _) = DomPlugin::new_with_bindings();
         let (_runtime, context) = context();
 
         context.with(|context| {
