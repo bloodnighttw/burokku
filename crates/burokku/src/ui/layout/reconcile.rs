@@ -6,7 +6,10 @@ use std::{
 use taffy::{geometry::Size, Dimension, Display, Layout, Position, Style};
 
 use crate::ui::{
-    elements::{traits::Styles, Dom, Element, NodeId as DomNodeId, NodeKind, NodeRevisions},
+    elements::{
+        styles::position::Position as DomPosition, traits::Styles, Dom, Element,
+        NodeId as DomNodeId, NodeKind, NodeRevisions,
+    },
     text::{collect_paragraph, ParagraphInput},
 };
 
@@ -87,7 +90,8 @@ pub(super) fn visible_paragraph_ids(
 struct PendingNode {
     dom_id: DomNodeId,
     dom_parent: DomNodeId,
-    layout_parent: LayoutId,
+    dom_layout_parent: LayoutId,
+    positioned_ancestor: LayoutId,
     source_order: usize,
 }
 
@@ -148,7 +152,7 @@ pub(super) fn reconcile_full(
     scratch.window = Some(window);
 
     let mut pending = Vec::new();
-    schedule_children(dom, window, window_layout, &mut pending)?;
+    schedule_children(dom, window, window_layout, window_layout, &mut pending)?;
 
     while let Some(next) = pending.pop() {
         if !seen_dom.insert(next.dom_id) {
@@ -158,9 +162,18 @@ pub(super) fn reconcile_full(
         let node = dom
             .node(next.dom_id)
             .ok_or(LayoutError::MissingDomNode(next.dom_id))?;
-        match node.kind() {
+        let position = match node.kind() {
+            NodeKind::Element(element) => position_for(element),
             NodeKind::App => return Err(LayoutError::InvalidAppRoot),
             NodeKind::Text(_) => return Err(LayoutError::RawTextOutsideParagraph(next.dom_id)),
+        };
+        let layout_parent = match position {
+            DomPosition::Static | DomPosition::Relative => next.dom_layout_parent,
+            DomPosition::Absolute => next.positioned_ancestor,
+            DomPosition::Fixed => window_layout,
+        };
+        match node.kind() {
+            NodeKind::App | NodeKind::Text(_) => unreachable!("node kind was checked above"),
             NodeKind::Element(Element::Window { .. }) => {
                 return Err(LayoutError::UnexpectedWindow(next.dom_id));
             }
@@ -168,7 +181,7 @@ pub(super) fn reconcile_full(
                 let layout_id = scratch.topology.insert_child(
                     next.dom_id,
                     next.dom_parent,
-                    next.layout_parent,
+                    layout_parent,
                     next.source_order,
                 )?;
                 let collected = collect_paragraph(dom, next.dom_id)?;
@@ -197,7 +210,7 @@ pub(super) fn reconcile_full(
                 let layout_id = scratch.topology.insert_child(
                     next.dom_id,
                     next.dom_parent,
-                    next.layout_parent,
+                    layout_parent,
                     next.source_order,
                 )?;
                 insert_state(
@@ -208,7 +221,18 @@ pub(super) fn reconcile_full(
                     style_for(dom, next.dom_id, viewport)?,
                     node.revisions(),
                 );
-                schedule_children(dom, next.dom_id, layout_id, &mut pending)?;
+                let positioned_ancestor = if position == DomPosition::Static {
+                    next.positioned_ancestor
+                } else {
+                    layout_id
+                };
+                schedule_children(
+                    dom,
+                    next.dom_id,
+                    layout_id,
+                    positioned_ancestor,
+                    &mut pending,
+                )?;
             }
         }
     }
@@ -236,7 +260,8 @@ pub(super) fn reconcile_full(
 fn schedule_children(
     dom: &Dom,
     dom_parent: DomNodeId,
-    layout_parent: LayoutId,
+    dom_layout_parent: LayoutId,
+    positioned_ancestor: LayoutId,
     pending: &mut Vec<PendingNode>,
 ) -> Result<(), LayoutError> {
     let children = dom
@@ -252,11 +277,22 @@ fn schedule_children(
         pending.push(PendingNode {
             dom_id: child,
             dom_parent,
-            layout_parent,
+            dom_layout_parent,
+            positioned_ancestor,
             source_order,
         });
     }
     Ok(())
+}
+
+fn position_for(element: &Element) -> DomPosition {
+    match element {
+        Element::Window { .. } => DomPosition::Relative,
+        Element::Div { style } => style.position,
+        Element::Flex { style } => style.common.position,
+        Element::Grid { style } => style.common.position,
+        Element::Text { style } => style.common.position,
+    }
 }
 
 fn insert_state(
