@@ -5,7 +5,7 @@ use crate::ui::elements::{
     traits::Styles,
 };
 
-use self::styles::{color::RgbaColor, flex::FlexStyle, grid::GridStyle};
+use self::styles::{color::RgbaColor, flex::FlexStyle, grid::GridStyle, position::Position};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
@@ -169,6 +169,16 @@ impl Element {
             Self::Text { style } => style.common.background_color,
             Self::Flex { style } => style.common.background_color,
             Self::Grid { style } => style.common.background_color,
+        }
+    }
+
+    pub const fn position(&self) -> Position {
+        match self {
+            Self::Window { .. } => Position::Relative,
+            Self::Div { style } => style.position,
+            Self::Text { style } => style.common.position,
+            Self::Flex { style } => style.common.position,
+            Self::Grid { style } => style.common.position,
         }
     }
 }

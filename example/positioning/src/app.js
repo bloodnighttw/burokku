@@ -54,11 +54,11 @@ const makeCard = (heading, body, color) => {
         <flex id="overlay-host" position="static">
           <text>Static block wrapper</text>
           <text>Both positioned boxes remain nested here in the DOM.</text>
-          <flex id="absolute-overlay" position="absolute">
-            <text>ABSOLUTE — layout parent: relative grid</text>
+          <flex id="absolute-overlay" position="absolute" top="20px" right="20px">
+            <text>ABSOLUTE — top: 20px; right: 20px</text>
           </flex>
-          <flex id="fixed-footer" position="fixed">
-            <text>FIXED — layout parent: window</text>
+          <flex id="fixed-footer" position="fixed" bottom="0px" left="0px">
+            <text>FIXED — bottom: 0; left: 0</text>
           </flex>
         </flex>
       </div>
@@ -163,19 +163,17 @@ const gridSibling = makeCard(
 const absoluteOverlay = app.createElement("flex");
 setStyles(absoluteOverlay, {
   position: "absolute",
+  top: "20px",
+  right: "20px",
   width: "190px",
   height: "96px",
   padding: "12px",
-  "grid-row": "1",
-  "grid-column": "2",
-  "align-self": "center",
-  "justify-self": "center",
   "align-items": "center",
   "justify-content": "center",
   "background-color": "#e11d48ee",
 });
 absoluteOverlay.appendChild(makeText(
-  "ABSOLUTE\nlayout parent: relative grid",
+  "ABSOLUTE\ntop: 20px; right: 20px",
   {
     "font-size": "15px",
     "font-weight": "bold",
@@ -186,6 +184,8 @@ absoluteOverlay.appendChild(makeText(
 const fixedFooter = app.createElement("flex");
 setStyles(fixedFooter, {
   position: "fixed",
+  bottom: "0px",
+  left: "0px",
   width: "100%",
   height: "64px",
   "align-items": "center",
@@ -193,7 +193,7 @@ setStyles(fixedFooter, {
   "background-color": "#ca8a04ff",
 });
 fixedFooter.appendChild(makeText(
-  "FIXED — nested in the middle card's DOM, laid out under the window",
+  "FIXED — bottom: 0; left: 0; containing block: window",
   {
     "font-size": "17px",
     "font-weight": "bold",

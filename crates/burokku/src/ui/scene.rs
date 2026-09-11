@@ -74,10 +74,10 @@ impl ScenePlan {
 
         let mut items = Vec::new();
         let mut hit_regions = Vec::new();
-        for (node, _) in dom.iter() {
-            let Some(computed_box) = computed.box_for(node) else {
-                continue;
-            };
+        for node in paint_order(dom, computed) {
+            let computed_box = computed
+                .box_for(node)
+                .expect("paint order contains computed layout boxes");
             let layout = computed_box.layout();
             let origin = computed_box.border_origin();
             let rect = LogicalRect {
@@ -165,6 +165,37 @@ impl ScenePlan {
         }
         self.hit_test(logical_x as f32, logical_y as f32)
     }
+}
+
+fn paint_order(dom: &Dom, computed: &ComputedLayout) -> Vec<NodeId> {
+    let Some(root) = computed.window() else {
+        return Vec::new();
+    };
+    let mut order = Vec::with_capacity(computed.len());
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        order.push(node);
+        let children = computed
+            .layout_children(node)
+            .expect("computed layout topology contains every painted node");
+        for &child in children.iter().rev() {
+            if dom
+                .element(child)
+                .is_some_and(|element| element.position().is_out_of_flow())
+            {
+                pending.push(child);
+            }
+        }
+        for &child in children.iter().rev() {
+            if dom
+                .element(child)
+                .is_some_and(|element| !element.position().is_out_of_flow())
+            {
+                pending.push(child);
+            }
+        }
+    }
+    order
 }
 
 #[derive(Debug)]
@@ -369,6 +400,59 @@ mod tests {
                 PaintItem::Text { source }
             ] if *first == window && *second == div && *source == text
         ));
+    }
+
+    #[test]
+    fn absolute_boxes_paint_and_hit_test_above_in_flow_siblings() {
+        // <window>
+        //   <div position="relative">
+        //     <div>
+        //       <div id="absolute" position="absolute" top="0px" left="0px" />
+        //     </div>
+        //     <div id="sibling" />
+        //   </div>
+        // </window>
+        let mut dom = Dom::new();
+        let window = dom.create_element(Element::from_tag(ElementTag::Window));
+        let parent = dom.create_element(Element::from_tag(ElementTag::Div));
+        let wrapper = dom.create_element(Element::from_tag(ElementTag::Div));
+        let absolute = dom.create_element(Element::from_tag(ElementTag::Div));
+        let sibling = dom.create_element(Element::from_tag(ElementTag::Div));
+        dom.set_style_property(parent, "position", "relative")
+            .unwrap();
+        for node in [absolute, sibling] {
+            dom.set_style_property(node, "width", "40px").unwrap();
+            dom.set_style_property(node, "height", "40px").unwrap();
+        }
+        dom.set_style_property(absolute, "position", "absolute")
+            .unwrap();
+        dom.set_style_property(absolute, "top", "0px").unwrap();
+        dom.set_style_property(absolute, "left", "0px").unwrap();
+        dom.set_style_property(absolute, "background-color", "#ff0000")
+            .unwrap();
+        dom.set_style_property(sibling, "background-color", "#0000ff")
+            .unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, parent).unwrap();
+        dom.append_child(parent, wrapper).unwrap();
+        dom.append_child(wrapper, absolute).unwrap();
+        dom.append_child(parent, sibling).unwrap();
+        let mut layout = LayoutEngine::new(TextEngine::without_system_fonts());
+        let computed = layout
+            .compute(&dom, LogicalViewport::new(100.0, 100.0).unwrap())
+            .unwrap();
+
+        let plan =
+            ScenePlan::from_layout(&dom, computed, PhysicalSize::new(100, 100), 1.0).unwrap();
+
+        assert!(matches!(
+            plan.items(),
+            [
+                PaintItem::Background { node: first, .. },
+                PaintItem::Background { node: second, .. }
+            ] if *first == sibling && *second == absolute
+        ));
+        assert_eq!(plan.hit_test(10.0, 10.0), Some(absolute));
     }
 
     #[test]

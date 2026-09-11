@@ -163,7 +163,7 @@ pub(super) fn reconcile_full(
             .node(next.dom_id)
             .ok_or(LayoutError::MissingDomNode(next.dom_id))?;
         let position = match node.kind() {
-            NodeKind::Element(element) => position_for(element),
+            NodeKind::Element(element) => element.position(),
             NodeKind::App => return Err(LayoutError::InvalidAppRoot),
             NodeKind::Text(_) => return Err(LayoutError::RawTextOutsideParagraph(next.dom_id)),
         };
@@ -283,16 +283,6 @@ fn schedule_children(
         });
     }
     Ok(())
-}
-
-fn position_for(element: &Element) -> DomPosition {
-    match element {
-        Element::Window { .. } => DomPosition::Relative,
-        Element::Div { style } => style.position,
-        Element::Flex { style } => style.common.position,
-        Element::Grid { style } => style.common.position,
-        Element::Text { style } => style.common.position,
-    }
 }
 
 fn insert_state(

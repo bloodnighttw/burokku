@@ -32,7 +32,7 @@ impl Default for LengthPercentage {
     }
 }
 
-/// A thread-safe preferred size used by flex items.
+/// A thread-safe length, percentage, or automatic value.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Dimension {
     Length(f32),
@@ -59,6 +59,14 @@ impl Dimension {
             Self::Length(value) => taffy::Dimension::length(value),
             Self::Percent(value) => taffy::Dimension::percent(value),
             Self::Auto => taffy::Dimension::auto(),
+        }
+    }
+
+    pub fn to_taffy_auto(self) -> taffy::LengthPercentageAuto {
+        match self {
+            Self::Length(value) => taffy::LengthPercentageAuto::length(value),
+            Self::Percent(value) => taffy::LengthPercentageAuto::percent(value),
+            Self::Auto => taffy::LengthPercentageAuto::auto(),
         }
     }
 }
@@ -133,6 +141,10 @@ mod tests {
             taffy::LengthPercentage::percent(0.5)
         );
         assert_eq!(Dimension::auto().to_taffy(), taffy::Dimension::auto());
+        assert_eq!(
+            Dimension::percent(0.25).to_taffy_auto(),
+            taffy::LengthPercentageAuto::percent(0.25)
+        );
     }
 
     #[test]

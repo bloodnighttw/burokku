@@ -115,7 +115,11 @@ cargo clippy -p burokku --all-targets -- -D warnings
 
 ## Known limitation
 
-This phase adds the `position` property and containing-block topology only. Burokku does not yet expose `top`, `right`, `bottom`, or `left`. Consequently, nested absolute or fixed boxes whose insets are all automatic use Taffy's flattened static-position approximation after re-parenting. Add inset properties when precise positioned placement is required; supporting fully accurate CSS automatic static positions would require a placeholder or post-layout anchor and should be driven by a concrete use case.
+Burokku exposes the four inset longhands but not the `inset` shorthand. Nested
+absolute or fixed boxes whose insets are all automatic still use Taffy's
+flattened static-position approximation after re-parenting. Supporting fully
+accurate CSS automatic static positions would require a placeholder or
+post-layout anchor and should be driven by a concrete use case.
 
 ## Non-goals
 
