@@ -42,7 +42,7 @@ const makeCard = (heading, body, color) => {
   <flex id="shell">
     <text id="title">Position × mixed layout</text>
     <text id="subtitle">
-      Flex shell → relative grid → static wrapper. Coral is absolute; yellow is fixed.
+      Purple is later in DOM, but z-index 5 keeps it behind coral z-index 10.
     </text>
     <text id="stage-label">RELATIVE GRID ↓ containing block for the coral overlay</text>
     <grid id="stage" position="relative">
@@ -56,6 +56,9 @@ const makeCard = (heading, body, color) => {
           <text>Both positioned boxes remain nested here in the DOM.</text>
           <flex id="absolute-overlay" position="absolute" z-index="10" top="20px" right="20px">
             <text>ABSOLUTE — z-index: 10</text>
+          </flex>
+          <flex id="absolute-underlay" position="absolute" z-index="5" top="50px" right="50px">
+            <text>ABSOLUTE — z-index: 5, later in DOM</text>
           </flex>
           <flex id="fixed-footer" position="fixed" z-index="20" bottom="0px" left="0px">
             <text>FIXED — z-index: 20</text>
@@ -95,7 +98,7 @@ shell.appendChild(makeText("Position × mixed layout", {
   "text-wrap": "nowrap",
 }));
 shell.appendChild(makeText(
-  "Flex shell → relative grid → static wrapper. Coral is absolute; yellow is fixed.",
+  "Purple is later in DOM, but z-index 5 keeps it behind coral z-index 10.",
   { color: "#94a3b8ff", "text-wrap": "nowrap" },
 ));
 shell.appendChild(makeText(
@@ -182,6 +185,28 @@ absoluteOverlay.appendChild(makeText(
   },
 ));
 
+const absoluteUnderlay = app.createElement("flex");
+setStyles(absoluteUnderlay, {
+  position: "absolute",
+  "z-index": "5",
+  top: "50px",
+  right: "50px",
+  width: "190px",
+  height: "96px",
+  padding: "12px",
+  "align-items": "center",
+  "justify-content": "center",
+  "background-color": "#7c3aedee",
+});
+absoluteUnderlay.appendChild(makeText(
+  "ABSOLUTE\nz-index: 5; later in DOM",
+  {
+    "font-size": "15px",
+    "font-weight": "bold",
+    color: "#ffffffff",
+  },
+));
+
 const fixedFooter = app.createElement("flex");
 setStyles(fixedFooter, {
   position: "fixed",
@@ -205,6 +230,7 @@ fixedFooter.appendChild(makeText(
 ));
 
 overlayHost.appendChild(absoluteOverlay);
+overlayHost.appendChild(absoluteUnderlay);
 overlayHost.appendChild(fixedFooter);
 stage.appendChild(flowCard);
 stage.appendChild(staticWrapper);
