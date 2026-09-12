@@ -8,17 +8,10 @@ use crate::ui::{
     layout::ComputedLayout,
 };
 
-#[derive(Clone, Copy, Debug)]
-struct ContextMeta {
-    parent: Option<NodeId>,
-    level: i32,
-    source_order: usize,
-}
-
 #[derive(Debug, Default)]
 struct StackingContexts {
     root: Option<NodeId>,
-    contexts: HashMap<NodeId, ContextMeta>,
+    levels: HashMap<NodeId, i32>,
     children: HashMap<NodeId, Vec<NodeId>>,
     positioned_auto: HashMap<NodeId, Vec<NodeId>>,
     source_order: HashMap<NodeId, usize>,
@@ -33,14 +26,7 @@ impl StackingContexts {
             root: Some(root),
             ..Self::default()
         };
-        tree.contexts.insert(
-            root,
-            ContextMeta {
-                parent: None,
-                level: 0,
-                source_order: 0,
-            },
-        );
+        tree.levels.insert(root, 0);
         tree.children.insert(root, Vec::new());
         tree.positioned_auto.insert(root, Vec::new());
         tree.source_order.insert(root, 0);
@@ -61,14 +47,7 @@ impl StackingContexts {
             tree.source_order.insert(node, source_order);
             let element = dom.element(node).expect("layout boxes are elements");
             let next_context = if creates_stacking_context(dom, node) {
-                tree.contexts.insert(
-                    node,
-                    ContextMeta {
-                        parent: Some(parent_context),
-                        level: element.z_index().level(),
-                        source_order,
-                    },
-                );
+                tree.levels.insert(node, element.z_index().level());
                 tree.children
                     .get_mut(&parent_context)
                     .expect("ancestor stacking context exists")
@@ -109,19 +88,12 @@ impl StackingContexts {
             .children
             .get(&root)
             .expect("every stacking context has child storage");
-        debug_assert!(child_contexts
-            .iter()
-            .all(|child| self.contexts[child].parent == Some(root)));
-
         let mut negative = child_contexts
             .iter()
             .copied()
-            .filter(|child| self.contexts[child].level < 0)
+            .filter(|child| self.levels[child] < 0)
             .collect::<Vec<_>>();
-        negative.sort_by_key(|child| {
-            let meta = self.contexts[child];
-            (meta.level, meta.source_order)
-        });
+        negative.sort_by_key(|child| (self.levels[child], self.source_order[child]));
         for child in negative {
             self.paint_context(dom, child, order);
         }
@@ -131,7 +103,7 @@ impl StackingContexts {
         let mut zero = child_contexts
             .iter()
             .copied()
-            .filter(|child| self.contexts[child].level == 0)
+            .filter(|child| self.levels[child] == 0)
             .map(|node| (self.source_order[&node], ZeroItem::Context(node)))
             .chain(
                 self.positioned_auto[&root]
@@ -151,12 +123,9 @@ impl StackingContexts {
         let mut positive = child_contexts
             .iter()
             .copied()
-            .filter(|child| self.contexts[child].level > 0)
+            .filter(|child| self.levels[child] > 0)
             .collect::<Vec<_>>();
-        positive.sort_by_key(|child| {
-            let meta = self.contexts[child];
-            (meta.level, meta.source_order)
-        });
+        positive.sort_by_key(|child| (self.levels[child], self.source_order[child]));
         for child in positive {
             self.paint_context(dom, child, order);
         }
@@ -168,7 +137,7 @@ impl StackingContexts {
         };
         for &child in children {
             if !self.source_order.contains_key(&child)
-                || self.contexts.contains_key(&child)
+                || self.levels.contains_key(&child)
                 || dom
                     .element(child)
                     .is_some_and(|element| element.position() != Position::Static)
@@ -279,12 +248,10 @@ mod tests {
 
         let contexts = StackingContexts::build(&dom, layout.current().unwrap());
 
-        assert!(!contexts.contexts.contains_key(&ordinary));
-        assert!(!contexts.contexts.contains_key(&relative));
-        assert!(!contexts.contexts.contains_key(&absolute));
-        for node in [flex_item, nested, fixed] {
-            assert_eq!(contexts.contexts[&node].parent, Some(window));
-        }
+        assert!(!contexts.levels.contains_key(&ordinary));
+        assert!(!contexts.levels.contains_key(&relative));
+        assert!(!contexts.levels.contains_key(&absolute));
+        assert_eq!(contexts.children[&window], vec![flex_item, nested, fixed]);
     }
 
     #[test]
@@ -332,7 +299,7 @@ mod tests {
 
         let contexts = StackingContexts::build(&dom, layout.current().unwrap());
 
-        assert_eq!(contexts.contexts[&inner].parent, Some(first));
+        assert_eq!(contexts.children[&first], vec![inner]);
         assert_eq!(
             contexts.paint_order(&dom),
             vec![window, negative, normal, auto, zero, first, inner, second]
