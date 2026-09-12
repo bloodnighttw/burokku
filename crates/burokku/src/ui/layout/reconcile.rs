@@ -17,7 +17,7 @@ use super::{
     cache::NodeLayoutCache,
     error::LayoutError,
     topology::{LayoutId, LayoutTopology},
-    LogicalViewport,
+    LogicalViewport, LAYOUT_TREE_DEPTH_LIMIT, LAYOUT_TREE_DEPTH_WARNING,
 };
 
 #[derive(Clone, Debug)]
@@ -92,6 +92,7 @@ struct PendingNode {
     dom_parent: DomNodeId,
     dom_layout_parent: LayoutId,
     positioned_ancestor: LayoutId,
+    parent_container_depth: usize,
     source_order: usize,
 }
 
@@ -152,7 +153,8 @@ pub(super) fn reconcile_full(
     scratch.window = Some(window);
 
     let mut pending = Vec::new();
-    schedule_children(dom, window, window_layout, window_layout, &mut pending)?;
+    let mut max_container_depth = 1;
+    schedule_children(dom, window, window_layout, window_layout, 1, &mut pending)?;
 
     while let Some(next) = pending.pop() {
         if !seen_dom.insert(next.dom_id) {
@@ -207,6 +209,14 @@ pub(super) fn reconcile_full(
             NodeKind::Element(
                 Element::Div { .. } | Element::Flex { .. } | Element::Grid { .. },
             ) => {
+                let container_depth = next.parent_container_depth + 1;
+                max_container_depth = max_container_depth.max(container_depth);
+                if container_depth > LAYOUT_TREE_DEPTH_LIMIT {
+                    return Err(LayoutError::TreeTooDeep {
+                        depth: container_depth,
+                        limit: LAYOUT_TREE_DEPTH_LIMIT,
+                    });
+                }
                 let layout_id = scratch.topology.insert_child(
                     next.dom_id,
                     next.dom_parent,
@@ -231,10 +241,17 @@ pub(super) fn reconcile_full(
                     next.dom_id,
                     layout_id,
                     positioned_ancestor,
+                    container_depth,
                     &mut pending,
                 )?;
             }
         }
+    }
+
+    if max_container_depth > LAYOUT_TREE_DEPTH_WARNING {
+        eprintln!(
+            "Burokku warning: layout container depth {max_container_depth} exceeds {LAYOUT_TREE_DEPTH_WARNING}",
+        );
     }
 
     let sidecar_ids = scratch.nodes.keys().copied().collect::<HashSet<_>>();
@@ -262,6 +279,7 @@ fn schedule_children(
     dom_parent: DomNodeId,
     dom_layout_parent: LayoutId,
     positioned_ancestor: LayoutId,
+    parent_container_depth: usize,
     pending: &mut Vec<PendingNode>,
 ) -> Result<(), LayoutError> {
     let children = dom
@@ -279,6 +297,7 @@ fn schedule_children(
             dom_parent,
             dom_layout_parent,
             positioned_ancestor,
+            parent_container_depth,
             source_order,
         });
     }
