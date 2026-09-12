@@ -11,6 +11,7 @@ use crate::ui::elements::{
             parse_non_negative_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
         },
         position::Position,
+        z_index::ZIndex,
     },
     traits::Styles,
 };
@@ -25,6 +26,7 @@ pub struct CommonStyle {
     pub margin: Rect<LengthPercentage>,
     pub background_color: Option<RgbaColor>,
     pub item: ItemStyle,
+    pub z_index: ZIndex,
 }
 
 impl Styles for CommonStyle {
@@ -210,6 +212,7 @@ impl Default for CommonStyle {
             },
             background_color: None,
             item: ItemStyle::default(),
+            z_index: ZIndex::default(),
         }
     }
 }
