@@ -7,9 +7,11 @@ use crate::ui::elements::{
         color::RgbaColor,
         item::ItemStyle,
         length::{
-            parse_length_percentage, parse_non_negative_dimension,
+            parse_dimension, parse_length_percentage, parse_non_negative_dimension,
             parse_non_negative_length_percentage, to_taffy_auto, Dimension, LengthPercentage,
         },
+        position::Position,
+        z_index::ZIndex,
     },
     traits::Styles,
 };
@@ -17,11 +19,14 @@ use crate::ui::elements::{
 /// Layout and paint properties shared by regular layout elements.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommonStyle {
+    pub position: Position,
+    pub inset: Rect<Dimension>,
     pub size: Size<Dimension>,
     pub padding: Rect<LengthPercentage>,
     pub margin: Rect<LengthPercentage>,
     pub background_color: Option<RgbaColor>,
     pub item: ItemStyle,
+    pub z_index: ZIndex,
 }
 
 impl Styles for CommonStyle {
@@ -30,6 +35,12 @@ impl Styles for CommonStyle {
             // Divs use CommonStyle directly and must not inherit Taffy's Flex default.
             // FlexStyle and GridStyle explicitly override this container display mode.
             display: taffy::Display::Block,
+            position: self.position.into(),
+            inset: if self.position == Position::Static {
+                Rect::auto()
+            } else {
+                self.inset.map(Dimension::to_taffy_auto)
+            },
             size: Size {
                 width: self.size.width.to_taffy(),
                 height: self.size.height.to_taffy(),
@@ -55,12 +66,46 @@ impl Styles for CommonStyle {
     fn supports_property(property: &str) -> bool {
         matches!(
             property,
-            "width" | "height" | "padding" | "margin" | "background-color"
+            "position"
+                | "z-index"
+                | "top"
+                | "right"
+                | "bottom"
+                | "left"
+                | "width"
+                | "height"
+                | "padding"
+                | "margin"
+                | "background-color"
         ) || ItemStyle::supports_property(property)
     }
 
     fn set_property(&mut self, property: &str, value: &str) -> bool {
         match property {
+            "position" => Position::parse(value).is_some_and(|value| {
+                self.position = value;
+                true
+            }),
+            "z-index" => ZIndex::parse(value).is_some_and(|value| {
+                self.z_index = value;
+                true
+            }),
+            "top" => parse_dimension(value).is_some_and(|value| {
+                self.inset.top = value;
+                true
+            }),
+            "right" => parse_dimension(value).is_some_and(|value| {
+                self.inset.right = value;
+                true
+            }),
+            "bottom" => parse_dimension(value).is_some_and(|value| {
+                self.inset.bottom = value;
+                true
+            }),
+            "left" => parse_dimension(value).is_some_and(|value| {
+                self.inset.left = value;
+                true
+            }),
             "width" => parse_non_negative_dimension(value).is_some_and(|value| {
                 self.size.width = value;
                 true
@@ -93,6 +138,12 @@ impl Styles for CommonStyle {
     fn remove_property(&mut self, property: &str) -> bool {
         let defaults = Self::default();
         match property {
+            "position" => self.position = defaults.position,
+            "z-index" => self.z_index = defaults.z_index,
+            "top" => self.inset.top = defaults.inset.top,
+            "right" => self.inset.right = defaults.inset.right,
+            "bottom" => self.inset.bottom = defaults.inset.bottom,
+            "left" => self.inset.left = defaults.inset.left,
             "width" => self.size.width = defaults.size.width,
             "height" => self.size.height = defaults.size.height,
             "padding" => self.padding = defaults.padding,
@@ -142,6 +193,13 @@ fn parse_padding(value: &str) -> Option<Rect<LengthPercentage>> {
 impl Default for CommonStyle {
     fn default() -> Self {
         Self {
+            position: Position::Static,
+            inset: Rect {
+                left: Dimension::Auto,
+                right: Dimension::Auto,
+                top: Dimension::Auto,
+                bottom: Dimension::Auto,
+            },
             size: Size {
                 width: Dimension::Auto,
                 height: Dimension::Auto,
@@ -160,6 +218,7 @@ impl Default for CommonStyle {
             },
             background_color: None,
             item: ItemStyle::default(),
+            z_index: ZIndex::default(),
         }
     }
 }
@@ -173,6 +232,35 @@ mod tests {
         let style = CommonStyle::default().to_taffy_style();
 
         assert_eq!(style.display, taffy::Display::Block);
+        assert_eq!(style.position, taffy::Position::Relative);
+    }
+
+    #[test]
+    fn position_sets_converts_and_removes() {
+        let mut style = CommonStyle::default();
+
+        assert!(CommonStyle::supports_property("position"));
+        assert!(style.set_property("position", "fixed"));
+        assert_eq!(style.position, Position::Fixed);
+        assert_eq!(style.to_taffy_style().position, taffy::Position::Absolute);
+        assert!(!style.set_property("position", "sticky"));
+        assert!(style.remove_property("position"));
+        assert_eq!(style.position, Position::Static);
+    }
+
+    #[test]
+    fn static_ignores_insets_until_positioned() {
+        let mut style = CommonStyle::default();
+        assert!(style.set_property("top", "-10px"));
+        assert!(style.set_property("right", "25%"));
+        assert_eq!(style.to_taffy_style().inset, Rect::auto());
+
+        assert!(style.set_property("position", "absolute"));
+        let inset = style.to_taffy_style().inset;
+        assert_eq!(inset.top, taffy::LengthPercentageAuto::length(-10.0));
+        assert_eq!(inset.right, taffy::LengthPercentageAuto::percent(0.25));
+        assert_eq!(inset.bottom, taffy::LengthPercentageAuto::auto());
+        assert_eq!(inset.left, taffy::LengthPercentageAuto::auto());
     }
 
     #[test]

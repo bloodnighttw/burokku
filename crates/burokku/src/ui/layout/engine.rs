@@ -622,6 +622,150 @@ mod tests {
     }
 
     #[test]
+    fn positioned_nodes_use_effective_layout_parents_without_changing_the_dom() {
+        // <window>
+        //   <div id="positioned" position="relative">
+        //     <div id="wrapper" position="static">
+        //       <div id="absolute" position="absolute" height="10px">
+        //         <div id="nested-absolute" position="absolute" />
+        //       </div>
+        //     </div>
+        //     <div id="fixed" position="fixed" />
+        //   </div>
+        //   <div id="fallback-wrapper" position="static">
+        //     <div id="fallback-absolute" position="absolute" />
+        //   </div>
+        // </window>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let positioned = element(&mut dom, ElementTag::Div);
+        let wrapper = element(&mut dom, ElementTag::Div);
+        let absolute = element(&mut dom, ElementTag::Div);
+        let nested_absolute = element(&mut dom, ElementTag::Div);
+        let fixed = element(&mut dom, ElementTag::Div);
+        let fallback_wrapper = element(&mut dom, ElementTag::Div);
+        let fallback_absolute = element(&mut dom, ElementTag::Div);
+        dom.set_style_property(positioned, "position", "relative")
+            .unwrap();
+        for node in [absolute, nested_absolute, fallback_absolute] {
+            dom.set_style_property(node, "position", "absolute")
+                .unwrap();
+        }
+        dom.set_style_property(absolute, "height", "10px").unwrap();
+        dom.set_style_property(fixed, "position", "fixed").unwrap();
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, positioned).unwrap();
+        dom.append_child(positioned, wrapper).unwrap();
+        dom.append_child(wrapper, absolute).unwrap();
+        dom.append_child(absolute, nested_absolute).unwrap();
+        dom.append_child(positioned, fixed).unwrap();
+        dom.append_child(window, fallback_wrapper).unwrap();
+        dom.append_child(fallback_wrapper, fallback_absolute)
+            .unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
+
+        assert_eq!(
+            computed.box_for(wrapper).unwrap().layout_parent(),
+            Some(positioned)
+        );
+        assert_eq!(
+            computed.box_for(absolute).unwrap().layout_parent(),
+            Some(positioned)
+        );
+        assert_eq!(
+            computed.box_for(nested_absolute).unwrap().layout_parent(),
+            Some(absolute)
+        );
+        assert_eq!(
+            computed.box_for(fixed).unwrap().layout_parent(),
+            Some(window)
+        );
+        assert_eq!(
+            computed.box_for(fallback_absolute).unwrap().layout_parent(),
+            Some(window)
+        );
+        assert_eq!(
+            computed.layout_children(window),
+            Some(vec![positioned, fixed, fallback_wrapper, fallback_absolute])
+        );
+        assert_eq!(
+            computed.layout_children(positioned),
+            Some(vec![wrapper, absolute])
+        );
+        assert_eq!(computed.layout_children(wrapper), Some(Vec::new()));
+        assert_close(computed.box_for(wrapper).unwrap().layout().size.height, 0.0);
+        assert_eq!(dom.parent(absolute), Some(wrapper));
+        assert_eq!(dom.parent(fixed), Some(positioned));
+
+        dom.set_style_property(absolute, "position", "static")
+            .unwrap();
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
+
+        assert_eq!(
+            computed.box_for(absolute).unwrap().layout_parent(),
+            Some(wrapper)
+        );
+        assert_eq!(
+            computed.box_for(nested_absolute).unwrap().layout_parent(),
+            Some(positioned)
+        );
+        assert_close(
+            computed.box_for(wrapper).unwrap().layout().size.height,
+            10.0,
+        );
+        assert_eq!(dom.parent(absolute), Some(wrapper));
+    }
+
+    #[test]
+    fn positioned_insets_resolve_against_the_selected_containing_block() {
+        // <window width="300px" height="200px">
+        //   <div id="parent" position="relative" width="200px" height="100px">
+        //     <div id="absolute" position="absolute" right="10px" bottom="15px" />
+        //     <div id="fixed" position="fixed" right="5px" bottom="7px" />
+        //   </div>
+        // </window>
+        let mut dom = Dom::new();
+        let window = element(&mut dom, ElementTag::Window);
+        let parent = element(&mut dom, ElementTag::Div);
+        let absolute = element(&mut dom, ElementTag::Div);
+        let fixed = element(&mut dom, ElementTag::Div);
+        for (node, width, height) in [
+            (parent, "200px", "100px"),
+            (absolute, "20px", "10px"),
+            (fixed, "30px", "20px"),
+        ] {
+            dom.set_style_property(node, "width", width).unwrap();
+            dom.set_style_property(node, "height", height).unwrap();
+        }
+        dom.set_style_property(parent, "position", "relative")
+            .unwrap();
+        for (node, position, right, bottom) in [
+            (absolute, "absolute", "10px", "15px"),
+            (fixed, "fixed", "5px", "7px"),
+        ] {
+            dom.set_style_property(node, "position", position).unwrap();
+            dom.set_style_property(node, "right", right).unwrap();
+            dom.set_style_property(node, "bottom", bottom).unwrap();
+        }
+        dom.append_child(dom.root(), window).unwrap();
+        dom.append_child(window, parent).unwrap();
+        dom.append_child(parent, absolute).unwrap();
+        dom.append_child(parent, fixed).unwrap();
+        let mut engine = LayoutEngine::new(TestMeasurer::default());
+
+        let computed = engine.compute(&dom, viewport(300.0, 200.0)).unwrap();
+
+        let absolute_origin = computed.box_for(absolute).unwrap().border_origin();
+        assert_close(absolute_origin.x, 170.0);
+        assert_close(absolute_origin.y, 75.0);
+        let fixed_origin = computed.box_for(fixed).unwrap().border_origin();
+        assert_close(fixed_origin.x, 265.0);
+        assert_close(fixed_origin.y, 173.0);
+    }
+
+    #[test]
     fn measurement_failure_keeps_the_previous_complete_revision() {
         let mut staging = Dom::new();
         let window = element(&mut staging, ElementTag::Window);

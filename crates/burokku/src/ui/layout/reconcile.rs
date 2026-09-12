@@ -6,7 +6,10 @@ use std::{
 use taffy::{geometry::Size, Dimension, Display, Layout, Position, Style};
 
 use crate::ui::{
-    elements::{traits::Styles, Dom, Element, NodeId as DomNodeId, NodeKind, NodeRevisions},
+    elements::{
+        styles::position::Position as DomPosition, traits::Styles, Dom, Element,
+        NodeId as DomNodeId, NodeKind, NodeRevisions,
+    },
     text::{collect_paragraph, ParagraphInput},
 };
 
@@ -14,7 +17,7 @@ use super::{
     cache::NodeLayoutCache,
     error::LayoutError,
     topology::{LayoutId, LayoutTopology},
-    LogicalViewport,
+    LogicalViewport, LAYOUT_TREE_DEPTH_LIMIT, LAYOUT_TREE_DEPTH_WARNING,
 };
 
 #[derive(Clone, Debug)]
@@ -87,7 +90,9 @@ pub(super) fn visible_paragraph_ids(
 struct PendingNode {
     dom_id: DomNodeId,
     dom_parent: DomNodeId,
-    layout_parent: LayoutId,
+    dom_layout_parent: LayoutId,
+    positioned_ancestor: LayoutId,
+    parent_container_depth: usize,
     source_order: usize,
 }
 
@@ -148,7 +153,8 @@ pub(super) fn reconcile_full(
     scratch.window = Some(window);
 
     let mut pending = Vec::new();
-    schedule_children(dom, window, window_layout, &mut pending)?;
+    let mut max_container_depth = 1;
+    schedule_children(dom, window, window_layout, window_layout, 1, &mut pending)?;
 
     while let Some(next) = pending.pop() {
         if !seen_dom.insert(next.dom_id) {
@@ -158,9 +164,18 @@ pub(super) fn reconcile_full(
         let node = dom
             .node(next.dom_id)
             .ok_or(LayoutError::MissingDomNode(next.dom_id))?;
-        match node.kind() {
+        let position = match node.kind() {
+            NodeKind::Element(element) => element.position(),
             NodeKind::App => return Err(LayoutError::InvalidAppRoot),
             NodeKind::Text(_) => return Err(LayoutError::RawTextOutsideParagraph(next.dom_id)),
+        };
+        let layout_parent = match position {
+            DomPosition::Static | DomPosition::Relative => next.dom_layout_parent,
+            DomPosition::Absolute => next.positioned_ancestor,
+            DomPosition::Fixed => window_layout,
+        };
+        match node.kind() {
+            NodeKind::App | NodeKind::Text(_) => unreachable!("node kind was checked above"),
             NodeKind::Element(Element::Window { .. }) => {
                 return Err(LayoutError::UnexpectedWindow(next.dom_id));
             }
@@ -168,7 +183,7 @@ pub(super) fn reconcile_full(
                 let layout_id = scratch.topology.insert_child(
                     next.dom_id,
                     next.dom_parent,
-                    next.layout_parent,
+                    layout_parent,
                     next.source_order,
                 )?;
                 let collected = collect_paragraph(dom, next.dom_id)?;
@@ -194,10 +209,18 @@ pub(super) fn reconcile_full(
             NodeKind::Element(
                 Element::Div { .. } | Element::Flex { .. } | Element::Grid { .. },
             ) => {
+                let container_depth = next.parent_container_depth + 1;
+                max_container_depth = max_container_depth.max(container_depth);
+                if container_depth > LAYOUT_TREE_DEPTH_LIMIT {
+                    return Err(LayoutError::TreeTooDeep {
+                        depth: container_depth,
+                        limit: LAYOUT_TREE_DEPTH_LIMIT,
+                    });
+                }
                 let layout_id = scratch.topology.insert_child(
                     next.dom_id,
                     next.dom_parent,
-                    next.layout_parent,
+                    layout_parent,
                     next.source_order,
                 )?;
                 insert_state(
@@ -208,9 +231,27 @@ pub(super) fn reconcile_full(
                     style_for(dom, next.dom_id, viewport)?,
                     node.revisions(),
                 );
-                schedule_children(dom, next.dom_id, layout_id, &mut pending)?;
+                let positioned_ancestor = if position == DomPosition::Static {
+                    next.positioned_ancestor
+                } else {
+                    layout_id
+                };
+                schedule_children(
+                    dom,
+                    next.dom_id,
+                    layout_id,
+                    positioned_ancestor,
+                    container_depth,
+                    &mut pending,
+                )?;
             }
         }
+    }
+
+    if max_container_depth > LAYOUT_TREE_DEPTH_WARNING {
+        eprintln!(
+            "Burokku warning: layout container depth {max_container_depth} exceeds {LAYOUT_TREE_DEPTH_WARNING}",
+        );
     }
 
     let sidecar_ids = scratch.nodes.keys().copied().collect::<HashSet<_>>();
@@ -236,7 +277,9 @@ pub(super) fn reconcile_full(
 fn schedule_children(
     dom: &Dom,
     dom_parent: DomNodeId,
-    layout_parent: LayoutId,
+    dom_layout_parent: LayoutId,
+    positioned_ancestor: LayoutId,
+    parent_container_depth: usize,
     pending: &mut Vec<PendingNode>,
 ) -> Result<(), LayoutError> {
     let children = dom
@@ -252,7 +295,9 @@ fn schedule_children(
         pending.push(PendingNode {
             dom_id: child,
             dom_parent,
-            layout_parent,
+            dom_layout_parent,
+            positioned_ancestor,
+            parent_container_depth,
             source_order,
         });
     }

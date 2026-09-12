@@ -19,6 +19,9 @@ pub(crate) use engine::LayoutEngine;
 pub(crate) use error::LayoutError;
 pub(crate) use tree::{TextMeasureRequest, TextMeasurement, TextMeasurer};
 
+pub(super) const LAYOUT_TREE_DEPTH_WARNING: usize = 128;
+pub(super) const LAYOUT_TREE_DEPTH_LIMIT: usize = 256;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LogicalViewport {
     width: f32,

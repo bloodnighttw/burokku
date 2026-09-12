@@ -92,3 +92,19 @@ A bounded smoke run is also available:
 ```sh
 BUROKKU_SMOKE=1 cargo run -p burokku-example-layouts
 ```
+
+## Positioned mixed-layout showcase
+
+`example/positioning` mixes a flex shell, relative grid, static block wrapper,
+absolute overlay, and fixed footer. The source includes an XML-like view of the
+authoritative DOM so its parentage can be compared with the rendered layout.
+
+```sh
+cargo run -p burokku-example-positioning
+```
+
+For a bounded smoke run:
+
+```sh
+BUROKKU_SMOKE=1 cargo run -p burokku-example-positioning
+```

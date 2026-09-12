@@ -5,7 +5,9 @@ use crate::ui::elements::{
     traits::Styles,
 };
 
-use self::styles::{color::RgbaColor, flex::FlexStyle, grid::GridStyle};
+use self::styles::{
+    color::RgbaColor, flex::FlexStyle, grid::GridStyle, position::Position, z_index::ZIndex,
+};
 use slotmap::{new_key_type, SlotMap};
 use thiserror::Error;
 
@@ -169,6 +171,26 @@ impl Element {
             Self::Text { style } => style.common.background_color,
             Self::Flex { style } => style.common.background_color,
             Self::Grid { style } => style.common.background_color,
+        }
+    }
+
+    pub const fn position(&self) -> Position {
+        match self {
+            Self::Window { .. } => Position::Relative,
+            Self::Div { style } => style.position,
+            Self::Text { style } => style.common.position,
+            Self::Flex { style } => style.common.position,
+            Self::Grid { style } => style.common.position,
+        }
+    }
+
+    pub const fn z_index(&self) -> ZIndex {
+        match self {
+            Self::Window { .. } => ZIndex::Auto,
+            Self::Div { style } => style.z_index,
+            Self::Text { style } => style.common.z_index,
+            Self::Flex { style } => style.common.z_index,
+            Self::Grid { style } => style.common.z_index,
         }
     }
 }
@@ -1262,6 +1284,7 @@ mod tests {
         }
 
         for id in [div, flex, grid, text_element] {
+            assert_eq!(dom.supports_style_property(id, "position"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "grid-row"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "grid-column"), Ok(true));
             assert_eq!(dom.supports_style_property(id, "justify-self"), Ok(true));
@@ -1270,6 +1293,7 @@ mod tests {
             dom.supports_style_property(window, "justify-self"),
             Ok(false)
         );
+        assert_eq!(dom.supports_style_property(window, "position"), Ok(false));
 
         assert_eq!(dom.supports_style_property(div, "gap"), Ok(false));
         assert_eq!(dom.supports_style_property(flex, "gap"), Ok(true));
@@ -1432,6 +1456,49 @@ mod tests {
         let removed_revision = dom.revision();
         assert_eq!(dom.remove_style_property(div, "flex-grow"), Ok(false));
         assert_eq!(dom.revision(), removed_revision);
+    }
+
+    #[test]
+    fn position_style_rejects_invalid_values_and_only_revises_on_changes() {
+        // <div id="target" position="static" />
+        let mut dom = Dom::new();
+        let target = dom.create_element(Element::Div {
+            style: Box::default(),
+        });
+        let initial_revision = dom.revision();
+
+        assert_eq!(
+            dom.set_style_property(target, "position", "static"),
+            Ok(false)
+        );
+        assert_eq!(
+            dom.set_style_property(target, "position", "sticky"),
+            Err(StyleError::InvalidValue {
+                property: "position".into(),
+                value: "sticky".into(),
+            })
+        );
+        assert_eq!(dom.revision(), initial_revision);
+
+        assert_eq!(
+            dom.set_style_property(target, "position", "fixed"),
+            Ok(true)
+        );
+        let fixed_revision = dom.revision();
+        assert_eq!(
+            dom.set_style_property(target, "position", "fixed"),
+            Ok(false)
+        );
+        assert_eq!(dom.revision(), fixed_revision);
+
+        assert_eq!(dom.remove_style_property(target, "position"), Ok(true));
+        let removed_revision = dom.revision();
+        assert_eq!(dom.remove_style_property(target, "position"), Ok(false));
+        assert_eq!(dom.revision(), removed_revision);
+        let Some(Element::Div { style }) = dom.element(target) else {
+            panic!("expected div element");
+        };
+        assert_eq!(style.position, styles::position::Position::Static);
     }
 
     #[test]
