@@ -338,4 +338,45 @@ mod tests {
             vec![window, negative, normal, auto, zero, first, inner, second]
         );
     }
+
+    #[test]
+    fn deeply_nested_fixed_contexts_do_not_overflow() {
+        const CHILD: &str = "BUROKKU_STACKING_OVERFLOW_TEST_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("deeply_nested_fixed_contexts_do_not_overflow")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "stacking child failed: {status}");
+            return;
+        }
+
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                const DEPTH: usize = 1_024;
+
+                let mut dom = Dom::new();
+                let window = element(&mut dom, ElementTag::Window);
+                dom.append_child(dom.root(), window).unwrap();
+                let mut parent = window;
+                for _ in 0..DEPTH {
+                    let fixed = element(&mut dom, ElementTag::Div);
+                    dom.set_style_property(fixed, "position", "fixed").unwrap();
+                    dom.append_child(parent, fixed).unwrap();
+                    parent = fixed;
+                }
+                let layout = computed(&dom);
+
+                assert_eq!(
+                    paint_order(&dom, layout.current().unwrap()).len(),
+                    DEPTH + 1
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
