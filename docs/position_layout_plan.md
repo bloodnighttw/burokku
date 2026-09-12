@@ -121,11 +121,16 @@ flattened static-position approximation after re-parenting. Supporting fully
 accurate CSS automatic static positions would require a placeholder or
 post-layout anchor and should be driven by a concrete use case.
 
+Stacking contexts currently cover the CSS triggers expressible by Burokku:
+the window root, fixed boxes, positioned boxes with an integer `z-index`, and
+static flex/grid items with an integer `z-index`. Other CSS triggers should be
+added with the styles that introduce them.
+
 ## Non-goals
 
 - mutating or duplicating the DOM tree;
 - sticky positioning;
-- stacking contexts or `z-index`;
+- stacking-context triggers for unsupported CSS properties;
 - CSS containing-block triggers such as transforms and filters;
 - adding a second layout tree implementation;
 - changing event propagation, text inheritance, or scene paint ordering.

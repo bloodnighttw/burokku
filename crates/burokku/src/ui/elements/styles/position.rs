@@ -20,10 +20,6 @@ impl Position {
             _ => None,
         }
     }
-
-    pub const fn is_out_of_flow(self) -> bool {
-        matches!(self, Self::Absolute | Self::Fixed)
-    }
 }
 
 impl From<Position> for TaffyPosition {

@@ -1,5 +1,7 @@
 //! Revision-tagged scene planning and Vello construction.
 
+mod stacking;
+
 use thiserror::Error;
 use vello_common::{
     kurbo::{Affine, Rect},
@@ -74,7 +76,7 @@ impl ScenePlan {
 
         let mut items = Vec::new();
         let mut hit_regions = Vec::new();
-        for node in paint_order(dom, computed) {
+        for node in stacking::paint_order(dom, computed) {
             let computed_box = computed
                 .box_for(node)
                 .expect("paint order contains computed layout boxes");
@@ -165,37 +167,6 @@ impl ScenePlan {
         }
         self.hit_test(logical_x as f32, logical_y as f32)
     }
-}
-
-fn paint_order(dom: &Dom, computed: &ComputedLayout) -> Vec<NodeId> {
-    let Some(root) = computed.window() else {
-        return Vec::new();
-    };
-    let mut order = Vec::with_capacity(computed.len());
-    let mut pending = vec![root];
-    while let Some(node) = pending.pop() {
-        order.push(node);
-        let children = computed
-            .layout_children(node)
-            .expect("computed layout topology contains every painted node");
-        for &child in children.iter().rev() {
-            if dom
-                .element(child)
-                .is_some_and(|element| element.position().is_out_of_flow())
-            {
-                pending.push(child);
-            }
-        }
-        for &child in children.iter().rev() {
-            if dom
-                .element(child)
-                .is_some_and(|element| !element.position().is_out_of_flow())
-            {
-                pending.push(child);
-            }
-        }
-    }
-    order
 }
 
 #[derive(Debug)]

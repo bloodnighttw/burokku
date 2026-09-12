@@ -67,6 +67,7 @@ impl Styles for CommonStyle {
         matches!(
             property,
             "position"
+                | "z-index"
                 | "top"
                 | "right"
                 | "bottom"
@@ -83,6 +84,10 @@ impl Styles for CommonStyle {
         match property {
             "position" => Position::parse(value).is_some_and(|value| {
                 self.position = value;
+                true
+            }),
+            "z-index" => ZIndex::parse(value).is_some_and(|value| {
+                self.z_index = value;
                 true
             }),
             "top" => parse_dimension(value).is_some_and(|value| {
@@ -134,6 +139,7 @@ impl Styles for CommonStyle {
         let defaults = Self::default();
         match property {
             "position" => self.position = defaults.position,
+            "z-index" => self.z_index = defaults.z_index,
             "top" => self.inset.top = defaults.inset.top,
             "right" => self.inset.right = defaults.inset.right,
             "bottom" => self.inset.bottom = defaults.inset.bottom,
